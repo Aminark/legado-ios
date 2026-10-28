@@ -45,4 +45,4 @@
 - 添加 IPA 自签安装说明、应用截图、开源许可与贡献指南。
 - 提供本地无签名模拟器构建与自动测试脚本。
 
-支持 iOS / iPadOS 15.0 及以上。暂不上架 App Store，也不提供 TestFlight。书源兼容仍在完善，复杂 JavaScript、登录、验证码和 WebView 规则可能存在平台差异。
+支持 iOS / iPadOS 15.0 及以上。安装方式与 TestFlight 公测入口见 [README](README.md#下载安装)。书源兼容仍在完善，复杂 JavaScript、登录、验证码和 WebView 规则可能存在平台差异。
