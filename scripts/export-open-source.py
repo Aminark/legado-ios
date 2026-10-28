@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT_ENTRIES = {
-    "App", "Sources", "Tests", "scripts", "docs", "Legado.xcodeproj",
+    "App", "Sources", "Tests", "Vendor", "scripts", "docs", "Legado.xcodeproj",
     ".github", ".gitignore", "Package.swift", "Package.resolved", "README.md",
     "LICENSE", "THIRD_PARTY_NOTICES.md", "CONTRIBUTING.md", "CHANGELOG.md",
 }

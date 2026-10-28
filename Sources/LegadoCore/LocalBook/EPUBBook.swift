@@ -107,11 +107,7 @@ struct EPUBBook {
         var configuration = BookReadConfig()
         configuration.useReplaceRule = false
         book.readConfig = configuration
-        let coverID = metadata?.descendants("meta").first { $0.attributes["name"] == "cover" }?.attributes["content"]
-        if let cover = manifest.first(where: { $0.properties.contains("cover-image") }) ?? manifest.first(where: { $0.id == coverID }),
-           ["image/jpeg", "image/png", "image/gif", "image/webp"].contains(cover.mediaType),
-           let entry = entries[cover.path], entry.uncompressedSize <= 2 * 1_024 * 1_024,
-           let data = try? read(cover.path), let thumbnail = Self.coverThumbnail(data) {
+        if let thumbnail = coverThumbnail() {
             // A bounded embedded thumbnail survives file renames, backups and cache eviction.
             book.coverUrl = "data:image/png;base64,\(thumbnail.base64EncodedString())"
         }
@@ -119,6 +115,31 @@ struct EPUBBook {
         book.totalChapterNum = chapters.count
         book.latestChapterTitle = chapters.last?.title
         return .init(book: book, chapters: chapters)
+    }
+
+    func coverThumbnail() -> Data? {
+        let metadata = package.children.first { $0.name == "metadata" }
+        let coverID = metadata?.descendants("meta").first { $0.attributes["name"] == "cover" }?.attributes["content"]
+        var paths = manifest.filter { $0.properties.contains("cover-image") }.map(\.path)
+        paths += manifest.filter { $0.id == coverID }.map(\.path)
+        // EPUB 2 guide references commonly point at an XHTML/SVG wrapper.
+        paths += package.descendants("reference").filter {
+            ($0.attributes["type"] ?? "").split(whereSeparator: \.isWhitespace).contains("cover")
+        }.compactMap { $0.attributes["href"].flatMap { Self.resolve($0, relativeTo: packagePath)?.path } }
+        if let first = spine.first { paths.append(first.path) }
+        var seen = Set<String>()
+        for path in paths where seen.insert(path).inserted {
+            guard let data = try? read(path) else { continue }
+            if let image = Self.coverThumbnail(data) { return image }
+            guard let doc = try? document(path), let images = try? doc.select("img, image").array() else { continue }
+            for image in images {
+                let href = ["src", "xlink:href", "href"].compactMap { try? image.attr($0) }.first { !$0.isEmpty }
+                guard let href, let resource = Self.resolve(href, relativeTo: path),
+                      let bytes = try? read(resource.path), let thumbnail = Self.coverThumbnail(bytes) else { continue }
+                return thumbnail
+            }
+        }
+        return nil
     }
 
     func chapters(book: Book) throws -> [BookChapter] {
@@ -296,7 +317,7 @@ struct EPUBBook {
     }
 
     private static func coverThumbnail(_ data: Data) -> Data? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceThumbnailMaxPixelSize: 512,

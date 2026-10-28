@@ -44,11 +44,10 @@ struct AboutView: View {
                 }
                 ReadingLabeledContent("许可证", value: "GPL-3.0")
                 ReadingLabeledContent("安装方式", value: "IPA 自行签名")
-                ReadingLabeledContent("App Store / TestFlight", value: "暂不提供")
             } header: {
                 Text("项目与开发者")
             } footer: {
-                Text("IPA 可从项目 GitHub Releases 获取，并自行签名安装。项目暂不上架 App Store，也不提供 TestFlight。")
+                Text("IPA 可从项目 GitHub Releases 获取，并自行签名安装。")
             }
             Section("开源许可") {
                 NavigationLink("开源许可") { OpenSourceLicensesView() }
@@ -80,6 +79,7 @@ private struct OpenSourceLicensesView: View {
             license("小浣熊阅读 / Legado", resource: "Legado-LICENSE", detail: "GNU GPL v3")
             license("SwiftSoup", resource: "SwiftSoup-LICENSE", detail: "MIT License")
             license("Kanna", resource: "Kanna-LICENSE", detail: "MIT License")
+            license("Readium 及其依赖", resource: "Readium-LICENSE", detail: "组件、依赖与字体许可证")
             license("ZIPFoundation", resource: "ZIPFoundation-LICENSE", detail: "MIT License")
         }.navigationTitle("开源许可").navigationBarTitleDisplayMode(.inline)
     }

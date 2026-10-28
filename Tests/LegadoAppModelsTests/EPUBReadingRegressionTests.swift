@@ -6,6 +6,32 @@ import LegadoCore
 
 @MainActor
 struct EPUBReadingRegressionTests {
+    @Test func epubLocatorSurvivesShelfReloadAndRename() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = try fixture(at: root)
+        let repository = InMemoryBookRepository()
+        let managed = root.appendingPathComponent("managed")
+        let library = BookLibraryModel(repository: repository, localDirectory: managed, chapterRepository: InMemoryBookChapterRepository())
+        await library.load()
+        await library.importLocalFiles([url])
+        let book = try #require(library.books.first)
+        let chapter = try #require(LocalBookService().loadChapters(book: book).chapters.last)
+        let locator = ##"{"href":"last.xhtml","type":"application/xhtml+xml","locations":{"progression":0.42,"cssSelector":"#paragraph-7"}}"##
+        await library.updateProgress(for: book, chapter: chapter, epubLocation: locator)
+        try await library.renameLocalFile(at: URL(string: book.bookUrl)!, to: "新名字")
+        let reloaded = BookLibraryModel(repository: repository, localDirectory: managed, chapterRepository: InMemoryBookChapterRepository())
+        await reloaded.load()
+        let saved = try #require(reloaded.books.first)
+        #expect(saved.readConfig?.epubLocation == locator)
+        #expect(saved.durChapterIndex == chapter.index)
+        #expect(saved.originName == "新名字.epub")
+        // Choosing the existing text reader intentionally replaces the EPUB location.
+        await reloaded.updateProgress(for: saved, chapter: chapter, position: 12)
+        #expect(reloaded.books.first?.readConfig?.epubLocation == nil)
+        #expect(reloaded.books.first?.durChapterPos == 12)
+    }
     private func fixture(at root: URL) throws -> URL {
         let url = root.appendingPathComponent("示例.epub")
         let archive = try Archive(url: url, accessMode: .create)

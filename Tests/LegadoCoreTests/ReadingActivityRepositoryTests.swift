@@ -3,6 +3,19 @@ import Testing
 @testable import LegadoCore
 
 struct ReadingActivityRepositoryTests {
+    @Test func epubBookmarkLocationRoundTripsThroughSQLite() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try LegadoDatabase(url: root.appendingPathComponent("library.sqlite3"))
+        let repository = SQLiteReadingActivityRepository(database: database)
+        var bookmark = Bookmark(time: 42, bookName: "EPUB", bookAuthor: "作者")
+        bookmark.epubLocation = #"{"href":"Text/第二章.xhtml","type":"application/xhtml+xml","locations":{"progression":0.6}}"#
+        bookmark.bookText = "原排版书签"
+        try await repository.saveBookmarks([bookmark])
+        #expect(try await repository.loadBookmarks() == [bookmark])
+        let legacy = try JSONDecoder().decode(Bookmark.self, from: Data(#"{"time":1,"bookName":"旧书"}"#.utf8))
+        #expect(legacy.epubLocation == nil)
+    }
     @Test func decodesAndEncodesBookmarkPosition() throws {
         let data = Data(#"{"time":7,"bookName":"书","bookAuthor":"作者","chapterIndex":2,"chapterPos":88,"chapterName":"第二章","bookText":"片段","content":"备注"}"#.utf8)
         let bookmark = try JSONDecoder().decode(Bookmark.self, from: data)

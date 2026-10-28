@@ -209,6 +209,7 @@ public struct ReadingStatistics: Hashable, Sendable {
 }
 
 public struct BookProgress: Codable, Hashable, Sendable {
+    public var epubLocation: String?
     public var name: String
     public var author: String
     public var durChapterIndex: Int
@@ -217,6 +218,7 @@ public struct BookProgress: Codable, Hashable, Sendable {
     public var durChapterTitle: String?
 
     public init(book: Book) {
+        epubLocation = book.readConfig?.epubLocation
         name = book.name
         author = book.author
         durChapterIndex = book.durChapterIndex

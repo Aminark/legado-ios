@@ -23,9 +23,17 @@
 
 ## ZIPFoundation
 
-- 项目：<https://github.com/weichsel/ZIPFoundation>，固定版本 `0.9.20`。
+- 项目：<https://github.com/weichsel/ZIPFoundation>，固定版本 `0.9.20`；iOS 工程使用 [Vendor/LegadoZIPFoundation](Vendor/LegadoZIPFoundation/README.md) 中的原版源码，避免与 Readium 的异步 ZIP 分支产生 SwiftPM 包标识冲突。
 - 用途：按需读取 EPUB ZIP 容器与校验资源 CRC。
 - 许可：MIT，完整版权及许可见 [ZIPFoundation-LICENSE.txt](App/Resources/ZIPFoundation-LICENSE.txt)。
+
+## Readium EPUB 阅读组件
+
+- 项目：<https://github.com/readium/swift-toolkit>，固定版本 `3.8.0`，兼容 iOS 15。
+- 用途：渲染 EPUB 的 XHTML/CSS、SVG、内嵌插图、表格、目录与阅读位置。
+- 许可：BSD-3-Clause。随 App 使用的 Zip、Readium Fuzi、Readium ZIPFoundation、CryptoSwift、DifferenceKit 的完整版权及许可一并收录在 [Readium-LICENSE.txt](App/Resources/Readium-LICENSE.txt)，可在 App「关于 → 开源许可」中查看。
+- 随阅读组件分发的 OpenDyslexic、iA Writer Duospace、AccessibleDfA 字体保留原始资源，版权及许可说明一并收录在上述许可文件中。
+- iOS 依赖版本和来源由 Xcode 工程内的 `Package.resolved` 锁定；未使用 Readium LCP 或云端解密服务。
 
 ## 测试数据与演示内容
 

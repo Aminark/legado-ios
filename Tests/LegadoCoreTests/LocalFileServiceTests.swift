@@ -25,6 +25,22 @@ struct LocalFileServiceTests {
         #expect(try Data(contentsOf: first) == Data(contentsOf: second))
     }
 
+    @Test func repeatedImportReservesNamesWithDifferentExtensionCase() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Book.TXT")
+        try "new book".write(to: source, atomically: true, encoding: .utf8)
+        let directory = root.appendingPathComponent("books", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for name in ["Book.TXT", "Book (2).txt"] {
+            try "existing book".write(to: directory.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        let result = try await LocalFileService(directory: directory).importFile(from: source)
+        #expect(result.lastPathComponent == "Book (3).TXT")
+        #expect(try String(contentsOf: directory.appendingPathComponent("Book (2).txt"), encoding: .utf8) == "existing book")
+        #expect(try String(contentsOf: result, encoding: .utf8) == "new book")
+    }
+
     @Test func rejectsEscapesSymlinksAndOverwriteDuringRename() async throws {
         let root = try root()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -51,10 +51,13 @@ public actor LocalFileService {
         let values = try source.resourceValues(forKeys: [.isRegularFileKey])
         guard values.isRegularFile == true else { throw LocalFileError.missingFile }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // File providers can preserve the extension's case differently between
+        // imports. Reserve names case-insensitively before asking Cocoa to copy.
+        let occupiedNames = Set(try FileManager.default.contentsOfDirectory(atPath: directory.path).map { $0.lowercased() })
         let stem = source.deletingPathExtension().lastPathComponent
         var target = directory.appendingPathComponent(source.lastPathComponent)
         var suffix = 2
-        while FileManager.default.fileExists(atPath: target.path) {
+        while occupiedNames.contains(target.lastPathComponent.lowercased()) || FileManager.default.fileExists(atPath: target.path) {
             target = directory.appendingPathComponent("\(stem) (\(suffix)).\(source.pathExtension)")
             suffix += 1
         }

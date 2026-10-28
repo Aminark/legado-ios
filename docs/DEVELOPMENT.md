@@ -103,7 +103,7 @@ source_release_tag=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[
 gh release download "$source_release_tag" --repo Aminark/legado-ios \
   --pattern '*.ipa' --dir "$source_update_dir"
 python3 scripts/update-altstore-source.py \
-  --ipa "$source_update_dir/legado-ios-v0.1.12-build18-unsigned.ipa" \
+  --ipa "$source_update_dir/legado-ios-v0.1.13-build19-unsigned.ipa" \
   --release "$source_update_dir/release.json"
 python3 -m unittest discover -s scripts/tests -v
 ```
@@ -118,4 +118,6 @@ python3 -m unittest discover -s scripts/tests -v
 
 `swift test --disable-sandbox --filter EPUB` 覆盖 EPUB 2/3 元数据、中文资源路径、同页锚点、无目录降级、书脊顺序、插图、损坏与加密文件、重命名导出、导入失败回滚和阅读进度恢复。样本均由测试自行生成，不依赖网络或第三方书籍。
 
-解析器按需读取 ZIP 资源，不解压到磁盘；单资源上限为 32 MiB，正文阅读不执行脚本或加载外部资源。字体混淆不影响文字阅读，加密正文会显示明确错误。原书 CSS、固定版式和交互内容不在当前重排阅读模式范围内。
+核心解析器按需读取 ZIP 资源，不解压到磁盘；单资源上限为 32 MiB。它用于导入、书架元数据和文字朗读。EPUB 原排版阅读由 Readium 3.8.0 的 Streamer / Navigator 处理，保留 XHTML、CSS、SVG 和内嵌插图；不接入 DRM 解密服务。原排版位置和书签使用 EPUB locator 保存，旧的文字进度仍兼容。
+
+`LegadoReaderTests/EPUBReaderIntegrationTests` 在 iOS 中实际渲染自造 EPUB，检查 SVG 封面、相对路径图片、外部 CSS、表格、目录跳转和字号变化后的续读。可通过 `xcodebuild -project Legado.xcodeproj -scheme LegadoReaderTests -destination 'platform=iOS Simulator,id=模拟器UUID' -only-testing:LegadoReaderTests/EPUBReaderIntegrationTests CODE_SIGNING_ALLOWED=NO test` 运行。真实书籍样例仅用于本机验证，不放进仓库。

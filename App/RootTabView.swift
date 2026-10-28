@@ -1868,6 +1868,8 @@ private struct BookmarkReaderDestination: View {
             return
         }
         var restored = book
+        if restored.readConfig == nil { restored.readConfig = BookReadConfig() }
+        restored.readConfig?.epubLocation = bookmark.epubLocation
         restored.durChapterIndex = target
         restored.durChapterPos = max(bookmark.chapterPosition, 0)
         restored.durChapterTitle = loaded[target].title

@@ -117,14 +117,14 @@ final class RuleEditorUITests: XCTestCase {
             json.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             XCTAssertFalse(open.exists && open.isEnabled, "JSON must not be selectable as a local book")
         }
-        txt.tap()
+        txt.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
         let uppercase = pickerFiles.matching(NSPredicate(format: "label BEGINSWITH %@", "TXT-Uppercase")).firstMatch
         XCTAssertTrue(uppercase.waitForExistence(timeout: 5))
-        uppercase.tap()
+        uppercase.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
         let epub = pickerFiles.matching(NSPredicate(format: "label BEGINSWITH %@", "EPUB-Book")).firstMatch
         XCTAssertTrue(epub.waitForExistence(timeout: 5))
         XCTAssertTrue(epub.isEnabled)
-        epub.tap()
+        epub.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
         XCTAssertTrue(open.waitForExistence(timeout: 5))
         XCTAssertTrue(open.isEnabled)
         attach(app, name: "TXT selectable and JSON excluded")
@@ -132,6 +132,7 @@ final class RuleEditorUITests: XCTestCase {
 
         if fromFileManagement {
             XCTAssertTrue(app.navigationBars["文件管理"].waitForExistence(timeout: 15))
+            XCTAssertFalse(app.alerts["文件操作失败"].waitForExistence(timeout: 3), app.debugDescription)
             app.tabBars.buttons["书架"].tap()
         } else {
             XCTAssertTrue(app.navigationBars["导入本地书"].waitForExistence(timeout: 15))
@@ -148,23 +149,16 @@ final class RuleEditorUITests: XCTestCase {
         XCTAssertTrue(epubBook.waitForExistence(timeout: 15))
         attach(app, name: "Local TXT and EPUB books imported onto shelf")
         epubBook.tap()
-        let reader = app.textViews["reader.text"]
-        XCTAssertTrue(reader.waitForExistence(timeout: 15))
-        XCTAssertTrue((reader.value as? String)?.contains("这是 EPUB 导入后的第一章正文") == true)
-        reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        app.buttons["更多"].firstMatch.tap()
-        app.buttons["本章插图"].tap()
-        XCTAssertTrue(app.navigationBars["本章插图"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.images["书籍插图"].waitForExistence(timeout: 10))
-        app.buttons["完成"].tap()
-        reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let reader = app.webViews.firstMatch
+        XCTAssertTrue(reader.waitForExistence(timeout: 20))
+        XCTAssertTrue(reader.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "这是 EPUB 导入后的第一章正文")).firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(reader.images["测试插图"].waitForExistence(timeout: 10))
+        attach(app, name: "EPUB original layout with inline illustration")
         app.buttons["目录"].tap()
-        app.staticTexts["第二章 EPUB"].firstMatch.tap()
-        let loaded = expectation(for: NSPredicate { _, _ in
-            (reader.value as? String)?.contains("目录锚点跳转成功") == true
-        }, evaluatedWith: nil)
-        wait(for: [loaded], timeout: 10)
-        attach(app, name: "EPUB second chapter after TOC navigation")
+        app.buttons["第二章 EPUB"].firstMatch.tap()
+        let secondChapter = reader.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "目录锚点跳转成功")).firstMatch
+        XCTAssertTrue(secondChapter.waitForExistence(timeout: 10))
+        attach(app, name: "EPUB original layout after TOC navigation")
     }
 
     func testJSONFilePickerOffersOpenAndImportsSelectedFiles() throws {

@@ -127,6 +127,12 @@
 		EB1000000000000000000001 /* EPUBBook.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB2000000000000000000001; };
 		EB1000000000000000000002 /* ZIPFoundation-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = EB2000000000000000000002; };
 		EB1000000000000000000003 /* EPUBIllustrationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB2000000000000000000003; };
+        F10000000000000000000004 /* ReadiumShared in Frameworks */ = {isa = PBXBuildFile; productRef = F20000000000000000000004; };
+        F10000000000000000000005 /* ReadiumStreamer in Frameworks */ = {isa = PBXBuildFile; productRef = F20000000000000000000005; };
+        F10000000000000000000006 /* ReadiumNavigator in Frameworks */ = {isa = PBXBuildFile; productRef = F20000000000000000000006; };
+        ED1000000000000000000001 /* EPUBReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000001; };
+        ED1000000000000000000002 /* Readium-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000002; };
+        ED1000000000000000000003 /* EPUBReaderIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000003; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -252,6 +258,9 @@
 		EB2000000000000000000001 /* EPUBBook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LegadoCore/LocalBook/EPUBBook.swift; sourceTree = SOURCE_ROOT; };
 		EB2000000000000000000002 /* ZIPFoundation-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = App/Resources/ZIPFoundation-LICENSE.txt; sourceTree = SOURCE_ROOT; };
 		EB2000000000000000000003 /* EPUBIllustrationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/Features/Reader/EPUBIllustrationsView.swift; sourceTree = SOURCE_ROOT; };
+        ED2000000000000000000001 /* EPUBReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EPUBReaderView.swift; sourceTree = "<group>"; };
+        ED2000000000000000000002 /* Readium-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Readium-LICENSE.txt"; sourceTree = "<group>"; };
+        ED2000000000000000000003 /* EPUBReaderIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/LegadoReaderTests/EPUBReaderIntegrationTests.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -264,6 +273,9 @@
 				F10000000000000000000001 /* SwiftSoup in Frameworks */,
 				F10000000000000000000002 /* Kanna in Frameworks */,
 				F10000000000000000000003 /* ZIPFoundation in Frameworks */,
+                F10000000000000000000006 /* ReadiumNavigator in Frameworks */,
+                F10000000000000000000005 /* ReadiumStreamer in Frameworks */,
+                F10000000000000000000004 /* ReadiumShared in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -283,7 +295,7 @@
 				AA2200000000000000000009,
 				AA2200000000000000000010,
 				B20000000000000000000030 /* ReaderScrollGeometryTests.swift */,
-				BC2000000000000000000001 /* WebReaderBridgeTests.swift */,
+				BC2000000000000000000001 /* WebReaderBridgeTests.swift */, ED2000000000000000000003 /* EPUBReaderIntegrationTests.swift */,
 				DA2000000000000000000001 /* DarkModeUITests.swift */,
 				DA2000000000000000000002 /* AppearanceContrastTests.swift */,
 				A30000000000000000000001 /* App */,
@@ -355,6 +367,7 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000009 /* ReaderView.swift */,
+                ED2000000000000000000001 /* EPUBReaderView.swift */,
 				A2000000000000000000002C /* ReaderViewModel.swift */,
 				A2000000000000000000002A /* ReaderTextView.swift */,
 				B20000000000000000000029 /* ReaderScrollView.swift */,
@@ -600,6 +613,7 @@
 				E20000000000000000000009 /* SwiftSoup-LICENSE.txt */,
 				E2000000000000000000000A /* Kanna-LICENSE.txt */,
 				EB2000000000000000000002 /* ZIPFoundation-LICENSE.txt */,
+                ED2000000000000000000002 /* Readium-LICENSE.txt */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -634,6 +648,9 @@
 				F20000000000000000000001 /* SwiftSoup */,
 				F20000000000000000000002 /* Kanna */,
 				F20000000000000000000003 /* ZIPFoundation */,
+                F20000000000000000000006 /* ReadiumNavigator */,
+                F20000000000000000000005 /* ReadiumStreamer */,
+                F20000000000000000000004 /* ReadiumShared */,
 			);
 			productName = Legado;
 			productReference = D20000000000000000000001 /* Legado.app */;
@@ -671,7 +688,8 @@
 			packageReferences = (
 				F30000000000000000000001 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
 				F30000000000000000000002 /* XCRemoteSwiftPackageReference "Kanna" */,
-				F30000000000000000000003 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
+				F30000000000000000000003 /* ZIPFoundation */,
+                F30000000000000000000004 /* Readium */,
 			);
 			productRefGroup = D40000000000000000000002 /* Products */;
 			projectDirPath = "";
@@ -691,6 +709,7 @@
 				A10000000000000000000020 /* Assets.xcassets in Resources */,
 				A1000000000000000000001D /* txtTocRule.json in Resources */,
 				EB1000000000000000000002 /* ZIPFoundation-LICENSE.txt in Resources */,
+                ED1000000000000000000002 /* Readium-LICENSE.txt in Resources */,
 				A1000000000000000000001E /* httpTTS.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -699,7 +718,7 @@
 
 /* Begin PBXSourcesBuildPhase section */
 		B30000000000000000000050 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000050, AA1100000000000000000009, AA1100000000000000000010, DA1000000000000000000001); runOnlyForDeploymentPostprocessing = 0; };
-		B30000000000000000000030 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000030, BC1000000000000000000001, DA1000000000000000000002); runOnlyForDeploymentPostprocessing = 0; };
+		B30000000000000000000030 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000030, BC1000000000000000000001, ED1000000000000000000003, DA1000000000000000000002); runOnlyForDeploymentPostprocessing = 0; };
 		D30000000000000000000002 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -727,6 +746,7 @@
 				B10000000000000000000027 /* BookshelfReadViewModel.swift in Sources */,
 				A10000000000000000000007 /* BookDetailView.swift in Sources */,
 				A10000000000000000000008 /* ReaderView.swift in Sources */,
+                ED1000000000000000000001 /* EPUBReaderView.swift in Sources */,
 				A10000000000000000000021 /* ReaderAppearance.swift in Sources */,
 				A10000000000000000000022 /* ReaderSpeechController.swift in Sources */,
 				A10000000000000000000023 /* ReaderTextView.swift in Sources */,
@@ -880,12 +900,12 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 19;
 				DEVELOPMENT_ASSET_PATHS = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.1.12;
+				MARKETING_VERSION = 0.1.13;
 				OTHER_LDFLAGS = "$(inherited) -lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.epiboly.legado;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -901,11 +921,11 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 19;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.1.12;
+				MARKETING_VERSION = 0.1.13;
 				OTHER_LDFLAGS = "$(inherited) -lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.epiboly.legado;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -935,6 +955,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+        F30000000000000000000003 /* ZIPFoundation */ = {
+            isa = XCLocalSwiftPackageReference;
+            relativePath = Vendor/LegadoZIPFoundation;
+        };
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		F30000000000000000000001 /* XCRemoteSwiftPackageReference "SwiftSoup" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -946,11 +973,12 @@
 			repositoryURL = "https://github.com/tid-kijyun/Kanna.git";
 			requirement = { kind = exactVersion; version = 6.1.0; };
 		};
-		F30000000000000000000003 /* XCRemoteSwiftPackageReference "ZIPFoundation" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/weichsel/ZIPFoundation.git";
-			requirement = { kind = exactVersion; version = 0.9.20; };
-		};
+
+		F30000000000000000000004 /* Readium */ = {
+            isa = XCRemoteSwiftPackageReference;
+            repositoryURL = "https://github.com/readium/swift-toolkit.git";
+            requirement = { kind = exactVersion; version = 3.8.0; };
+        };
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -966,9 +994,24 @@
 		};
 		F20000000000000000000003 /* ZIPFoundation */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = F30000000000000000000003 /* XCRemoteSwiftPackageReference "ZIPFoundation" */;
+			package = F30000000000000000000003 /* ZIPFoundation */;
 			productName = ZIPFoundation;
 		};
+        F20000000000000000000004 /* ReadiumShared */ = {
+            isa = XCSwiftPackageProductDependency;
+            package = F30000000000000000000004 /* Readium */;
+            productName = ReadiumShared;
+        };
+        F20000000000000000000005 /* ReadiumStreamer */ = {
+            isa = XCSwiftPackageProductDependency;
+            package = F30000000000000000000004 /* Readium */;
+            productName = ReadiumStreamer;
+        };
+        F20000000000000000000006 /* ReadiumNavigator */ = {
+            isa = XCSwiftPackageProductDependency;
+            package = F30000000000000000000004 /* Readium */;
+            productName = ReadiumNavigator;
+        };
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = D70000000000000000000001 /* Project object */;

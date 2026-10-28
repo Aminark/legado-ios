@@ -108,6 +108,12 @@ public struct LocalBookService: Sendable {
         url.isFileURL && ["txt", "epub"].contains(url.pathExtension.lowercased())
     }
 
+    public func loadCover(at url: URL) throws -> Data? {
+        guard url.isFileURL, url.pathExtension.lowercased() == "epub" else { return nil }
+        try validateFile(url)
+        return try EPUBBook(url: url).coverThumbnail()
+    }
+
     public func openFile(at url: URL) throws -> LocalBookImportReport {
         guard Self.supports(url) else { throw LocalBookError.unsupportedFormat }
         if url.pathExtension.lowercased() == "epub" {

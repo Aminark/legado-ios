@@ -112,6 +112,15 @@ final class BookLibraryModel: ObservableObject {
                 groups = [.init(groupId: BookGroup.idAll, groupName: "全部", order: 0)]
                 try await persistGroups()
             }
+            for book in books where book.origin == "local" && book.coverUrl?.isEmpty != false {
+                guard !Task.isCancelled, let url = URL(string: book.bookUrl),
+                      url.isFileURL, url.pathExtension.lowercased() == "epub" else { continue }
+                if let cover = try? await Task.detached(priority: .utility, operation: { [localService] in
+                    try localService.loadCover(at: url)
+                }).value {
+                    await restoreLocalCover(for: book, dataURL: "data:image/png;base64,\(cover.base64EncodedString())")
+                }
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -156,9 +165,11 @@ final class BookLibraryModel: ObservableObject {
         }
     }
 
-    func updateProgress(for book: Book, chapter: BookChapter, position: Int = 0) async {
+    func updateProgress(for book: Book, chapter: BookChapter, position: Int = 0, epubLocation: String? = nil) async {
         guard let index = books.firstIndex(where: { $0.bookUrl == book.bookUrl }) else {
             var reading = book
+            if epubLocation != nil, reading.readConfig == nil { reading.readConfig = BookReadConfig() }
+            reading.readConfig?.epubLocation = epubLocation
             reading.durChapterIndex = chapter.index
             reading.durChapterTitle = chapter.title
             reading.durChapterPos = max(position, 0)
@@ -168,6 +179,8 @@ final class BookLibraryModel: ObservableObject {
             return
         }
         var updated = books
+        if epubLocation != nil, updated[index].readConfig == nil { updated[index].readConfig = BookReadConfig() }
+        updated[index].readConfig?.epubLocation = epubLocation
         updated[index].durChapterIndex = chapter.index
         updated[index].durChapterTitle = chapter.title
         updated[index].durChapterPos = max(position, 0)
@@ -178,10 +191,20 @@ final class BookLibraryModel: ObservableObject {
     }
 
     private func applyProgress(_ progress: BookProgress, to book: inout Book) {
+        if progress.epubLocation != nil, book.readConfig == nil { book.readConfig = BookReadConfig() }
+        book.readConfig?.epubLocation = progress.epubLocation
         book.durChapterIndex = progress.durChapterIndex
         book.durChapterTitle = progress.durChapterTitle
         book.durChapterPos = progress.durChapterPos
         book.durChapterTime = progress.durChapterTime
+    }
+
+    func restoreLocalCover(for book: Book, dataURL: String) async {
+        guard let index = books.firstIndex(where: { $0.bookUrl == book.bookUrl }),
+              books[index].origin == "local", books[index].coverUrl?.isEmpty != false else { return }
+        var updated = books
+        updated[index].coverUrl = dataURL
+        await persist(updated)
     }
 
     private func persistPendingProgress() {

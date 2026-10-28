@@ -4,6 +4,25 @@ import ZIPFoundation
 @testable import LegadoCore
 
 struct EPUBBookTests {
+    @Test(arguments: [true, false]) func findsCoverInSVGWrappedTitlePageWithoutImageMetadata(guide: Bool) throws {
+        let url = try archive([
+            ("META-INF/container.xml", Data(#"<container><rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles></container>"#.utf8)),
+            ("OPS/book.opf", Data("""
+                <package><metadata><title>封面回归</title><meta name="cover" content="broken"/></metadata>
+                <manifest><item id="title" href="Text/cover.xhtml" media-type="application/xhtml+xml"/>
+                <item id="broken" href="missing.jpg" media-type="image/jpeg" properties="cover-image"/>
+                <item id="image" href="Images/封面.png" media-type="image/png"/></manifest>
+                <spine><itemref idref="title"/></spine>
+                \(guide ? "<guide><reference type=\"cover\" href=\"Text/cover.xhtml\"/></guide>" : "")</package>
+                """.utf8)),
+            ("OPS/Text/cover.xhtml", Data(#"<html><body><svg viewBox="0 0 100 140"><image xlink:href="../Images/封面.png"/></svg></body></html>"#.utf8)),
+            ("OPS/Images/封面.png", png)
+        ])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let report = try service.openFile(at: url)
+        #expect(report.book.coverUrl?.hasPrefix("data:image/png;base64,") == true)
+        #expect(try service.loadCover(at: url) != nil)
+    }
     private let service = LocalBookService()
     private let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAEAAAABgCAIAAAAip+O/AAABxklEQVR4nNXCA3YjAABF0becsW12bNdIGptt7Nq2bXeMjc06/j2XI8UG6RwtMUrnWGmtdI6XmaRzotwsnZMVFumcqrRK53SVTTpnqu3SOVvjkM45g1M6540u6VyodUvnoskjnUtmr3QuW3zSuWL1S+eqLSCda/agdK47QtK54QxL56arTjq33PXSue2JSOeONyqdu76YdO7549K5H0hI50EwKZ2HoZR0isJp6Tyqy0jncX1WOk8iOek8jeal8yxWkM7zeIN0XiQapfMy2SSdV6lm6bxOt0jnTaZVOm+zbdJ5l2uXzvt8h3Q+FDql87GhSzqfGrul87mpRzpfmnulU9zSJ52S1n7plLYNSKesfVA65R1D0qnoHJZOZdeIdKq6R6VT3TMmnZrecekY+iakY+yflE7twJR0TIPT0jEPzUjHMjwrHevInHRso/PSsY8tSMcxvigd58SSdFyTy9JxT61IxzO9Kh3vzJp0fLPr0vHPbUgnML8pneDClnRCi9vSCS/tSKdueVc69St70oms7ksnunYgndj6oXTiG1+lk9j8Jp3k1nfppLZ/SCe981M6md1f0snu/ZZObv+PdPIHf6VTOPwn/T/zbe3/96qaXAAAAABJRU5ErkJggg==")!
 

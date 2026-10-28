@@ -4,6 +4,7 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct ReaderView: View {
+    private var usesEPUBLayout = true
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -139,7 +140,8 @@ struct ReaderView: View {
         ))
     }
 
-    init(book: Book, chapters: [BookChapter], initialIndex: Int) {
+    init(book: Book, chapters: [BookChapter], initialIndex: Int, usesEPUBLayout: Bool = true) {
+        self.usesEPUBLayout = usesEPUBLayout
         _pageAnimation = State(initialValue: book.readConfig?.pageAnim.flatMap { $0 >= 0 ? $0 : nil }
             ?? Self.globalPageAnimation())
         _model = StateObject(wrappedValue: ReaderViewModel(
@@ -185,6 +187,14 @@ struct ReaderView: View {
 
 
     var body: some View {
+        if usesEPUBLayout, book.origin == "local", URL(string: book.bookUrl)?.pathExtension.lowercased() == "epub" {
+            EPUBReaderView(book: book, chapters: model.chapters, initialIndex: model.currentIndex)
+        } else {
+            textReaderBody
+        }
+    }
+
+    private var textReaderBody: some View {
         readerCanvas
         .preferredColorScheme(resolvedStyle.id == "night" ? .dark : .light)
         .readingTabBarHidden()

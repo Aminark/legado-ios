@@ -120,6 +120,8 @@ public struct Book: Codable, Hashable, Identifiable, Sendable {
 }
 
 public struct BookReadConfig: Codable, Hashable, Sendable {
+    /// Serialized EPUB locator, independent of the device's font size and pagination.
+    public var epubLocation: String?
     public var reverseToc = false
     public var pageAnim: Int?
     public var reSegment = false
@@ -142,11 +144,12 @@ public struct BookReadConfig: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case reverseToc, pageAnim, reSegment, imageStyle, useReplaceRule, delTag, ttsEngine
         case splitLongChapter, readSimulating, startDate, startChapter, dailyChapters
-        case openCredits, closeCredits, playMode, playSpeed
+        case openCredits, closeCredits, playMode, playSpeed, epubLocation
     }
 
     public init(from decoder: Decoder) throws {
         let value = try decoder.container(keyedBy: CodingKeys.self)
+        epubLocation = try value.decodeIfPresent(String.self, forKey: .epubLocation)
         reverseToc = try value.decodeIfPresent(Bool.self, forKey: .reverseToc) ?? false
         pageAnim = try value.decodeIfPresent(Int.self, forKey: .pageAnim)
         reSegment = try value.decodeIfPresent(Bool.self, forKey: .reSegment) ?? false
@@ -290,6 +293,7 @@ public struct BookChapter: Codable, Hashable, Identifiable, Sendable {
 }
 
 public struct Bookmark: Codable, Hashable, Identifiable, Sendable {
+    public var epubLocation: String?
     public var time: Int64
     public var bookName: String
     public var bookAuthor: String
@@ -314,7 +318,7 @@ public struct Bookmark: Codable, Hashable, Identifiable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case time, bookName, bookAuthor, chapterIndex, chapterPos, chapterPosition
-        case chapterName, bookText, content
+        case chapterName, bookText, content, epubLocation
     }
 
     public func resolvedChapterIndex(in chapters: [BookChapter]) -> Int? {
@@ -327,6 +331,7 @@ public struct Bookmark: Codable, Hashable, Identifiable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        epubLocation = try values.decodeIfPresent(String.self, forKey: .epubLocation)
         time = try values.decodeIfPresent(Int64.self, forKey: .time) ?? Int64(Date().timeIntervalSince1970 * 1_000)
         bookName = try values.decodeIfPresent(String.self, forKey: .bookName) ?? ""
         bookAuthor = try values.decodeIfPresent(String.self, forKey: .bookAuthor) ?? ""
@@ -341,6 +346,7 @@ public struct Bookmark: Codable, Hashable, Identifiable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encodeIfPresent(epubLocation, forKey: .epubLocation)
         try values.encode(time, forKey: .time)
         try values.encode(bookName, forKey: .bookName)
         try values.encode(bookAuthor, forKey: .bookAuthor)

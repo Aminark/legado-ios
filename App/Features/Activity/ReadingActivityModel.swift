@@ -71,7 +71,7 @@ final class ReadingActivityModel: ObservableObject {
             }
     }
 
-    func addBookmark(book: Book, chapter: BookChapter, position: Int, content: String) async {
+    func addBookmark(book: Book, chapter: BookChapter, position: Int, content: String, epubLocation: String? = nil) async {
         var timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
         while bookmarks.contains(where: { $0.time == timestamp }) { timestamp += 1 }
         var bookmark = Bookmark(time: timestamp, bookName: book.name, bookAuthor: book.author)
@@ -79,6 +79,7 @@ final class ReadingActivityModel: ObservableObject {
         bookmark.chapterPosition = max(position, 0)
         bookmark.chapterName = chapter.title
         bookmark.bookText = excerpt(content, around: position)
+        bookmark.epubLocation = epubLocation
         var updated = bookmarks
         updated.append(bookmark)
         do {
