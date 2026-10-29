@@ -107,7 +107,7 @@ source_release_tag=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[
 gh release download "$source_release_tag" --repo Aminark/legado-ios \
   --pattern '*.ipa' --dir "$source_update_dir"
 python3 scripts/update-altstore-source.py \
-  --ipa "$source_update_dir/legado-ios-v0.1.13-build19-unsigned.ipa" \
+  --ipa "$source_update_dir/legado-ios-v0.1.14-build20-unsigned.ipa" \
   --release "$source_update_dir/release.json"
 python3 -m unittest discover -s scripts/tests -v
 ```
