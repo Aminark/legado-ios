@@ -254,6 +254,9 @@ public struct NetworkBookService: Sendable {
             }
         }
 
+        if !queue.isEmpty, visited.count >= max(maxPages, 1) {
+            diagnostics.append(diagnostic(code: "toc.page_limit", message: "目录超过分页上限，未能完整加载，请调整书源分页规则。", rule: firstURL))
+        }
         if reverse { chapters.reverse() }
         var unique = Set<String>()
         chapters = chapters.filter { unique.insert($0.url).inserted }
@@ -359,6 +362,9 @@ public struct NetworkBookService: Sendable {
             }
         }
 
+        if !queue.isEmpty, visited.count >= max(maxPages, 1) {
+            diagnostics.append(diagnostic(code: "content.page_limit", message: "正文超过分页上限，未能完整加载，请调整书源分页规则。", rule: chapter.url))
+        }
         var content = contents.joined(separator: "\n")
         if let replacement = nonempty(rules.replaceRegex) {
             let replaced = await engine.evaluate(

@@ -81,6 +81,9 @@ public struct RSSService: Sendable {
             source: source,
             variables: response.requestVariables
         )
+        if let error = report.diagnostics.first(where: { $0.severity == .error }) {
+            throw RuleEngineError.malformedRule(rule: source.ruleArticles ?? "", detail: error.message)
+        }
         return .init(
             requestURL: prepared.url.absoluteString,
             finalURL: response.finalURL.absoluteString,

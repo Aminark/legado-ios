@@ -81,7 +81,7 @@ struct RSSHomeView: View {
                 ReadingUnavailableView("还没有RSS源", systemImage: "dot.radiowaves.left.and.right", description: Text("从文件、URL或剪贴板导入 RSS 源。"))
             }
             ForEach(filteredSources) { source in
-                NavigationLink { RSSSourceDestinationView(source: source) } label: {
+                NavigationLink { RSSSourceDestinationView(sourceURL: source.sourceUrl) } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack { Text(source.sourceName).font(.headline); Spacer(); if !source.enabled { Text("停用").font(.caption).foregroundStyle(.secondary) } }
                         Text(source.sourceUrl).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -199,14 +199,21 @@ private struct RSSArticleListView: View {
 }
 
 private struct RSSSourceDestinationView: View {
-    let source: RssSource
+    @EnvironmentObject private var library: RSSLibraryModel
+    let sourceURL: String
     var body: some View {
-        if source.singleUrl {
-            RSSStandaloneReaderView(source: source, mode: .web(url: source.sourceUrl))
-        } else if let mode = try? RSSStartPageResolver().resolve(source) {
-            RSSStandaloneReaderView(source: source, mode: mode)
+        // NavigationLink can retain its destination after a source is replaced
+        // by an import. Resolve current rules through the shared library.
+        if let source = library.sources.first(where: { $0.sourceUrl == sourceURL }) {
+            if source.singleUrl {
+                RSSStandaloneReaderView(source: source, mode: .web(url: source.sourceUrl))
+            } else if let mode = try? RSSStartPageResolver().resolve(source) {
+                RSSStandaloneReaderView(source: source, mode: mode)
+            } else {
+                RSSArticleListView(source: source)
+            }
         } else {
-            RSSArticleListView(source: source)
+            ReadingUnavailableView("订阅源已删除", systemImage: "newspaper")
         }
     }
 }
@@ -324,6 +331,7 @@ private struct RSSArticleDetailView: View {
     @State private var mode: RSSReadingMode?
     @State private var speechText = ""
     @State private var reloadID = UUID()
+    @State private var forceRefresh = false
     @StateObject private var speech = RSSSpeechController()
     @State private var nativeRoute: RSSNativeRoute?
 
@@ -351,7 +359,7 @@ private struct RSSArticleDetailView: View {
                     Button(speech.isSpeaking ? "停止朗读" : "朗读正文", systemImage: speech.isSpeaking ? "stop.fill" : "speaker.wave.2.fill") {
                         speech.isSpeaking ? speech.stop() : speech.speak(speechText)
                     }.disabled(speechText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("刷新", systemImage: "arrow.clockwise") { reloadID = UUID() }
+                    Button("刷新", systemImage: "arrow.clockwise") { forceRefresh = true; reloadID = UUID() }
                     if let url = URL(string: article.link) { Link("浏览器打开", destination: url) }
                     if source.loginUrl?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
                         NavigationLink { SourceLoginView(source: source.bookSourceAdapter) } label: { Label("源登录", systemImage: "person.badge.key") }
@@ -361,9 +369,14 @@ private struct RSSArticleDetailView: View {
                 }
             }
         }
-        .task(id: article.link) {
+        .task(id: "\(article.id):\(reloadID)") {
+            mode = nil
+            speechText = ""
+            speech.stop()
             await library.read(article)
-            mode = await library.readingMode(for: article, source: source)
+            let loaded = await library.readingMode(for: article, source: source, forceRefresh: forceRefresh)
+            guard !Task.isCancelled else { return }
+            mode = loaded
         }
         .sheet(item: $nativeRoute) { route in
             switch route {

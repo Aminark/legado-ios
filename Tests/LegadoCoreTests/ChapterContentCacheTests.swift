@@ -3,6 +3,41 @@ import Testing
 @testable import LegadoCore
 
 struct ChapterContentCacheTests {
+    @Test func failedPageDoesNotTurnPartialContentIntoSuccessfulCache() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let coordinator = ChapterContentCoordinator(loader: PartialChapterLoader(), cache: cache)
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapter = BookChapter(url: "chapter", title: "第一章", bookUrl: book.bookUrl, index: 0)
+        let source = BookSource(bookSourceUrl: "source", bookSourceName: "源")
+
+        let first = await coordinator.load(book: book, chapter: chapter, source: source)
+        let second = await coordinator.load(book: book, chapter: chapter, source: source)
+
+        #expect(first.report.content == "仅第一页")
+        #expect(!second.loadedFromCache)
+        #expect(second.report.diagnostics.contains { $0.severity == .error })
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url) == nil)
+    }
+
+    @Test func failedForceRefreshRetainsPreviouslyCompleteCache() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapter = BookChapter(url: "chapter", title: "第一章", bookUrl: book.bookUrl, index: 0)
+        try await cache.save(.init(bookURL: book.bookUrl, chapterURL: chapter.url, content: "完整正文", sourceID: book.origin))
+        let coordinator = ChapterContentCoordinator(loader: PartialChapterLoader(), cache: cache)
+
+        let refreshed = await coordinator.load(book: book, chapter: chapter,
+                                               source: .init(bookSourceUrl: "source", bookSourceName: "源"), forceRefresh: true)
+
+        #expect(!refreshed.loadedFromCache)
+        #expect(refreshed.report.diagnostics.contains { $0.severity == .error })
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url)?.content == "完整正文")
+    }
+
     @Test func savesLoadsAndSeparatesBooks() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -125,4 +160,10 @@ private actor StubChapterLoader: ChapterContentLoading {
     }
 
     func calls() -> Int { callCount }
+}
+
+private struct PartialChapterLoader: ChapterContentLoading {
+    func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
+        .init(content: "仅第一页", diagnostics: [.init(severity: .error, code: "content.request", message: "第二页加载失败", rule: chapter.url)])
+    }
 }

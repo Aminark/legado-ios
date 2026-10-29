@@ -13,6 +13,36 @@ private struct BookFlowMockTransport: HTTPTransport {
 }
 
 struct NetworkBookServiceTests {
+    @Test func reportsPaginationLimitInsteadOfSilentlyAcceptingTruncatedResults() async {
+        let base = "https://reader.example.test"
+        let transport = BookFlowMockTransport(pages: [
+            base + "/toc": "<li><a href='/chapter'>第一章</a></li><a class='next' href='/toc2'>下一页</a>",
+            base + "/chapter": "<article>第一页正文</article><a class='next' href='/chapter2'>下一页</a>"
+        ])
+        var source = BookSource(bookSourceUrl: base, bookSourceName: "分页源")
+        var toc = TocRule()
+        toc.chapterList = "@CSS:li"
+        toc.chapterName = "@CSS:a@text"
+        toc.chapterUrl = "@CSS:a@href"
+        toc.nextTocUrl = "@CSS:a.next@href"
+        source.ruleToc = toc
+        var content = ContentRule()
+        content.content = "@CSS:article@text"
+        content.nextContentUrl = "@CSS:a.next@href"
+        source.ruleContent = content
+        var book = Book(bookUrl: base + "/book", name: "书", origin: base)
+        book.tocUrl = base + "/toc"
+        let service = NetworkBookService(transport: transport)
+
+        let directory = await service.loadChapters(book: book, source: source, maxPages: 1)
+        #expect(directory.chapters.count == 1)
+        #expect(directory.diagnostics.contains { $0.severity == .error && $0.code == "toc.page_limit" })
+        let body = await service.loadContent(book: book,
+            chapter: .init(url: base + "/chapter", title: "第一章", bookUrl: book.bookUrl, index: 0), source: source, maxPages: 1)
+        #expect(body.content == "第一页正文")
+        #expect(body.diagnostics.contains { $0.severity == .error && $0.code == "content.page_limit" })
+    }
+
     @Test func loadsDetailPaginatedTocAndPaginatedContent() async throws {
         let transport = BookFlowMockTransport(pages: [
             "https://reader.example.test/book/1": """

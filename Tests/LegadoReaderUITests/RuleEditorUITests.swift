@@ -11,13 +11,19 @@ final class RuleEditorUITests: XCTestCase {
         app.launchArguments = ["-uiDemo", "-uiDemoTab", "rss", "-themeMode", "1"]
         app.launch()
         XCTAssertTrue(app.navigationBars["RSS"].waitForExistence(timeout: 20))
-        app.buttons["RSS操作"].tap()
-        app.buttons["URL或粘贴JSON"].tap()
-        let editor = app.textViews.firstMatch
-        XCTAssertTrue(editor.waitForExistence(timeout: 5))
-        editor.tap()
-        editor.typeText(fixture)
-        app.navigationBars["导入RSS源"].buttons["导入"].tap()
+        // Replace an existing source in this launch, so a cached navigation
+        // destination cannot silently keep using the previous content rules.
+        for url in [fixture + "?legacy=1", fixture] {
+            app.buttons["RSS操作"].tap()
+            app.buttons["URL或粘贴JSON"].tap()
+            let editor = app.textViews.firstMatch
+            XCTAssertTrue(editor.waitForExistence(timeout: 5))
+            editor.tap()
+            editor.typeText(url)
+            app.navigationBars["导入RSS源"].buttons["导入"].tap()
+            let dismissed = expectation(for: NSPredicate { _, _ in !app.navigationBars["导入RSS源"].exists }, evaluatedWith: nil)
+            wait(for: [dismissed], timeout: 10)
+        }
         let source = app.staticTexts["RSS 全流程测试"]
         XCTAssertTrue(source.waitForExistence(timeout: 10))
         source.tap()
@@ -36,6 +42,10 @@ final class RuleEditorUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["搜索结果 needle 第2页"].waitForExistence(timeout: 10))
         result.tap()
         XCTAssertTrue(app.navigationBars["文章"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.webViews.staticTexts["第1次加载的订阅正文"].waitForExistence(timeout: 10))
+        app.buttons["阅读操作"].tap()
+        app.buttons["刷新"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["第2次加载的订阅正文"].waitForExistence(timeout: 10))
         if app.buttons["取消收藏"].exists { app.buttons["取消收藏"].tap() }
         XCTAssertTrue(app.buttons["收藏"].waitForExistence(timeout: 5))
         app.buttons["收藏"].tap()

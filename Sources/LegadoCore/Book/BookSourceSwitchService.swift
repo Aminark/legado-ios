@@ -208,7 +208,8 @@ public actor BookSourceSwitchService {
         let detail = await detailLoader.loadDetail(searchBook: candidate, source: source)
         guard !Task.isCancelled else { return nil }
         let toc = await chapterLoader.loadChapters(book: detail.book, source: source, maxPages: 20)
-        guard !Task.isCancelled, toc.chapters.contains(where: { !$0.isVolume }) else { return nil }
+        guard !Task.isCancelled, toc.chapters.contains(where: { !$0.isVolume }),
+              !toc.diagnostics.contains(where: { $0.severity == .error }) else { return nil }
         var result = mapper.migrate(
             current: current,
             replacement: detail.book,
@@ -232,7 +233,8 @@ public actor BookSourceSwitchService {
             nextChapterURL: nextURL, maxPages: 20
         )
         guard !Task.isCancelled,
-              !content.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+              !content.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !content.diagnostics.contains(where: { $0.severity == .error }) else { return nil }
         result.verifiedContent = content
         result.diagnostics += content.diagnostics
         do {

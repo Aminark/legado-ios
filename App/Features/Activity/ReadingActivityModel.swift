@@ -1,4 +1,8 @@
 import Foundation
+import Combine
+#if SWIFT_PACKAGE
+import LegadoCore
+#endif
 
 @MainActor
 final class ReadingActivityModel: ObservableObject {
@@ -10,6 +14,12 @@ final class ReadingActivityModel: ObservableObject {
     private let service = ReadingActivityService()
     private let deviceID: String
     private var sessions: [String: Date] = [:]
+    private var bookmarkSaveTask: Task<Void, Never>?
+    private var bookmarkSaveGeneration = 0
+    private var persistedBookmarks: [Bookmark] = []
+    private var recordSaveTask: Task<Void, Never>?
+    private var recordSaveGeneration = 0
+    private var persistedRecords: [ReadRecord] = []
 
     init(repository: any ReadingActivityRepository, deviceID: String) {
         self.repository = repository
@@ -53,11 +63,21 @@ final class ReadingActivityModel: ObservableObject {
     }
 
     func load() async {
+        let bookmarkGeneration = bookmarkSaveGeneration
+        let recordGeneration = recordSaveGeneration
         do {
             async let storedBookmarks = repository.loadBookmarks()
             async let storedRecords = repository.loadReadRecords()
-            bookmarks = service.sortedBookmarks(try await storedBookmarks)
-            readRecords = try await storedRecords
+            let loadedBookmarks = try await storedBookmarks
+            let loadedRecords = try await storedRecords
+            if bookmarkGeneration == bookmarkSaveGeneration, bookmarkSaveTask == nil {
+                bookmarks = service.sortedBookmarks(loadedBookmarks)
+                persistedBookmarks = bookmarks
+            }
+            if recordGeneration == recordSaveGeneration, recordSaveTask == nil {
+                readRecords = loadedRecords
+                persistedRecords = loadedRecords
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -82,22 +102,12 @@ final class ReadingActivityModel: ObservableObject {
         bookmark.epubLocation = epubLocation
         var updated = bookmarks
         updated.append(bookmark)
-        do {
-            try await repository.saveBookmarks(updated)
-            bookmarks = service.sortedBookmarks(updated)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await persistBookmarks(updated)
     }
 
     func removeBookmark(_ bookmark: Bookmark) async {
         let updated = bookmarks.filter { $0.id != bookmark.id }
-        do {
-            try await repository.saveBookmarks(updated)
-            bookmarks = updated
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await persistBookmarks(updated)
     }
 
     func updateBookmark(_ bookmark: Bookmark) async {
@@ -107,12 +117,7 @@ final class ReadingActivityModel: ObservableObject {
         } else {
             updated.append(bookmark)
         }
-        do {
-            try await repository.saveBookmarks(updated)
-            bookmarks = service.sortedBookmarks(updated)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await persistBookmarks(updated)
     }
 
     func beginReading(_ book: Book, now: Date = Date()) {
@@ -139,21 +144,11 @@ final class ReadingActivityModel: ObservableObject {
 
     func removeHistory(bookName: String) async {
         let updated = readRecords.filter { $0.bookName != bookName }
-        do {
-            try await repository.saveReadRecords(updated)
-            readRecords = updated
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await persistRecords(updated)
     }
 
     func clearHistory() async {
-        do {
-            try await repository.saveReadRecords([])
-            readRecords = []
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await persistRecords([])
     }
 
     func clearError() { errorMessage = nil }
@@ -168,12 +163,53 @@ final class ReadingActivityModel: ObservableObject {
             now: Int64(now.timeIntervalSince1970 * 1_000),
             to: readRecords
         )
-        readRecords = updated
-        do {
-            try await repository.saveReadRecords(updated)
-        } catch {
-            errorMessage = error.localizedDescription
+        // Keep elapsed time in memory after a failed checkpoint so the next
+        // successful checkpoint can retry it instead of silently losing time.
+        await persistRecords(updated, preserveOnFailure: true)
+    }
+
+    // Publish each change before suspension, and serialize full-snapshot writes
+    // so rapid edits cannot overwrite one another or resurrect deleted history.
+    private func persistBookmarks(_ updated: [Bookmark]) async {
+        bookmarks = service.sortedBookmarks(updated)
+        bookmarkSaveGeneration &+= 1
+        let generation = bookmarkSaveGeneration
+        let previous = bookmarkSaveTask
+        let save = Task { @MainActor [weak self, repository] in
+            await previous?.value
+            do {
+                try await repository.saveBookmarks(updated)
+                self?.persistedBookmarks = updated
+            } catch {
+                guard let self else { return }
+                if bookmarkSaveGeneration == generation { bookmarks = service.sortedBookmarks(persistedBookmarks) }
+                errorMessage = error.localizedDescription
+            }
         }
+        bookmarkSaveTask = save
+        await save.value
+        if bookmarkSaveGeneration == generation { bookmarkSaveTask = nil }
+    }
+
+    private func persistRecords(_ updated: [ReadRecord], preserveOnFailure: Bool = false) async {
+        readRecords = updated
+        recordSaveGeneration &+= 1
+        let generation = recordSaveGeneration
+        let previous = recordSaveTask
+        let save = Task { @MainActor [weak self, repository] in
+            await previous?.value
+            do {
+                try await repository.saveReadRecords(updated)
+                self?.persistedRecords = updated
+            } catch {
+                guard let self else { return }
+                if recordSaveGeneration == generation, !preserveOnFailure { readRecords = persistedRecords }
+                errorMessage = error.localizedDescription
+            }
+        }
+        recordSaveTask = save
+        await save.value
+        if recordSaveGeneration == generation { recordSaveTask = nil }
     }
 
     private func excerpt(_ content: String, around position: Int) -> String {

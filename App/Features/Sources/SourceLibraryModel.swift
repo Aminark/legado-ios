@@ -80,6 +80,9 @@ final class SourceLibraryModel: ObservableObject {
     private let repository: any BookSourceRepository
     private let importer = BookSourceImporter()
     private let importTransport: any HTTPTransport
+    private var saveTask: Task<Result<Void, Error>, Never>?
+    private var saveGeneration = 0
+    private var persistedSources: [BookSource] = []
 
     var groups: [String] {
         Array(Set(sources.flatMap(\.groups))).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
@@ -110,6 +113,7 @@ final class SourceLibraryModel: ObservableObject {
         defer { isWorking = false }
         do {
             sources = try await repository.load()
+            persistedSources = sources
         } catch {
             notice = .init(kind: .error, title: "无法读取书源", detail: error.localizedDescription)
         }
@@ -134,8 +138,7 @@ final class SourceLibraryModel: ObservableObject {
                 replaced += result.replaced
                 warnings += result.warnings.count
             }
-            try await repository.save(combined)
-            sources = combined
+            try await saveSources(combined)
             notice = .init(
                 kind: .success,
                 title: "书源导入完成",
@@ -193,8 +196,7 @@ final class SourceLibraryModel: ObservableObject {
                 updated[index] = source
             } else { updated.append(source) }
         }
-        try await repository.save(updated)
-        sources = updated
+        try await saveSources(updated)
     }
 
     func previewFiles(_ urls: [URL]) async {
@@ -315,8 +317,7 @@ final class SourceLibraryModel: ObservableObject {
             }
         }
         do {
-            try await repository.save(updated)
-            sources = updated
+            try await saveSources(updated)
             self.pendingImport = nil
             notice = .init(
                 kind: .success,
@@ -415,8 +416,7 @@ final class SourceLibraryModel: ObservableObject {
     @discardableResult
     private func persist(_ updated: [BookSource], successTitle: String?) async -> Bool {
         do {
-            try await repository.save(updated)
-            sources = updated
+            try await saveSources(updated)
             if let successTitle {
                 notice = .init(kind: .success, title: successTitle, detail: "")
             }
@@ -431,13 +431,34 @@ final class SourceLibraryModel: ObservableObject {
         let result = try await Task.detached(priority: .userInitiated) { [importer, existing = sources] in
             try importer.prepare(data: data, existing: existing, duplicatePolicy: .replace)
         }.value
-        try await repository.save(result.sources)
-        sources = result.sources
+        try await saveSources(result.sources)
         notice = .init(
             kind: .success,
             title: successTitle,
             detail: "新增 \(result.inserted) 个，覆盖 \(result.replaced) 个，警告 \(result.warnings.count) 条"
         )
+    }
+
+    private func saveSources(_ updated: [BookSource]) async throws {
+        sources = updated
+        saveGeneration &+= 1
+        let generation = saveGeneration
+        let previousSave = saveTask
+        let task = Task { @MainActor [weak self, repository] () -> Result<Void, Error> in
+            _ = await previousSave?.value
+            do {
+                try await repository.save(updated)
+                self?.persistedSources = updated
+                return .success(())
+            } catch {
+                if let self, saveGeneration == generation { sources = persistedSources }
+                return .failure(error)
+            }
+        }
+        saveTask = task
+        let result = await task.value
+        if saveGeneration == generation { saveTask = nil }
+        try result.get()
     }
 
     private nonisolated func validatedSources(from data: Data) throws -> (

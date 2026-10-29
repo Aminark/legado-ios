@@ -2,6 +2,24 @@ import Testing
 @testable import LegadoCore
 
 struct BookSourceSwitchServiceTests {
+    @Test(arguments: [false, true]) func refusesPartiallyLoadedDirectoryOrBody(directoryFailed: Bool) async {
+        let repository = InMemoryBookChapterRepository()
+        let diagnostic = RuleDiagnostic(severity: .error, code: "request.failed", message: "分页加载失败", rule: "next")
+        let loader = StubSwitchLoader(
+            chapters: [BookChapter(url: "chapter", title: "第一章", bookUrl: "new", index: 0)],
+            diagnostics: directoryFailed ? [diagnostic] : []
+        )
+        let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader,
+                                              contentLoader: SwitchContentLoader(diagnostics: directoryFailed ? [] : [diagnostic]),
+                                              chapterRepository: repository)
+        let report = await service.prepareSwitch(current: Book(bookUrl: "old", name: "书", origin: "old"),
+            candidate: SearchBook(bookURL: "new", origin: "new", originName: "新源", type: 0, name: "书"),
+            source: BookSource(bookSourceUrl: "new", bookSourceName: "新源"))
+
+        #expect(report == nil)
+        #expect(await repository.load(bookURL: "new").isEmpty)
+    }
+
     @Test(.timeLimit(.minutes(1))) func automaticRecoveryUsesEarlyValidSourceWithoutWaitingForSlowSources() async throws {
         let (stream, continuation) = AsyncStream.makeStream(of: SourceSearchOutcome.self)
         defer { continuation.finish() }
@@ -220,8 +238,9 @@ struct BookSourceSwitchServiceTests {
 
 private struct SwitchContentLoader: ChapterContentLoading {
     var body = "验证后的正文"
+    var diagnostics: [RuleDiagnostic] = []
     func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
-        .init(content: source.id == "broken-body" ? "" : body)
+        .init(content: source.id == "broken-body" ? "" : body, diagnostics: diagnostics)
     }
 }
 
@@ -250,11 +269,12 @@ private struct StubSwitchSearch: BookSourceSearching {
 
 private struct StubSwitchLoader: BookDetailLoading, ChapterListLoading {
     let chapters: [BookChapter]
+    var diagnostics: [RuleDiagnostic] = []
     func loadDetail(searchBook: SearchBook, source: BookSource) async -> BookDetailReport {
         .init(book: Book(bookUrl: searchBook.bookURL, name: searchBook.name, author: searchBook.author, origin: source.bookSourceUrl))
     }
     func loadChapters(book: Book, source: BookSource, maxPages: Int) async -> ChapterListReport {
-        .init(chapters: chapters)
+        .init(chapters: chapters, diagnostics: diagnostics)
     }
 }
 

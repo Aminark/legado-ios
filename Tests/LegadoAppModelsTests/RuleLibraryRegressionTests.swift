@@ -25,6 +25,49 @@ private actor ImportFixtureTransport: HTTPTransport {
 
 @MainActor
 struct RuleLibraryRegressionTests {
+    @Test func overlappingSourceTogglesKeepBothChanges() async {
+        let sources = ["a", "b"].map { BookSource(bookSourceUrl: "https://\($0).test", bookSourceName: $0) }
+        let repository = SuspendedSourceRepository(sources: sources)
+        let model = SourceLibraryModel(repository: repository)
+        await model.load()
+        let first = Task { await model.setEnabled(false, for: sources[0].id) }
+        await repository.waitForSave()
+        var secondStarted = false
+        let second = Task {
+            secondStarted = true
+            await model.setExploreEnabled(false, for: sources[1].id)
+        }
+        while !secondStarted { await Task.yield() }
+        await repository.finishSave()
+        await first.value
+        await second.value
+
+        #expect(model.sources[0].enabled == false)
+        #expect(model.sources[1].enabledExplore == false)
+        #expect(await repository.load() == model.sources)
+    }
+
+    @Test func overlappingPurificationTogglesKeepBothChanges() async {
+        let rules = (1...2).map { ReplaceRule(id: Int64($0), name: "规则\($0)", pattern: "广告") }
+        let repository = SuspendedReplaceRepository(rules: rules)
+        let model = ReplaceRuleLibraryModel(repository: repository)
+        await model.load()
+        let first = Task { await model.setEnabled(false, for: rules[0].id) }
+        await repository.waitForSave()
+        var secondStarted = false
+        let second = Task {
+            secondStarted = true
+            await model.setEnabled(false, for: rules[1].id)
+        }
+        while !secondStarted { await Task.yield() }
+        await repository.finishSave()
+        await first.value
+        await second.value
+
+        #expect(model.rules.allSatisfy { !$0.isEnabled })
+        #expect(await repository.load() == model.rules)
+    }
+
     @Test func pickedJSONFilesAreReadTogetherAndReviewedBeforeImport() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -198,4 +241,38 @@ struct RuleLibraryRegressionTests {
         #expect(model.rules.map(\.sortOrder) == [0, 1])
         #expect(await repository.load() == model.rules)
     }
+}
+
+private actor SuspendedSourceRepository: BookSourceRepository {
+    private var sources: [BookSource]
+    private var started = false
+    private var pending: CheckedContinuation<Void, Never>?
+    init(sources: [BookSource]) { self.sources = sources }
+    func load() -> [BookSource] { sources }
+    func save(_ sources: [BookSource]) async {
+        if !started {
+            started = true
+            await withCheckedContinuation { pending = $0 }
+        }
+        self.sources = sources
+    }
+    func waitForSave() async { while !started { await Task.yield() } }
+    func finishSave() { pending?.resume(); pending = nil }
+}
+
+private actor SuspendedReplaceRepository: ReplaceRuleRepository {
+    private var rules: [ReplaceRule]
+    private var started = false
+    private var pending: CheckedContinuation<Void, Never>?
+    init(rules: [ReplaceRule]) { self.rules = rules }
+    func load() -> [ReplaceRule] { rules }
+    func save(_ rules: [ReplaceRule]) async {
+        if !started {
+            started = true
+            await withCheckedContinuation { pending = $0 }
+        }
+        self.rules = rules
+    }
+    func waitForSave() async { while !started { await Task.yield() } }
+    func finishSave() { pending?.resume(); pending = nil }
 }

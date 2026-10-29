@@ -108,7 +108,8 @@ public actor BookUpdateCoordinator {
     public func refresh(book: Book, source: BookSource, now: Int64? = nil, maxPages: Int = 20) async -> BookUpdateReport {
         let old = (try? await repository.load(bookURL: book.bookUrl)) ?? []
         let loaded = await loader.loadChapters(book: book, source: source, maxPages: maxPages)
-        guard !loaded.chapters.isEmpty else {
+        guard !Task.isCancelled, !loaded.chapters.isEmpty,
+              !loaded.diagnostics.contains(where: { $0.severity == .error }) else {
             return .init(
                 book: book,
                 chapters: old,

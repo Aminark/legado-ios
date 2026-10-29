@@ -385,6 +385,29 @@ struct SourceNetworkPolicyTests {
         #expect(await transport.requestCount() == 1)
     }
 
+    @Test func httpTTSCacheSeparatesEnginesAndInvalidatesEditedVoiceConfiguration() async throws {
+        let url = try #require(URL(string: "https://tts.example/shared"))
+        let transport = RecordingPolicyTransport(results: ["first", "second", "edited"].map {
+            .success(.init(data: Data($0.utf8), statusCode: 200, headers: ["Content-Type": "audio/mpeg"], finalURL: url))
+        })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = HttpTTSService(networkPolicy: .init(), transport: transport, cache: .init(directory: directory))
+        var engine = HttpTTS(id: 1, name: "声音一", url: url.absoluteString)
+        engine.header = #"{"X-Voice":"first"}"#
+        let first = try await service.audio(engine: engine, text: "相同正文", speechRate: 5)
+        engine.id = 2
+        let second = try await service.audio(engine: engine, text: "相同正文", speechRate: 5)
+        engine.header = #"{"X-Voice":"edited"}"#
+        let edited = try await service.audio(engine: engine, text: "相同正文", speechRate: 5)
+        let cached = try await service.audio(engine: engine, text: "相同正文", speechRate: 5)
+        #expect(first.data == Data("first".utf8))
+        #expect(second.data == Data("second".utf8))
+        #expect(edited.data == Data("edited".utf8))
+        #expect(cached.data == edited.data)
+        #expect(await transport.requests().count == 3)
+    }
+
     @Test func httpTTSDecodesDefaultsWithMissingFieldsAndLoginUIArray() throws {
         let data = Data(#"{"id":-100,"name":"百度","url":"https://tts.example","loginUi":[{"name":"token","type":"text"}]}"#.utf8)
         let value = try JSONDecoder().decode(HttpTTS.self, from: data)

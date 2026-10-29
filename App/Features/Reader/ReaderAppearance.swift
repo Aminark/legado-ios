@@ -104,22 +104,27 @@ enum ReaderFontStore {
     static func install(from source: URL) throws -> String {
         let accessing = source.startAccessingSecurityScopedResource()
         defer { if accessing { source.stopAccessingSecurityScopedResource() } }
+        let data = try Data(contentsOf: source)
+        guard let provider = CGDataProvider(data: data as CFData),
+              font(provider: provider, size: 20, weight: 0) != nil else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let target = directory.appendingPathComponent(source.lastPathComponent)
         if target != source {
-            try? FileManager.default.removeItem(at: target)
-            try FileManager.default.copyItem(at: source, to: target)
-        }
-        guard font(at: target.path, size: 20, weight: 0) != nil else {
-            throw CocoaError(.fileReadCorruptFile)
+            try data.write(to: target, options: .atomic)
         }
         return target.path
     }
 
     static func font(at path: String, size: CGFloat, weight: Int) -> UIFont? {
         guard !path.isEmpty,
-              let provider = CGDataProvider(url: URL(fileURLWithPath: path) as CFURL),
-              let graphicsFont = CGFont(provider) else { return nil }
+              let provider = CGDataProvider(url: URL(fileURLWithPath: path) as CFURL) else { return nil }
+        return font(provider: provider, size: size, weight: weight)
+    }
+
+    private static func font(provider: CGDataProvider, size: CGFloat, weight: Int) -> UIFont? {
+        guard let graphicsFont = CGFont(provider) else { return nil }
         CTFontManagerRegisterGraphicsFont(graphicsFont, nil)
         guard let postScriptName = graphicsFont.postScriptName else { return nil }
         let name = postScriptName as String

@@ -49,6 +49,7 @@
 		A10000000000000000000019 /* RSSSourceDebugView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* RSSSourceDebugView.swift */; };
 		A1000000000000000000001A /* RSSAddBookView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000021 /* RSSAddBookView.swift */; };
 		A1000000000000000000001B /* RuleSubscriptionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000022 /* RuleSubscriptionView.swift */; };
+		F91000000000000000000001 /* RuleSubscriptionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F92000000000000000000001 /* RuleSubscriptionModel.swift */; };
 		A1000000000000000000001C /* TxtTocRuleManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000023 /* TxtTocRuleManagementView.swift */; };
 		A1000000000000000000001D /* txtTocRule.json in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000024 /* txtTocRule.json */; };
 		A1000000000000000000001E /* httpTTS.json in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000025 /* httpTTS.json */; };
@@ -179,6 +180,7 @@
 		A20000000000000000000020 /* RSSSourceDebugView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RSSSourceDebugView.swift; sourceTree = "<group>"; };
 		A20000000000000000000021 /* RSSAddBookView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RSSAddBookView.swift; sourceTree = "<group>"; };
 		A20000000000000000000022 /* RuleSubscriptionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSubscriptionView.swift; sourceTree = "<group>"; };
+		F92000000000000000000001 /* RuleSubscriptionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSubscriptionModel.swift; sourceTree = "<group>"; };
 		A20000000000000000000023 /* TxtTocRuleManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxtTocRuleManagementView.swift; sourceTree = "<group>"; };
 		A20000000000000000000024 /* txtTocRule.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = txtTocRule.json; path = App/Resources/txtTocRule.json; sourceTree = "<group>"; };
 		A20000000000000000000025 /* httpTTS.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = httpTTS.json; path = App/Resources/httpTTS.json; sourceTree = "<group>"; };
@@ -393,6 +395,7 @@
 				A20000000000000000000010 /* ReplaceRuleLibraryModel.swift */,
 				A20000000000000000000011 /* ReplaceRuleManagementView.swift */,
 				A20000000000000000000022 /* RuleSubscriptionView.swift */,
+				F92000000000000000000001 /* RuleSubscriptionModel.swift */,
 				A20000000000000000000023 /* TxtTocRuleManagementView.swift */,
 			);
 			path = Features/Rules;
@@ -778,6 +781,7 @@
 				A10000000000000000000019 /* RSSSourceDebugView.swift in Sources */,
 				A1000000000000000000001A /* RSSAddBookView.swift in Sources */,
 				A1000000000000000000001B /* RuleSubscriptionView.swift in Sources */,
+				F91000000000000000000001 /* RuleSubscriptionModel.swift in Sources */,
 				A1000000000000000000001C /* TxtTocRuleManagementView.swift in Sources */,
 				A1000000000000000000001F /* HttpTTSManagementView.swift in Sources */,
 				C10000000000000000000001 /* BookSource.swift in Sources */,

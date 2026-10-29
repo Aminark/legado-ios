@@ -8,12 +8,15 @@ BASE_URL = "http://127.0.0.1:18763"
 
 
 class Fixture(http.server.BaseHTTPRequestHandler):
+    article_reads = {}
+
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
         query = urllib.parse.parse_qs(parsed.query)
         key = query.get("key", [""])[0]
         page = query.get("page", ["1"])[0]
         if parsed.path == "/source.json":
+            self.article_reads.clear()
             payload = {
                 "sourceUrl": BASE_URL,
                 "sourceName": "RSS 全流程测试",
@@ -22,9 +25,16 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                 "ruleArticles": "$.items",
                 "ruleTitle": "$.title",
                 "ruleLink": "$.link",
-                "ruleDescription": "$.description",
+                "ruleContent": "$.content",
                 "ruleNextPage": "PAGE",
             }
+            if query.get("legacy"):
+                payload.pop("ruleContent")
+                payload["ruleDescription"] = "$.description"
+        elif parsed.path.startswith("/article/"):
+            count = self.article_reads.get(parsed.path, 0) + 1
+            self.article_reads[parsed.path] = count
+            payload = {"content": f"<p>第{count}次加载的订阅正文</p>"}
         else:
             title = f"搜索结果 {key} 第{page}页" if key else "首页文章"
             payload = {"items": [{

@@ -5,6 +5,31 @@ import XCTest
 @testable import Legado
 
 @MainActor
+final class ReaderFontStoreTests: XCTestCase {
+    func testInvalidFontDoesNotOverwriteExistingFileOrLeaveNewFile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: ReaderFontStore.directory, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent(UUID().uuidString + ".ttf")
+        let target = ReaderFontStore.directory.appendingPathComponent(source.lastPathComponent)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: target)
+        }
+        let previous = Data("previous font bytes".utf8)
+        try Data("invalid font".utf8).write(to: source)
+        try previous.write(to: target)
+
+        XCTAssertThrowsError(try ReaderFontStore.install(from: source))
+        XCTAssertEqual(try Data(contentsOf: target), previous)
+
+        try FileManager.default.removeItem(at: target)
+        XCTAssertThrowsError(try ReaderFontStore.install(from: source))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+    }
+}
+
+@MainActor
 final class AppearanceContrastTests: XCTestCase {
     func testLoginWebViewUsesAdaptiveBackgroundBeforeContentArrives() async throws {
         var source = BookSource(bookSourceUrl: "https://appearance.invalid", bookSourceName: "外观测试")

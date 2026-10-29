@@ -128,7 +128,9 @@ final class ReaderScrollGestureTests: XCTestCase {
             XCTAssertTrue(app.staticTexts["段落缩进"].exists)
             choose.tap()
             let cancel = app.buttons.matching(NSPredicate(format: "label IN %@", ["Cancel", "取消"])).firstMatch
-            XCTAssertTrue(cancel.waitForExistence(timeout: 10))
+            let pickerAppeared = cancel.waitForExistence(timeout: 10)
+            if !pickerAppeared { print(app.debugDescription); attachScreenshot(app) }
+            XCTAssertTrue(pickerAppeared)
             cancel.tap()
             XCTAssertTrue(app.navigationBars["阅读样式"].waitForExistence(timeout: 5))
         }
@@ -171,20 +173,32 @@ final class ReaderScrollGestureTests: XCTestCase {
     }
 
     private func scrollToAppearanceElement(_ element: XCUIElement, in app: XCUIApplication) {
+        // Partly visible rows can be hittable while their center is inside
+        // the home-indicator area, where a tap does not activate the button.
+        let safeBottom = app.frame.maxY - 60
         for _ in 0..<12 {
-            if element.exists && element.isHittable { return }
+            if element.exists && element.isHittable && element.frame.maxY <= safeBottom { return }
             let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88))
             let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
             start.press(forDuration: 0.05, thenDragTo: end)
         }
-        XCTAssertTrue(element.exists && element.isHittable)
+        XCTAssertTrue(element.exists && element.isHittable && element.frame.maxY <= safeBottom)
     }
 
     func testFailedChaptersAllowRetryMenuAndSourceSwitchInBothReadingModes() throws {
+        try exerciseFailedChapters(partial: false)
+    }
+
+    func testPartialChaptersAllowRetryMenuAndSourceSwitchInBothReadingModes() throws {
+        try exerciseFailedChapters(partial: true)
+    }
+
+    private func exerciseFailedChapters(partial: Bool) throws {
         continueAfterFailure = false
         for mode in ["3", "0"] {
             let app = XCUIApplication()
             app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiReaderFailure", "-pageAnim", mode, "-themeMode", "0"]
+            if partial { app.launchArguments += ["-uiReaderPartialFailure"] }
             app.launch()
             let retry = app.buttons["reader.retryChapter"]
             XCTAssertTrue(retry.waitForExistence(timeout: 20))

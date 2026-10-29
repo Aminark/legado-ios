@@ -2,6 +2,26 @@ import Testing
 @testable import LegadoCore
 
 struct BookUpdateCoordinatorTests {
+    @Test func partialDirectoryFailureKeepsCompleteDirectoryAndProgress() async throws {
+        let chapters = (0..<3).map { BookChapter(url: "chapter\($0)", title: "第\($0)章", bookUrl: "book", index: $0) }
+        let repository = InMemoryBookChapterRepository(values: ["book": chapters])
+        let coordinator = BookUpdateCoordinator(repository: repository, loader: StubChapterListLoader(report: .init(
+            chapters: [chapters[0]], diagnostics: [.init(severity: .error, code: "toc.request", message: "第二页加载失败", rule: "toc")]
+        )))
+        var book = Book(bookUrl: "book", name: "书", origin: "source")
+        book.totalChapterNum = 3
+        book.durChapterIndex = 2
+        book.durChapterTitle = chapters[2].title
+        book.durChapterPos = 42
+
+        let result = await coordinator.refresh(book: book, source: .init(bookSourceUrl: "source", bookSourceName: "源"))
+
+        #expect(!result.refreshed)
+        #expect(result.book == book)
+        #expect(result.chapters == chapters)
+        #expect(await repository.load(bookURL: book.bookUrl) == chapters)
+    }
+
     @Test func countsOnlyGrowthAndPreservesChapterMetadata() {
         var book = Book(bookUrl: "book", name: "书", origin: "source")
         book.totalChapterNum = 2

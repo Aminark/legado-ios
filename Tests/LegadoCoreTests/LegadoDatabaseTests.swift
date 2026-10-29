@@ -388,7 +388,7 @@ struct LegadoDatabaseTests {
         )
         #expect(report.result.articles.map(\.title) == ["乙", "甲"])
         #expect(report.result.articles.first?.link == "https://rss.example/b")
-        #expect(report.result.articles.first?.image == "https://rss.example/root/b.jpg")
+        #expect(report.result.articles.first?.image == "https://rss.example/b.jpg")
         #expect(report.result.articles.first?.type == 2)
         #expect(report.result.nextURL == "https://rss.example/list?page=1")
     }

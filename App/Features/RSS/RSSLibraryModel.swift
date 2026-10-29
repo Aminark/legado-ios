@@ -1,5 +1,8 @@
 import Foundation
 import SwiftUI
+#if SWIFT_PACKAGE
+import LegadoCore
+#endif
 
 @MainActor
 final class RSSLibraryModel: ObservableObject {
@@ -150,20 +153,35 @@ final class RSSLibraryModel: ObservableObject {
         let requestID = UUID()
         articleRequestID = requestID
         loadingMoreRequestID = nil
-        if activeFeed != feed { articles = [] }
+        if activeFeed != feed {
+            articles = []
+            nextURL = nil
+            page = 1
+        }
         activeFeed = feed
-        nextURL = nil
-        page = 1
         await perform(isCurrent: { self.articleRequestID == requestID }) {
             let report = try await self.service.articles(sortName: name, sortURL: url, source: source, page: 1, key: key)
             guard self.articleRequestID == requestID else { return }
             var nextOrder = Int64(Date().timeIntervalSince1970 * 1_000)
             var values = report.result.articles
             for index in values.indices { values[index].order = nextOrder; nextOrder -= 1 }
-            try await self.articleRepository.put(values)
-            if source.ruleNextPage?.isEmpty == false { try await self.articleRepository.clearOld(origin: source.sourceUrl, sort: name, before: nextOrder) }
-            let articles = try await self.articleRepository.articles(origin: source.sourceUrl, sort: name)
+            let articles: [RssArticle]
+            if key != nil {
+                // Search results belong to this query, not the persistent feed.
+                let records = try await self.recordRepository.all()
+                let readLinks = Set(records.map(\.record))
+                for index in values.indices { values[index].read = readLinks.contains(values[index].link) }
+                articles = values
+            } else {
+                if source.ruleNextPage?.nilIfBlank != nil {
+                    try await self.articleRepository.replace(values, origin: source.sourceUrl, sort: name)
+                } else {
+                    try await self.articleRepository.put(values)
+                }
+                articles = try await self.articleRepository.articles(origin: source.sourceUrl, sort: name)
+            }
             guard self.articleRequestID == requestID else { return }
+            self.page = 1
             self.order = nextOrder
             self.nextURL = report.result.nextURL
             self.articles = articles
@@ -184,8 +202,18 @@ final class RSSLibraryModel: ObservableObject {
             var nextOrder = self.order
             var values = report.result.articles
             for index in values.indices { values[index].order = nextOrder; nextOrder -= 1 }
-            try await self.articleRepository.append(values)
-            let articles = try await self.articleRepository.articles(origin: source.sourceUrl, sort: name)
+            let articles: [RssArticle]
+            if key != nil {
+                let records = try await self.recordRepository.all()
+                guard self.articleRequestID == requestID else { return }
+                let readLinks = Set(records.map(\.record))
+                for index in values.indices { values[index].read = readLinks.contains(values[index].link) }
+                var seen = Set(self.articles.map(\.id))
+                articles = self.articles + values.filter { seen.insert($0.id).inserted }
+            } else {
+                try await self.articleRepository.append(values)
+                articles = try await self.articleRepository.articles(origin: source.sourceUrl, sort: name)
+            }
             guard self.articleRequestID == requestID else { return }
             self.page = nextPage
             self.order = nextOrder
@@ -202,9 +230,9 @@ final class RSSLibraryModel: ObservableObject {
         }
         catch { errorMessage = error.localizedDescription }
     }
-    func readingMode(for article: RssArticle, source: RssSource) async -> RSSReadingMode {
+    func readingMode(for article: RssArticle, source: RssSource, forceRefresh: Bool = false) async -> RSSReadingMode {
         let policy = RSSReadingPolicy()
-        if article.type == 0, article.description?.nilIfBlank != nil {
+        if !forceRefresh, article.type == 0, article.description?.nilIfBlank != nil {
             return policy.mode(article: article, source: source)
         }
         guard let rule = source.ruleContent?.nilIfBlank else {
@@ -212,14 +240,15 @@ final class RSSLibraryModel: ObservableObject {
         }
         do {
             let content = try await service.content(article: article, rule: rule, source: source)
+            var updated = article
             if article.type == 0 {
-                var updated = article; updated.description = content
+                updated.description = content
                 try await articleRepository.put([updated])
                 if var star = try await starRepository.star(origin: article.origin, link: article.link) {
                     star.description = content; try await starRepository.save(star); stars = try await starRepository.all()
                 }
             }
-            return policy.mode(article: article, source: source, resolvedContent: content)
+            return policy.mode(article: updated, source: source, resolvedContent: content)
         } catch {
             errorMessage = error.localizedDescription
             if article.type == 0 { return .html(content: "加载正文失败\n\(error.localizedDescription)", baseURL: nil) }

@@ -6,6 +6,13 @@ import UIKit
 final class FixtureAppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
+    private func writeFixture(_ data: Data, to url: URL) throws {
+        // Keep fixture file identities stable. Atomic replacement can leave
+        // iOS 26's simulator Files provider with unresolvable document IDs.
+        guard (try? Data(contentsOf: url)) != data else { return }
+        try data.write(to: url)
+    }
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let fixtures = [
@@ -16,16 +23,16 @@ final class FixtureAppDelegate: UIResponder, UIApplicationDelegate {
         for (name, url, title) in fixtures {
             let source = [["bookSourceUrl": url, "bookSourceName": title]]
             if let data = try? JSONSerialization.data(withJSONObject: source) {
-                try? data.write(to: documents.appendingPathComponent(name), options: .atomic)
+                try? writeFixture(data, to: documents.appendingPathComponent(name))
             }
         }
         for name in ["TXT-Book.txt", "TXT-Uppercase.TXT"] {
-            try? Data("第一章 开始\n这是用于验证本地 TXT 导入的小说正文。\n第二章 后续\n正文继续。".utf8)
-                .write(to: documents.appendingPathComponent(name), options: .atomic)
+            try? writeFixture(Data("第一章 开始\n这是用于验证本地 TXT 导入的小说正文。\n第二章 后续\n正文继续。".utf8),
+                              to: documents.appendingPathComponent(name))
         }
         if let epub = Bundle.main.url(forResource: "EPUB-Book", withExtension: "epub"),
            let data = try? Data(contentsOf: epub) {
-            try? data.write(to: documents.appendingPathComponent("EPUB-Book.epub"), options: .atomic)
+            try? writeFixture(data, to: documents.appendingPathComponent("EPUB-Book.epub"))
         }
         let controller = UIViewController()
         controller.view.backgroundColor = .systemBackground

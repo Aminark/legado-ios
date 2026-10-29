@@ -213,9 +213,7 @@ public actor ChapterContentCoordinator {
         maxPages: Int = 20,
         forceRefresh: Bool = false
     ) async -> CoordinatedChapterContent {
-        if forceRefresh {
-            try? await cache.remove(bookURL: book.bookUrl, chapterURL: chapter.url)
-        } else if let cached = try? await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url),
+        if !forceRefresh, let cached = try? await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url),
                   cached.sourceID == nil || cached.sourceID == source.id {
             return .init(report: .init(
                 title: cached.title,
@@ -235,7 +233,8 @@ public actor ChapterContentCoordinator {
     }
 
     public func saveContent(_ report: ChapterContentReport, book: Book, chapter: BookChapter, source: BookSource) async {
-        if !report.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if !Task.isCancelled, !report.diagnostics.contains(where: { $0.severity == .error }),
+           !report.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             try? await cache.save(.init(
                 bookURL: book.bookUrl,
                 chapterURL: chapter.url,
@@ -269,7 +268,8 @@ public actor ChapterContentCoordinator {
         if let cached = try? await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url),
            cached.sourceID == nil || cached.sourceID == source.id { return false }
         let result = await load(book: book, chapter: chapter, source: source, nextChapterURL: nextChapterURL)
-        return !result.report.content.isEmpty
+        return !Task.isCancelled && !result.report.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !result.report.diagnostics.contains(where: { $0.severity == .error })
     }
 
     public func invalidate(bookURL: String) async {

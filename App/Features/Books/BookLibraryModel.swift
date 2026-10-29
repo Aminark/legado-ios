@@ -48,17 +48,23 @@ final class BookLibraryModel: ObservableObject {
     private let chapterRepository: any BookChapterRepository
     private let groupRepository: any BookGroupRepository
     private let pendingProgressKey = "pendingBookReadingProgress"
+    private let progressDefaults: UserDefaults
     private var pendingProgress: [String: BookProgress]
     private var bookSaveTask: Task<Bool, Never>?
     private var bookSaveGeneration = 0
     private var persistedBooks: [Book] = []
+    private var groupSaveTask: Task<Bool, Never>?
+    private var groupSaveGeneration = 0
+    private var persistedGroups: [BookGroup] = []
+    private var deletingGroupIDs: Set<Int64> = []
 
     init(
         repository: any BookRepository,
         localDirectory: URL? = nil,
         updateCoordinator: BookUpdateCoordinator = .init(),
         chapterRepository: any BookChapterRepository = FileBookChapterRepository.live(),
-        groupRepository: any BookGroupRepository = InMemoryBookGroupRepository()
+        groupRepository: any BookGroupRepository = InMemoryBookGroupRepository(),
+        progressDefaults: UserDefaults = .standard
     ) {
         self.repository = repository
         self.localDirectory = localDirectory ?? FileManager.default.temporaryDirectory.appendingPathComponent("LegadoLocalBooks")
@@ -66,7 +72,8 @@ final class BookLibraryModel: ObservableObject {
         self.updateCoordinator = updateCoordinator
         self.chapterRepository = chapterRepository
         self.groupRepository = groupRepository
-        pendingProgress = (UserDefaults.standard.data(forKey: pendingProgressKey)
+        self.progressDefaults = progressDefaults
+        pendingProgress = (progressDefaults.data(forKey: pendingProgressKey)
             .flatMap { try? JSONDecoder().decode([String: BookProgress].self, from: $0) }) ?? [:]
     }
 
@@ -108,9 +115,9 @@ final class BookLibraryModel: ObservableObject {
             books = try await storedBooks
             persistedBooks = books
             groups = try await storedGroups
+            persistedGroups = groups
             if groups.isEmpty {
-                groups = [.init(groupId: BookGroup.idAll, groupName: "全部", order: 0)]
-                try await persistGroups()
+                await persistGroups([.init(groupId: BookGroup.idAll, groupName: "全部", order: 0)])
             }
             for book in books where book.origin == "local" && book.coverUrl?.isEmpty != false {
                 guard !Task.isCancelled, let url = URL(string: book.bookUrl),
@@ -136,11 +143,11 @@ final class BookLibraryModel: ObservableObject {
            existing.durChapterTime > book.durChapterTime {
             applyProgress(BookProgress(book: existing), to: &book)
         }
-        if let pending = pendingProgress.removeValue(forKey: book.bookUrl) {
+        let pending = pendingProgress[book.bookUrl]
+        if let pending {
             if pending.durChapterTime > book.durChapterTime {
                 applyProgress(pending, to: &book)
             }
-            persistPendingProgress()
         }
         var updated = books
         if let index = updated.firstIndex(where: { $0.bookUrl == book.bookUrl }) {
@@ -148,7 +155,10 @@ final class BookLibraryModel: ObservableObject {
         } else {
             updated.append(book)
         }
-        await persist(updated)
+        if await persist(updated), let pending, pendingProgress[book.bookUrl] == pending {
+            pendingProgress[book.bookUrl] = nil
+            persistPendingProgress()
+        }
     }
 
     func replace(oldBookURL: String, with book: Book) async {
@@ -159,9 +169,8 @@ final class BookLibraryModel: ObservableObject {
         var updated = books.filter { $0.bookUrl == oldBookURL || $0.bookUrl != book.bookUrl }
         guard let index = updated.firstIndex(where: { $0.bookUrl == oldBookURL }) else { return }
         updated[index] = book
-        await persist(updated)
-        if oldBookURL != book.bookUrl, books.contains(where: { $0.bookUrl == book.bookUrl }) {
-            try? await chapterRepository.remove(bookURL: oldBookURL)
+        if await persist(updated), oldBookURL != book.bookUrl {
+            await cleanupRemovedBooks([oldBookURL])
         }
     }
 
@@ -209,9 +218,9 @@ final class BookLibraryModel: ObservableObject {
 
     private func persistPendingProgress() {
         if pendingProgress.isEmpty {
-            UserDefaults.standard.removeObject(forKey: pendingProgressKey)
+            progressDefaults.removeObject(forKey: pendingProgressKey)
         } else if let data = try? JSONEncoder().encode(pendingProgress) {
-            UserDefaults.standard.set(data, forKey: pendingProgressKey)
+            progressDefaults.set(data, forKey: pendingProgressKey)
         }
     }
 
@@ -221,7 +230,7 @@ final class BookLibraryModel: ObservableObject {
         updateMessage = nil
         defer { isCheckingUpdates = false }
 
-        let sourceByURL = Dictionary(uniqueKeysWithValues: sources.map { ($0.bookSourceUrl, $0) })
+        let sourceByURL = Dictionary(sources.map { ($0.bookSourceUrl, $0) }, uniquingKeysWith: { _, latest in latest })
         let requestedBooks = books.filter { $0.canUpdate && $0.origin != "local" && (!onlyRead || $0.durChapterTime > 0) }
         var checked = 0
         var added = 0
@@ -266,7 +275,8 @@ final class BookLibraryModel: ObservableObject {
     func remove(at offsets: IndexSet) async {
         var updated = books
         updated.remove(atOffsets: offsets)
-        await persist(updated)
+        let removed = Set(books.map(\.bookUrl)).subtracting(updated.map(\.bookUrl))
+        if await persist(updated) { await cleanupRemovedBooks(removed) }
     }
 
     var visibleGroups: [BookGroup] {
@@ -291,43 +301,56 @@ final class BookLibraryModel: ObservableObject {
     func createGroup(name: String) async {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, !groups.contains(where: { $0.groupName == name }) else { return }
-        let highest = groups.map(\.groupId).filter { $0 > 0 }.max() ?? 0
-        let nextID: Int64 = highest == 0 ? 1 : highest << 1
-        groups.append(.init(groupId: nextID, groupName: name, order: groups.count))
-        do { try await persistGroups() } catch { errorMessage = error.localizedDescription }
+        let used = groups.filter { $0.groupId > 0 }.reduce(Int64(0)) { $0 | $1.groupId }
+            | books.reduce(Int64(0)) { $0 | $1.group }
+            | deletingGroupIDs.reduce(Int64(0), |)
+        guard let nextID = (0..<63).map({ Int64(1) << $0 }).first(where: { used & $0 == 0 }) else {
+            errorMessage = "自定义分组已达到上限（63 个），请先删除不再使用的分组。"
+            return
+        }
+        await persistGroups(groups + [.init(groupId: nextID, groupName: name, order: groups.count)])
     }
 
     func renameGroup(_ group: BookGroup, name: String) async {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, let index = groups.firstIndex(where: { $0.id == group.id }) else { return }
-        groups[index].groupName = name
-        do { try await persistGroups() } catch { errorMessage = error.localizedDescription }
+        var updated = groups
+        updated[index].groupName = name
+        await persistGroups(updated)
     }
 
     func setGroupVisible(_ group: BookGroup, visible: Bool) async {
         guard let index = groups.firstIndex(where: { $0.id == group.id }) else { return }
-        groups[index].show = visible
-        do { try await persistGroups() } catch { errorMessage = error.localizedDescription }
+        var updated = groups
+        updated[index].show = visible
+        await persistGroups(updated)
     }
 
     func moveGroups(from offsets: IndexSet, to destination: Int) async {
         var editable = groups.filter { $0.groupId > 0 }.sorted { $0.order < $1.order }
         editable.move(fromOffsets: offsets, toOffset: destination)
+        var updated = groups
         for (order, group) in editable.enumerated() {
-            if let index = groups.firstIndex(where: { $0.id == group.id }) {
-                groups[index].order = order + 1
+            if let index = updated.firstIndex(where: { $0.id == group.id }) {
+                updated[index].order = order + 1
             }
         }
-        do { try await persistGroups() } catch { errorMessage = error.localizedDescription }
+        await persistGroups(updated)
     }
 
     func deleteGroup(_ group: BookGroup) async {
-        guard group.groupId > 0 else { return }
-        groups.removeAll { $0.id == group.id }
+        guard group.groupId > 0, !deletingGroupIDs.contains(group.id),
+              let stored = groups.first(where: { $0.id == group.id }) else { return }
+        deletingGroupIDs.insert(group.id)
+        defer { deletingGroupIDs.remove(group.id) }
+        guard await persistGroups(groups.filter { $0.id != group.id }) else { return }
         var updated = books
         for index in updated.indices { updated[index].group &= ~group.groupId }
-        await persist(updated)
-        do { try await persistGroups() } catch { errorMessage = error.localizedDescription }
+        if !(await persist(updated)) {
+            let saveError = errorMessage
+            await persistGroups(groups + [stored])
+            errorMessage = saveError
+        }
     }
 
     func setBook(_ book: Book, in group: BookGroup, included: Bool) async {
@@ -350,8 +373,17 @@ final class BookLibraryModel: ObservableObject {
     }
 
     func remove(bookURL: String) async {
-        await persist(books.filter { $0.bookUrl != bookURL })
-        try? await chapterRepository.remove(bookURL: bookURL)
+        if await persist(books.filter { $0.bookUrl != bookURL }) {
+            await cleanupRemovedBooks([bookURL])
+        }
+    }
+
+    private func cleanupRemovedBooks(_ urls: Set<String>) async {
+        for url in urls where !books.contains(where: { $0.bookUrl == url }) {
+            pendingProgress[url] = nil
+            try? await chapterRepository.remove(bookURL: url)
+        }
+        persistPendingProgress()
     }
 
     func importLocalFiles(_ urls: [URL]) async {
@@ -465,7 +497,30 @@ final class BookLibraryModel: ObservableObject {
         return succeeded
     }
 
-    private func persistGroups() async throws {
-        try await groupRepository.save(groups)
+    @discardableResult
+    private func persistGroups(_ updated: [BookGroup]) async -> Bool {
+        groups = updated
+        groupSaveGeneration &+= 1
+        let generation = groupSaveGeneration
+        let previousSave = groupSaveTask
+        let save = Task { @MainActor [weak self, groupRepository] in
+            _ = await previousSave?.value
+            do {
+                try await groupRepository.save(updated)
+                self?.persistedGroups = updated
+                if self?.groupSaveGeneration == generation { self?.errorMessage = nil }
+                return true
+            } catch {
+                if let self, groupSaveGeneration == generation {
+                    groups = persistedGroups
+                    errorMessage = error.localizedDescription
+                }
+                return false
+            }
+        }
+        groupSaveTask = save
+        let succeeded = await save.value
+        if groupSaveGeneration == generation { groupSaveTask = nil }
+        return succeeded
     }
 }

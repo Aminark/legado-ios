@@ -18,6 +18,9 @@ final class ReplaceRuleLibraryModel: ObservableObject {
 
     private let repository: any ReplaceRuleRepository
     private let importer = ReplaceRuleImporter()
+    private var saveTask: Task<Result<Void, Error>, Never>?
+    private var saveGeneration = 0
+    private var persistedRules: [ReplaceRule] = []
 
     init(repository: any ReplaceRuleRepository) { self.repository = repository }
 
@@ -32,7 +35,7 @@ final class ReplaceRuleLibraryModel: ObservableObject {
     }
 
     func load() async {
-        do { rules = try await repository.load() }
+        do { rules = try await repository.load(); persistedRules = rules }
         catch { notice = .init(kind: .error, title: "净化规则读取失败", detail: error.localizedDescription) }
     }
 
@@ -47,8 +50,7 @@ final class ReplaceRuleLibraryModel: ObservableObject {
                 updated = importer.merge(incoming, into: updated)
                 count += incoming.count
             }
-            try await repository.save(updated)
-            rules = updated
+            try await saveRules(updated)
             notice = .init(kind: .success, title: "净化规则已导入", detail: "本次读取 \(count) 条，当前共 \(rules.count) 条。")
         } catch {
             notice = .init(kind: .error, title: "净化规则导入失败", detail: error.localizedDescription)
@@ -70,8 +72,7 @@ final class ReplaceRuleLibraryModel: ObservableObject {
             }
             let incoming = try importer.decode(data)
             let updated = importer.merge(incoming, into: rules)
-            try await repository.save(updated)
-            rules = updated
+            try await saveRules(updated)
             notice = .init(kind: .success, title: "净化规则已导入", detail: "本次读取 \(incoming.count) 条，当前共 \(rules.count) 条。")
         } catch { notice = .init(kind: .error, title: "净化规则导入失败", detail: error.localizedDescription) }
     }
@@ -110,8 +111,7 @@ final class ReplaceRuleLibraryModel: ObservableObject {
         }
         guard !changed.isEmpty else { return }
         let updated = importer.merge(changed, into: rules)
-        try await repository.save(updated)
-        rules = updated
+        try await saveRules(updated)
     }
 
     func setEnabled(_ enabled: Bool, for id: Int64) async {
@@ -130,12 +130,33 @@ final class ReplaceRuleLibraryModel: ObservableObject {
     @discardableResult
     private func persist(_ updated: [ReplaceRule]) async -> Bool {
         do {
-            try await repository.save(updated)
-            rules = updated
+            try await saveRules(updated)
             return true
         } catch {
             notice = .init(kind: .error, title: "净化规则保存失败", detail: error.localizedDescription)
             return false
         }
+    }
+
+    private func saveRules(_ updated: [ReplaceRule]) async throws {
+        rules = updated
+        saveGeneration &+= 1
+        let generation = saveGeneration
+        let previousSave = saveTask
+        let task = Task { @MainActor [weak self, repository] () -> Result<Void, Error> in
+            _ = await previousSave?.value
+            do {
+                try await repository.save(updated)
+                self?.persistedRules = updated
+                return .success(())
+            } catch {
+                if let self, saveGeneration == generation { rules = persistedRules }
+                return .failure(error)
+            }
+        }
+        saveTask = task
+        let result = await task.value
+        if saveGeneration == generation { saveTask = nil }
+        try result.get()
     }
 }

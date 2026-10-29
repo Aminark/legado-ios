@@ -543,6 +543,30 @@ public actor LegadoDatabase {
         }
     }
 
+    public func setRssSourceEnabled(_ enabled: Bool, sourceURL: String) throws {
+        try transaction {
+            let query = try prepare("SELECT payload FROM rssSources WHERE source_url = ? LIMIT 1")
+            defer { sqlite3_finalize(query) }
+            try bind(sourceURL, to: query, at: 1)
+            guard var source = try decodeFirst(query, as: RssSource.self) else { return }
+            source.enabled = enabled
+            let update = try prepare("UPDATE rssSources SET enabled = ?, payload = ? WHERE source_url = ?")
+            defer { sqlite3_finalize(update) }
+            sqlite3_bind_int(update, 1, enabled ? 1 : 0)
+            try bind(try encoder.encode(source), to: update, at: 2)
+            try bind(sourceURL, to: update, at: 3)
+            try stepDone(update)
+        }
+    }
+
+    public func removeRssSource(sourceURL: String) throws {
+        try transaction {
+            try executeBound("DELETE FROM rssSources WHERE source_url = ?", text: sourceURL)
+            try removeRssArticles(origin: sourceURL)
+            try deleteSourceVariables(sourceURL)
+        }
+    }
+
     public func loadRssArticles(origin: String, sort: String) throws -> [RssArticle] {
         let statement = try prepare("SELECT a.payload, EXISTS(SELECT 1 FROM rssReadRecords r WHERE r.record = a.link) FROM rssArticles a WHERE a.origin = ? AND a.sort = ? ORDER BY a.article_order DESC")
         defer { sqlite3_finalize(statement) }

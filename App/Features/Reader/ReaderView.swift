@@ -469,11 +469,13 @@ struct ReaderView: View {
             .frame(maxWidth: readingColumnMaxWidth)
             .frame(maxWidth: .infinity)
             .overlay(alignment: .bottom) {
-                if pageAnimation == 3, let error = model.currentChapterError, !showsReaderMenu {
+                if let error = model.currentChapterError, !showsReaderMenu {
                     VStack(spacing: 10) {
-                        Text("本章加载失败").font(.subheadline.weight(.semibold))
+                        Text(model.content.isEmpty ? "本章加载失败" : "本章加载不完整").font(.subheadline.weight(.semibold))
                         Text(error).font(.caption).lineLimit(2).multilineTextAlignment(.center)
                         readerRecoveryActions
+                        Button("打开阅读菜单") { showsReaderMenu = true }
+                            .accessibilityIdentifier("reader.failureMenu")
                     }
                     .padding(16)
                     .frame(maxWidth: .infinity)
@@ -1551,10 +1553,9 @@ struct ReaderView: View {
             showsContentEditor = true
         case 9:
             showsReaderMenu = false
-            let updatedBook = model.toggleReplaceRules()
+            let updatedBook = model.toggleReplaceRules(position: readerPosition)
             Task {
                 await library.addOrUpdate(updatedBook)
-                await model.load(rules: model.usesReplaceRules ? replaceRules.rules : [])
             }
         case 10:
             showsReaderMenu = false
@@ -2213,7 +2214,8 @@ struct ReaderView: View {
 #if DEBUG
 private struct ReaderFailureTestLoader: ChapterContentLoading {
     func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
-        .init(diagnostics: [.init(severity: .error, code: "content.request", message: "测试书源正文请求失败", rule: chapter.url)])
+        .init(content: ProcessInfo.processInfo.arguments.contains("-uiReaderPartialFailure") ? "本章只加载了第一页正文。" : "",
+              diagnostics: [.init(severity: .error, code: "content.request", message: "测试书源正文请求失败", rule: chapter.url)])
     }
 }
 #endif

@@ -54,16 +54,10 @@ public actor SQLiteRssSourceRepository: RssSourceRepository {
     }
     public func save(_ values: [RssSource]) async throws { try await database.replaceRssSources(values) }
     public func setEnabled(_ value: Bool, sourceURL: String) async throws {
-        var values = try await all()
-        guard let index = values.firstIndex(where: { $0.sourceUrl == sourceURL }) else { return }
-        values[index].enabled = value
-        try await save(values)
+        try await database.setRssSourceEnabled(value, sourceURL: sourceURL)
     }
     public func remove(sourceURL: String) async throws {
-        let values = try await all().filter { $0.sourceUrl != sourceURL }
-        try await save(values)
-        try await database.removeRssArticles(origin: sourceURL)
-        try await database.deleteSourceVariables(sourceURL)
+        try await database.removeRssSource(sourceURL: sourceURL)
     }
 }
 

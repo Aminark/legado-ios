@@ -5,6 +5,53 @@ import LegadoCore
 
 @MainActor
 struct ReaderRegressionTests {
+    @Test func partialContentKeepsFailureVisibleAcrossContinuousChapters() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapters = (0..<3).map { BookChapter(url: "chapter\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        let loader = RecoveringReaderLoader(partialBody: "只有第一页")
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0,
+                                    source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: loader,
+                                    cache: .init(directory: directory))
+        await model.load(rules: [], prefetchNextChapter: false)
+        #expect(model.content == "只有第一页")
+        #expect(model.currentChapterError != nil)
+        await model.prepareContinuousReading(rules: [])
+        #expect(model.scrollChapters.allSatisfy { $0.error != nil })
+        model.updateContinuousPosition(chapter: 1)
+        #expect(model.currentChapterError != nil)
+        await loader.recover()
+        await model.retryContinuousChapter(index: 1, rules: [])
+        #expect(model.currentChapterError == nil)
+        #expect(model.content == "恢复正文1")
+    }
+
+    @Test func togglingPurificationInvalidatesInFlightLoadAndKeepsNewSettings() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapter = BookChapter(url: "chapter", title: "第一章", bookUrl: book.bookUrl, index: 0)
+        let loader = PurificationRaceLoader()
+        let model = ReaderViewModel(book: book, chapters: [chapter], initialIndex: 0,
+                                    source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: loader,
+                                    cache: .init(directory: directory))
+        let rule = ReplaceRule(id: 1, name: "净化", pattern: "广告", replacement: "")
+        let oldLoad = Task { await model.load(rules: [rule], prefetchNextChapter: false) }
+        await loader.waitForRequest()
+        let generation = model.chapterLoadGeneration
+
+        model.toggleReplaceRules()
+        #expect(model.chapterLoadGeneration > generation)
+        #expect(!model.isLoading)
+        await model.load(rules: [rule], prefetchNextChapter: false)
+        await loader.finish()
+        await oldLoad.value
+
+        #expect(!model.usesReplaceRules)
+        #expect(model.content == "广告新正文")
+    }
+
     @Test func failedContinuousChapterPreservesReasonAndRetryFetchesFreshBody() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -353,12 +400,26 @@ struct ReaderRegressionTests {
 private actor RecoveringReaderLoader: ChapterContentLoading {
     var calls = 0
     private var recovered = false
+    private let partialBody: String
+    init(partialBody: String = "") { self.partialBody = partialBody }
     func recover() { recovered = true }
     func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
         calls += 1
         if recovered { return .init(content: "恢复正文\(chapter.index)") }
-        return .init(diagnostics: [.init(severity: .error, code: "content.request", message: "HTTP 403：正文访问失败", rule: chapter.url)])
+        return .init(content: partialBody, diagnostics: [.init(severity: .error, code: "content.request", message: "HTTP 403：正文访问失败", rule: chapter.url)])
     }
+}
+
+private actor PurificationRaceLoader: ChapterContentLoading {
+    private var pending: CheckedContinuation<ChapterContentReport, Never>?
+    private var calls = 0
+    func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
+        calls += 1
+        if calls > 1 { return .init(content: "广告新正文") }
+        return await withCheckedContinuation { pending = $0 }
+    }
+    func waitForRequest() async { while pending == nil { await Task.yield() } }
+    func finish() { pending?.resume(returning: .init(content: "广告旧正文")); pending = nil }
 }
 
 private struct SourceAwareReaderLoader: ChapterContentLoading {

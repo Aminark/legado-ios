@@ -123,7 +123,7 @@ public actor HttpTTSService {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw HttpTTSServiceError.emptyText }
         let source = engine.bookSourceAdapter
-        let cacheKey = Self.cacheKey(engine: engine, text: text, speechRate: speechRate)
+        let cacheKey = try Self.cacheKey(engine: engine, text: text, speechRate: speechRate)
         if let data = await cache.data(for: cacheKey) {
             return .init(data: data, contentType: engine.contentType, finalURL: cacheURL(engine: engine))
         }
@@ -204,7 +204,7 @@ public actor HttpTTSService {
     public func audioStream(engine: HttpTTS, text: String, speechRate: Int) async throws -> HttpTTSAudioStream {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw HttpTTSServiceError.emptyText }
-        let cacheKey = Self.cacheKey(engine: engine, text: text, speechRate: speechRate)
+        let cacheKey = try Self.cacheKey(engine: engine, text: text, speechRate: speechRate)
         if let data = await cache.data(for: cacheKey) {
             return Self.bufferedStream(
                 data: data,
@@ -272,10 +272,18 @@ public actor HttpTTSService {
         )
     }
 
-    private static func cacheKey(engine: HttpTTS, text: String, speechRate: Int) -> String {
-        let seed = "\(engine.url)-|-\(speechRate)-|-\(text)"
-        let digest = Insecure.MD5.hash(data: Data(seed.utf8)).map { String(format: "%02x", $0) }.joined()
-        return String(digest.dropFirst(8).prefix(16))
+    private static func cacheKey(engine: HttpTTS, text: String, speechRate: Int) throws -> String {
+        struct CacheInput: Encodable {
+            let engine: HttpTTS
+            let text: String
+            let speechRate: Int
+        }
+        // Voices can share an endpoint and select their speaker through headers
+        // or JavaScript. Include the complete configuration and source identity.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let data = try encoder.encode(CacheInput(engine: engine, text: text, speechRate: speechRate))
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func bufferedStream(data: Data, contentType: String?, finalURL: URL) -> HttpTTSAudioStream {
