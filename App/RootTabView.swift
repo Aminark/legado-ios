@@ -1295,8 +1295,11 @@ private struct SettingsView: View {
                             settingLink("备份与同步", icon: "icloud") {
                                 BackupSyncView()
                             }
-                            settingLink("文件管理", icon: "folder", showsSeparator: false) {
+                            settingLink("文件管理", icon: "folder") {
                                 FileManagementView()
+                            }
+                            settingLink("缓存管理", icon: "internaldrive", showsSeparator: false) {
+                                CacheManagementView()
                             }
                         }
                         supportSection
@@ -2012,9 +2015,10 @@ private struct SearchScopeSheet: View {
 
 private struct ReadingPreferencesView: View {
     @AppStorage("textSize") private var fontSize = 20.0
-    @AppStorage("letterSpacing") private var letterSpacing = 0.1
-    @AppStorage("lineSpacingExtra") private var lineSpacing = 12.0
-    @AppStorage("paragraphSpacing") private var paragraphSpacing = 2.0
+    @AppStorage("textFont") private var fontPath = ""
+    @AppStorage("letterSpacing") private var letterSpacing = 0.0
+    @AppStorage("lineSpacingExtra") private var lineSpacing = 8.0
+    @AppStorage("paragraphSpacing") private var paragraphSpacing = 10.0
     @AppStorage("paragraphIndent") private var paragraphIndent = "　　"
     @AppStorage("paddingLeft") private var paddingLeft = 16.0
     @AppStorage("paddingRight") private var paddingRight = 16.0
@@ -2022,9 +2026,9 @@ private struct ReadingPreferencesView: View {
     @AppStorage("paddingBottom") private var paddingBottom = 6.0
     @AppStorage("textBold") private var fontWeight = 0
     @AppStorage("titleMode") private var titleMode = 0
-    @AppStorage("titleSize") private var titleSize = 0.0
+    @AppStorage("titleSize") private var titleSize = 6.0
     @AppStorage("titleTopSpacing") private var titleTopSpacing = 0.0
-    @AppStorage("titleBottomSpacing") private var titleBottomSpacing = 0.0
+    @AppStorage("titleBottomSpacing") private var titleBottomSpacing = 32.0
     @AppStorage("underlineMode") private var underlineMode = 0
     @AppStorage("readerTheme") private var theme = "wechat"
     @AppStorage("pageAnim") private var pageAnimation = 0
@@ -2110,7 +2114,7 @@ private struct ReadingPreferencesView: View {
             Section("预览") {
                 Text("雨落在旧城的瓦檐上，故事从一束灯光开始。")
                     .tracking(letterSpacing * fontSize)
-                    .font(.system(size: fontSize, design: .serif))
+                    .font(Font(ReaderFontStore.resolvedFont(at: fontPath, size: fontSize, weight: fontWeight)))
                     .lineSpacing(lineSpacing)
                     .foregroundStyle(Color(uiColor: ReaderStylePreset.resolve(theme).foreground))
                     .padding(.vertical, 12)

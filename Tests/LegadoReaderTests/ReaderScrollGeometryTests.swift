@@ -1,8 +1,18 @@
 import ImageIO
+import CoreText
 import SwiftUI
 import UIKit
 import XCTest
 @testable import Legado
+
+private final class ReaderPanFixture: UIPanGestureRecognizer {
+    var fixtureState: UIGestureRecognizer.State = .began
+    var fixtureTranslation = CGPoint.zero
+    var fixtureVelocity = CGPoint.zero
+    override var state: UIGestureRecognizer.State { get { fixtureState } set { fixtureState = newValue } }
+    override func translation(in view: UIView?) -> CGPoint { fixtureTranslation }
+    override func velocity(in view: UIView?) -> CGPoint { fixtureVelocity }
+}
 
 private final class BackgroundPhotoProvider: NSItemProvider, @unchecked Sendable {
     let photoData: Data?
@@ -158,6 +168,136 @@ final class ReaderBookmarkPersistenceTests: XCTestCase {
 
 @MainActor
 final class ReaderScrollGeometryTests: XCTestCase {
+    func testDefaultChineseGlyphsUseTheRequestedFontSize() throws {
+        let config = configuration(fontSize: 20)
+        let text = NSAttributedString(string: "天地玄黄", attributes: ReaderTypography(configuration: config).bodyAttributes)
+        let line = CTLineCreateWithAttributedString(text)
+        XCTAssertEqual(CTLineGetTypographicBounds(line, nil, nil, nil), 4 * config.fontSize, accuracy: 0.1,
+                       "Chinese glyphs should retain the requested em size instead of shrinking through font fallback")
+        let paragraph = try XCTUnwrap(text.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertEqual(paragraph.firstLineHeadIndent, 2 * config.fontSize, accuracy: 0.1,
+                       "The two-character indent should match the actual Chinese glyph size")
+    }
+
+    func testPagedRangesCoverAllTextWithoutSplittingCharactersOrCuttingLines() throws {
+        for size in [15.0, 20.0, 28.0, 50.0] {
+            let config = configuration(fontSize: size, pageAnimation: 4)
+            let view: UITextView
+            if #available(iOS 16.0, *) { view = UITextView(usingTextLayoutManager: false) }
+            else { view = UITextView(frame: .zero) }
+            view.frame = CGRect(x: 0, y: 0, width: 402, height: 713)
+            view.textContainerInset = UIEdgeInsets(top: 6, left: 16, bottom: 6, right: 16)
+            view.attributedText = NSAttributedString(string: config.text, attributes: ReaderTypography(configuration: config).bodyAttributes)
+            view.layoutIfNeeded()
+
+            let pages = ReaderPageLayout.pages(in: view)
+            XCTAssertGreaterThan(pages.count, 1)
+            var end = 0
+            let text = config.text as NSString
+            for page in pages {
+                XCTAssertEqual(page.renderedRange.location, end, "No text may be skipped or repeated between pages")
+                XCTAssertEqual(text.rangeOfComposedCharacterSequence(at: page.renderedRange.location).location,
+                               page.renderedRange.location, "A page cannot start inside an emoji or composed character")
+                XCTAssertLessThanOrEqual(page.visibleHeight, view.bounds.height - view.textContainerInset.bottom + 0.5)
+                end = NSMaxRange(page.renderedRange)
+            }
+            XCTAssertEqual(end, text.length)
+        }
+    }
+
+    func testPagedViewportRendersTextAndClipsBelowItsActualLastLine() async throws {
+        let controller = UIHostingController(rootView: configuration(fontSize: 20, pageAnimation: 4))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 800))
+        window.rootViewController = controller
+        window.backgroundColor = .white
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        controller.view.layoutIfNeeded()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        func viewport(in view: UIView) -> ReaderViewport? {
+            if let value = view as? ReaderViewport { return value }
+            return view.subviews.lazy.compactMap { viewport(in: $0) }.first
+        }
+        let view = try XCTUnwrap(viewport(in: controller.view))
+        let text = view.textView
+        let clipHeight = try XCTUnwrap(text.superview?.bounds.height)
+        let page = try XCTUnwrap(ReaderPageLayout.pages(in: text).first)
+        XCTAssertEqual(clipHeight, page.visibleHeight, accuracy: 0.5)
+        XCTAssertLessThan(clipHeight, view.bounds.height)
+
+        let image = try XCTUnwrap(UIGraphicsImageRenderer(bounds: view.bounds).image { context in
+            UIColor.white.setFill()
+            context.fill(view.bounds)
+            view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
+        }.cgImage)
+        func ink(in rect: CGRect) throws -> Int {
+            let crop = try XCTUnwrap(image.cropping(to: rect))
+            var pixels = [UInt8](repeating: 255, count: crop.width * crop.height * 4)
+            return try pixels.withUnsafeMutableBytes { buffer in
+                let context = try XCTUnwrap(CGContext(data: buffer.baseAddress,
+                    width: crop.width, height: crop.height, bitsPerComponent: 8,
+                    bytesPerRow: crop.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.draw(crop, in: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
+                return stride(from: 0, to: buffer.count, by: 4).filter {
+                    buffer[$0] < 100 && buffer[$0 + 1] < 100 && buffer[$0 + 2] < 100
+                }.count
+            }
+        }
+        XCTAssertGreaterThan(try ink(in: CGRect(x: 0, y: 0, width: image.width, height: image.height / 3)), 200)
+        let firstUnusedRow = Int(ceil(clipHeight * CGFloat(image.height) / view.bounds.height)) + 1
+        XCTAssertEqual(try ink(in: CGRect(x: 0, y: firstUnusedRow, width: image.width,
+                                        height: image.height - firstUnusedRow)), 0,
+                       "The next page must not leak below the actual last complete line")
+    }
+
+    func testPagedTurnsStartAtACompleteLineAndReturnToTheSamePosition() async throws {
+        let config = configuration(fontSize: 20, pageAnimation: 4)
+        let coordinator = ReaderTextView.Coordinator(parent: config)
+        let view: UITextView
+        if #available(iOS 16.0, *) { view = UITextView(usingTextLayoutManager: false) }
+        else { view = UITextView(frame: .zero) }
+        view.frame = CGRect(x: 0, y: 0, width: 402, height: 713)
+        view.contentInsetAdjustmentBehavior = .never
+        view.textContainerInset = UIEdgeInsets(top: 6, left: 16, bottom: 6, right: 16)
+        view.textContainer.lineFragmentPadding = 4
+        view.attributedText = NSAttributedString(string: config.text, attributes: ReaderTypography(configuration: config).bodyAttributes)
+        view.delegate = coordinator
+        coordinator.installDisplayLink(for: view)
+        let window = UIWindow(frame: view.frame)
+        let controller = UIViewController()
+        controller.view = view
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        view.layoutIfNeeded()
+        defer { coordinator.invalidate(); window.isHidden = true }
+
+        let next = UISwipeGestureRecognizer()
+        next.direction = .left
+        let previous = UISwipeGestureRecognizer()
+        previous.direction = .right
+        var offsets: [CGFloat] = [view.contentOffset.y]
+        let pages = ReaderPageLayout.pages(in: view)
+        for page in pages.dropFirst() {
+            coordinator.perform(NSSelectorFromString("swiped:"), with: next)
+            coordinator.updateLoadingFooter(in: view, visible: false)
+            view.layoutIfNeeded()
+            offsets.append(view.contentOffset.y)
+            XCTAssertEqual(view.contentOffset.y, page.offset, accuracy: 0.5)
+            // A used rect includes line spacing, so the preceding line's blank
+            // tail may overlap the top inset. Inspect this page's first glyph.
+            let glyph = view.layoutManager.glyphIndexForCharacter(at: page.renderedRange.location)
+            let first = view.layoutManager.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
+            XCTAssertGreaterThanOrEqual(first.minY + view.textContainerInset.top - view.contentOffset.y,
+                                        view.textContainerInset.top - 0.5, "A new page must show the whole first line")
+        }
+        for expected in offsets.dropLast().reversed() {
+            coordinator.perform(NSSelectorFromString("swiped:"), with: previous)
+            XCTAssertEqual(view.contentOffset.y, expected, accuracy: 0.5)
+        }
+    }
+
     func testPrependingAndRecyclingStayWithinOnePhysicalPixel() async throws {
         let chapters = (4...6).map { chapter($0) }
         let fixture = host(chapters: chapters, active: 5)
@@ -196,6 +336,42 @@ final class ReaderScrollGeometryTests: XCTestCase {
         XCTAssertEqual(view.contentOffset.y, offset.y, accuracy: 0.01)
         XCTAssertTrue(coordinator.blocks[0].chapter === original)
         XCTAssertEqual(Set(coordinator.blocks.map { $0.chapter.chapter.id }), Set(0...4))
+    }
+
+    func testPreloadingShortChaptersPreservesTheInitialChapterHeading() async throws {
+        for content in [DemoContent.readerText, "短章正文，继续向下可以自然读到下一章。"] {
+            try await checkInitialHeadingDuringPreload(content: content)
+        }
+    }
+
+    private func checkInitialHeadingDuringPreload(content: String) async throws {
+        func shortChapter(_ index: Int) -> ReaderScrollChapter {
+            .init(id: index, title: "第\(index + 1)章 · 连续阅读", content: content)
+        }
+        let fixture = host(chapters: [shortChapter(20)], active: 20)
+        defer { fixture.coordinator.displayLink?.invalidate(); fixture.window.isHidden = true }
+        let coordinator = fixture.coordinator, view = fixture.view
+        let layout = view.collectionViewLayout as! ReaderContinuousLayout
+        let initialScreenY = try XCTUnwrap(layout.frames.first).minY - view.contentOffset.y
+        for step in 1...14 {
+            let indices = (20 - step)...(20 + step)
+            coordinator.parent = surface(chapters: indices.map(shortChapter), active: 20)
+            coordinator.update(view)
+            view.layoutIfNeeded()
+            let row = try XCTUnwrap(coordinator.blocks.firstIndex { $0.chapter.chapter.id == 20 })
+            XCTAssertEqual(layout.frames[row].minY - view.contentOffset.y, initialScreenY,
+                           accuracy: 1 / fixture.window.screen.scale)
+            // UIKit snaps offsets to physical pixels, while TextKit chapter heights are fractional.
+            let scale = fixture.window.screen.scale
+            if step == 1 {
+                let snapped = (layout.frames[row].minY * scale).rounded(.down) / scale
+                view.setContentOffset(CGPoint(x: 0, y: snapped), animated: false)
+            }
+            coordinator.update(view)
+            try await Task.sleep(nanoseconds: 20_000_000)
+            XCTAssertTrue(view.accessibilityValue?.hasPrefix("chapter=20 ") == true,
+                          "Pixel rounding must not report the end of the previous chapter: \(view.accessibilityValue ?? "nil")")
+        }
     }
 
     func testReflowKeepsTheSameTextLineAtTheSameScreenPosition() async throws {
@@ -320,14 +496,171 @@ final class ReaderScrollGeometryTests: XCTestCase {
               onRetainChapters: { _ in })
     }
 
-    private func configuration(fontSize: Double = 20) -> ReaderTextView {
-        .init(text: "", title: "", previousTitle: nil, previousText: "", isPreviousReady: false,
+    func testHorizontalPageTurnAcceptsFortyFiveDegreeSwipes() {
+        XCTAssertEqual(ReaderPageTurnGesture.direction(for: CGPoint(x: -80, y: 0)), 1)
+        XCTAssertEqual(ReaderPageTurnGesture.direction(for: CGPoint(x: 80, y: 0)), -1)
+        XCTAssertEqual(ReaderPageTurnGesture.direction(for: CGPoint(x: -80, y: -80)), 1)
+        XCTAssertEqual(ReaderPageTurnGesture.direction(for: CGPoint(x: -80, y: 80)), 1)
+        XCTAssertEqual(ReaderPageTurnGesture.direction(for: CGPoint(x: 80, y: 80)), -1)
+        XCTAssertEqual(ReaderPageTurnGesture.direction(for: CGPoint(x: 80, y: -80)), -1)
+        XCTAssertNil(ReaderPageTurnGesture.direction(for: CGPoint(x: -80, y: -81)))
+        XCTAssertNil(ReaderPageTurnGesture.direction(for: CGPoint(x: 0, y: -80)))
+        XCTAssertNil(ReaderPageTurnGesture.direction(for: CGPoint(x: -20, y: 0)))
+        XCTAssertEqual(ReaderPageTurnGesture.progress(translation: -100, direction: 1, width: 400), 0.25)
+        XCTAssertEqual(ReaderPageTurnGesture.progress(translation: 100, direction: -1, width: 400), 0.25)
+        XCTAssertEqual(ReaderPageTurnGesture.progress(translation: 50, direction: 1, width: 400), 0)
+        XCTAssertFalse(ReaderPageTurnGesture.shouldFinish(translation: -80, velocity: 0, direction: 1, width: 400))
+        XCTAssertTrue(ReaderPageTurnGesture.shouldFinish(translation: -80, velocity: -700, direction: 1, width: 400))
+        XCTAssertFalse(ReaderPageTurnGesture.shouldFinish(translation: -180, velocity: 800, direction: 1, width: 400))
+    }
+
+    func testPageDragTracksTheFingerAndPartialReleaseKeepsTheReadingPosition() async throws {
+        for mode in [0, 1, 2] {
+            let fixture = hostPaged(mode: mode)
+            defer { fixture.coordinator.invalidate(); fixture.window.isHidden = true }
+            let pan = ReaderPanFixture()
+            fixture.viewport.addGestureRecognizer(pan)
+            fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+            let offset = fixture.viewport.textView.contentOffset
+            for distance: CGFloat in [40, 100, 60] {
+                pan.fixtureState = .changed
+                pan.fixtureTranslation = CGPoint(x: -distance, y: 0)
+                fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+                let drag = try XCTUnwrap(fixture.viewport.pageDrag)
+                XCTAssertEqual(drag.progress, distance / fixture.viewport.bounds.width, accuracy: 0.001)
+                if mode != 2 { XCTAssertEqual(drag.previous.transform.tx, -distance, accuracy: 0.5) }
+                XCTAssertEqual(fixture.viewport.textView.contentOffset, offset, "A held gesture must not change the document's position")
+                XCTAssertFalse(fixture.viewport.textView.superview?.isHidden ?? true,
+                               "The snapshot overlay must not hide the live document from accessibility")
+                if distance == 100 {
+                    let image = try XCTUnwrap((drag.next as? UIImageView)?.image?.cgImage)
+                    let width = image.width, height = image.height / 4
+                    var pixels = [UInt8](repeating: 255, count: width * height * 4)
+                    let ink = pixels.withUnsafeMutableBytes { buffer -> Int in
+                        guard let bitmap = CGContext(data: buffer.baseAddress, width: width, height: height,
+                            bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return 0 }
+                        guard let top = image.cropping(to: CGRect(x: 0, y: 0, width: width, height: height)) else { return 0 }
+                        bitmap.draw(top, in: CGRect(x: 0, y: 0, width: width, height: height))
+                        return stride(from: 0, to: buffer.count, by: 4).filter {
+                            buffer[$0] < 100 && buffer[$0 + 1] < 100 && buffer[$0 + 2] < 100
+                        }.count
+                    }
+                    XCTAssertGreaterThan(ink, 200, "The destination snapshot must render the next page's text at its top, not an empty scrolled layer")
+                }
+            }
+            pan.fixtureState = .ended
+            fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+            try await Task.sleep(nanoseconds: 350_000_000)
+            XCTAssertNil(fixture.viewport.pageDrag)
+            XCTAssertEqual(fixture.viewport.textView.contentOffset, offset)
+        }
+    }
+
+    func testPageDragCommitsOnlyOnReleaseAndCancellationKeepsTheCurrentPage() async throws {
+        let fixture = hostPaged(mode: 1)
+        defer { fixture.coordinator.invalidate(); fixture.window.isHidden = true }
+        let view = fixture.viewport.textView
+        let pages = ReaderPageLayout.pages(in: view)
+        XCTAssertGreaterThan(pages.count, 1)
+        let pan = ReaderPanFixture()
+        fixture.viewport.addGestureRecognizer(pan)
+        fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+        pan.fixtureState = .changed
+        pan.fixtureTranslation = CGPoint(x: -view.bounds.width * 0.65, y: 0)
+        fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+        XCTAssertEqual(view.contentOffset.y, pages[0].offset, accuracy: 0.5)
+        pan.fixtureState = .ended
+        fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+        try await Task.sleep(nanoseconds: 350_000_000)
+        XCTAssertEqual(view.contentOffset.y, pages[1].offset, accuracy: 0.5)
+        pan.fixtureState = .began
+        fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+        pan.fixtureState = .changed
+        pan.fixtureTranslation = CGPoint(x: view.bounds.width * 0.65, y: 0)
+        fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+        pan.fixtureState = .cancelled
+        fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+        try await Task.sleep(nanoseconds: 350_000_000)
+        XCTAssertNil(fixture.viewport.pageDrag)
+        XCTAssertEqual(view.contentOffset.y, pages[1].offset, accuracy: 0.5)
+        pan.fixtureState = .began
+        fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+        pan.fixtureState = .changed
+        pan.fixtureTranslation = CGPoint(x: -100, y: 0)
+        fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+        pan.fixtureTranslation = CGPoint(x: 100, y: 0)
+        fixture.coordinator.perform(NSSelectorFromString("panned:"), with: pan)
+        XCTAssertEqual(fixture.viewport.pageDrag?.direction, -1, "Crossing back over the starting point must reveal the other adjacent page")
+        XCTAssertEqual(view.contentOffset.y, pages[1].offset, accuracy: 0.5)
+        fixture.coordinator.cancelPageDrag()
+    }
+
+    private func hostPaged(mode: Int) -> (window: UIWindow, viewport: ReaderViewport, coordinator: ReaderTextView.Coordinator) {
+        let config = configuration(fontSize: 20, pageAnimation: mode)
+        let coordinator = ReaderTextView.Coordinator(parent: config)
+        let textView: UITextView
+        if #available(iOS 16.0, *) { textView = UITextView(usingTextLayoutManager: false) }
+        else { textView = UITextView(frame: .zero) }
+        let viewport = ReaderViewport(textView: textView)
+        viewport.frame = CGRect(x: 0, y: 0, width: 390, height: 800)
+        textView.frame = viewport.bounds
+        textView.contentInsetAdjustmentBehavior = .never
+        textView.textContainerInset = UIEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+        textView.attributedText = NSAttributedString(string: config.text, attributes: ReaderTypography(configuration: config).bodyAttributes)
+        textView.delegate = coordinator
+        coordinator.installDisplayLink(for: textView)
+        coordinator.installGestures(on: viewport)
+        coordinator.updateInteractionMode(on: textView, isScrollMode: false)
+        let window = UIWindow(frame: viewport.frame)
+        window.backgroundColor = .white
+        let controller = UIViewController()
+        controller.view = viewport
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        viewport.layoutIfNeeded()
+        return (window, viewport, coordinator)
+    }
+
+    func testPagedViewportKeepsPageTurnsOnBlankAreaBelowShortText() {
+        let config = configuration(fontSize: 20, pageAnimation: 4)
+        let coordinator = ReaderTextView.Coordinator(parent: config)
+        let textView: UITextView
+        if #available(iOS 16.0, *) { textView = UITextView(usingTextLayoutManager: false) }
+        else { textView = UITextView(frame: .zero) }
+        let viewport = ReaderViewport(textView: textView)
+        viewport.frame = CGRect(x: 0, y: 0, width: 390, height: 800)
+        textView.frame = viewport.bounds
+        coordinator.installGestures(on: viewport)
+        coordinator.updateInteractionMode(on: textView, isScrollMode: false)
+        viewport.layoutIfNeeded()
+
+        let pans = viewport.gestureRecognizers?.compactMap { $0 as? UIPanGestureRecognizer } ?? []
+        XCTAssertEqual(pans.count, 1, "Page turns must live on the full viewport, not only the laid-out text")
+        XCTAssertTrue(pans[0].isEnabled)
+        XCTAssertFalse(textView.gestureRecognizers?.contains { $0 is UISwipeGestureRecognizer } ?? false)
+
+        let blank = CGPoint(x: 200, y: 720)
+        let hit = viewport.hitTest(blank, with: nil)
+        XCTAssertNotNil(hit)
+        XCTAssertTrue(hit === viewport || hit?.isDescendant(of: viewport) == true)
+
+        coordinator.updateInteractionMode(on: textView, isScrollMode: true)
+        XCTAssertFalse(pans[0].isEnabled)
+        XCTAssertTrue(textView.panGestureRecognizer.isEnabled)
+        let textHit = viewport.hitTest(CGPoint(x: 100, y: 100), with: nil)
+        XCTAssertTrue(textHit === textView || textHit?.isDescendant(of: textView) == true,
+                      "The viewport must preserve text-view touches so vertical scrolling still works")
+    }
+
+    private func configuration(fontSize: Double = 20, pageAnimation: Int = 3) -> ReaderTextView {
+        .init(text: pageAnimation == 3 ? "" : String(repeating: "正文包含中文、英文 words 与家庭表情👨‍👩‍👧‍👦，用于验证分页时正文不会被截断。\n", count: 90), title: "", previousTitle: nil, previousText: "", isPreviousReady: false,
               continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
               fontSize: fontSize, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
               paragraphIndent: "　　", paddingLeft: 20, paddingRight: 20, paddingTop: 16, paddingBottom: 16,
               headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
               titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
-              fullJustify: true, pageAnimation: 3, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
+              fullJustify: true, pageAnimation: pageAnimation, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
               backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
               renderRevision: 0, readerPosition: .constant(0), pageRanges: .constant([]),
               currentPage: .constant(1), totalPages: .constant(1), isAutoReading: false,
