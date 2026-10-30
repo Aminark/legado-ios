@@ -31,6 +31,235 @@ final class ReaderScrollGestureTests: XCTestCase {
         wait(for: [refreshed], timeout: 10)
     }
 
+    func testBackupExportAndCloudOptInCanBeCancelled() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-themeMode", "1"]
+        app.launch()
+        let entry = app.buttons["profile.icloud"]
+        for _ in 0..<8 { if entry.exists && entry.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(entry.isHittable); entry.tap()
+        XCTAssertTrue(app.navigationBars["备份与同步"].waitForExistence(timeout: 10))
+        let toggle = app.switches["backup.cloudToggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5)); XCTAssertEqual(toggle.value as? String, "0")
+        for _ in 0..<6 { if toggle.isHittable { break }; app.swipeUp() }
+        toggle.switches.firstMatch.tap()
+        XCTAssertTrue(app.buttons["启用并合并"].waitForExistence(timeout: 5))
+        app.buttons.matching(NSPredicate(format: "label IN %@", ["取消", "Cancel"])).firstMatch.tap()
+        XCTAssertEqual(toggle.value as? String, "0")
+        for _ in 0..<6 { if app.buttons["backup.export"].isHittable { break }; app.swipeDown() }
+        app.buttons["backup.export"].tap()
+        let picker = app.otherElements["Browse View (Picker)"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 15))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.09))
+            .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)))
+        let dismissed = expectation(for: NSPredicate { _, _ in !picker.exists }, evaluatedWith: nil)
+        wait(for: [dismissed], timeout: 5)
+        XCTAssertTrue(app.buttons["backup.export"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["backup.export"].isEnabled)
+        attachScreenshot(app)
+    }
+
+    func testWebDAVConnectBackupAndRemoteRestorePreview() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-themeMode", "1"]
+        app.launch()
+        let entry = app.buttons["profile.icloud"]
+        for _ in 0..<8 { if entry.isHittable { break }; app.swipeUp() }
+        entry.tap()
+        let configure = app.buttons["backup.webdav.configure"]
+        for _ in 0..<6 { if configure.isHittable { break }; app.swipeUp() }
+        configure.tap()
+        let address = app.textFields["backup.webdav.address"]
+        XCTAssertTrue(address.waitForExistence(timeout: 5)); address.tap(); address.typeText("https://dav.example/dav/")
+        let username = app.textFields["backup.webdav.username"]; username.tap(); username.typeText("fixture@example.com")
+        let password = app.secureTextFields["backup.webdav.password"]; password.tap(); password.typeText("synthetic-password")
+        app.buttons["backup.webdav.save"].tap()
+        XCTAssertTrue(app.navigationBars["备份与同步"].waitForExistence(timeout: 5))
+        let upload = app.buttons["backup.webdav.upload"]
+        for _ in 0..<6 { if upload.isHittable { break }; app.swipeUp() }
+        upload.tap()
+        XCTAssertTrue(app.alerts["备份与同步"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["演示备份已保存，未上传到真实云端。"].exists)
+        app.buttons["好"].tap()
+        let list = app.buttons["backup.webdav.list"]
+        for _ in 0..<6 { if list.isHittable { break }; app.swipeUp() }
+        list.tap()
+        let backup = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "backup.remote.item.")).firstMatch
+        XCTAssertTrue(backup.waitForExistence(timeout: 10)); backup.tap()
+        XCTAssertTrue(app.navigationBars["恢复预览"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["backup.restoreConfirm"].isEnabled)
+        attachScreenshot(app)
+        app.buttons["取消"].tap()
+        XCTAssertTrue(app.navigationBars["WebDAV 备份"].waitForExistence(timeout: 5))
+        app.navigationBars["WebDAV 备份"].buttons.element(boundBy: 0).tap()
+        let toggle = app.switches["backup.webdav.toggle"]
+        let navigationBottom = app.navigationBars["备份与同步"].frame.maxY
+        for _ in 0..<6 {
+            if toggle.isHittable && toggle.frame.minY > navigationBottom && toggle.frame.maxY < app.frame.maxY - 100 { break }
+            app.swipeDown()
+        }
+        XCTAssertGreaterThan(toggle.frame.minY, navigationBottom)
+        XCTAssertEqual(toggle.value as? String, "0")
+        toggle.switches.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.alerts["启用 WebDAV 同步"].waitForExistence(timeout: 5))
+        app.buttons["取消"].tap()
+        XCTAssertEqual(toggle.value as? String, "0")
+        toggle.switches.firstMatch.tap(); app.buttons["启用并合并"].tap()
+        XCTAssertEqual(toggle.value as? String, "1")
+        let automatic = app.switches["backup.webDAV.automatic"]
+        for _ in 0..<6 { if automatic.isHittable { break }; app.swipeDown() }
+        XCTAssertTrue(app.descendants(matching: .any)["backup.webDAV.lastAutomatic"].waitForExistence(timeout: 10))
+        XCTAssertEqual(automatic.value as? String, "1")
+        XCTAssertEqual(app.buttons["backup.webDAV.interval"].value as? String, "6 小时")
+        automatic.switches.firstMatch.tap()
+        XCTAssertEqual(automatic.value as? String, "0")
+        attachScreenshot(app)
+    }
+
+    func testGoogleAutomaticBackupDefaultsOnAndRemembersOptOut() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-themeMode", "1"]
+        app.launch()
+        let entry = app.buttons["profile.icloud"]
+        for _ in 0..<8 { if entry.isHittable { break }; app.swipeUp() }
+        entry.tap()
+        let bind = app.buttons["backup.google.bind"]
+        for _ in 0..<8 { if bind.isHittable { break }; app.swipeUp() }
+        bind.tap()
+        let toggle = app.switches["backup.googleDrive.automatic"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        for _ in 0..<6 { if toggle.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(app.descendants(matching: .any)["backup.googleDrive.lastAutomatic"].waitForExistence(timeout: 10))
+        XCTAssertEqual(toggle.value as? String, "1")
+        let interval = app.buttons["backup.googleDrive.interval"]
+        for _ in 0..<6 { if interval.isHittable { break }; app.swipeUp() }
+        XCTAssertEqual(interval.value as? String, "6 小时")
+        interval.tap(); app.buttons["15 分钟"].tap()
+        XCTAssertEqual(interval.value as? String, "15 分钟")
+        interval.tap(); app.buttons["自定义…"].tap()
+        let custom = app.textFields["backup.interval.customMinutes"]
+        XCTAssertTrue(custom.waitForExistence(timeout: 5))
+        custom.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap()
+        custom.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: (custom.value as? String ?? "").count) + "0")
+        XCTAssertEqual(custom.value as? String, "0")
+        app.buttons["backup.interval.save"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.staticTexts["请输入 1～10080 分钟"].waitForExistence(timeout: 5), app.debugDescription)
+        custom.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap()
+        custom.typeText(XCUIKeyboardKey.delete.rawValue + "37")
+        XCTAssertEqual(custom.value as? String, "37")
+        app.buttons["backup.interval.save"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertEqual(interval.value as? String, "37 分钟")
+        attachScreenshot(app)
+        toggle.switches.firstMatch.tap()
+        XCTAssertEqual(toggle.value as? String, "0")
+        let list = app.buttons["backup.google.list"]
+        for _ in 0..<6 { if list.isHittable { break }; app.swipeUp() }
+        list.tap()
+        let items = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "backup.remote.item."))
+        XCTAssertTrue(items.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertEqual(items.count, 1)
+        XCUIDevice.shared.press(.home); app.activate()
+        XCTAssertEqual(items.count, 1)
+        let back = app.navigationBars["Google Drive 备份"].buttons["BackButton"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        back.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.navigationBars["备份与同步"].waitForExistence(timeout: 5))
+        let disconnect = app.buttons["解除 Google 绑定"]
+        for _ in 0..<6 { if disconnect.isHittable { break }; app.swipeUp() }
+        disconnect.tap(); app.alerts["解除 Google 绑定？"].buttons["解除绑定"].tap()
+        XCTAssertTrue(bind.waitForExistence(timeout: 5)); bind.tap()
+        XCTAssertEqual(toggle.value as? String, "0")
+        XCTAssertEqual(interval.value as? String, "37 分钟")
+        attachScreenshot(app)
+    }
+
+    func testGoogleBindingBackupAndConfirmedRemoteRestore() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-themeMode", "2", "-uiDemoSlowBackup"]
+        app.launch()
+        let entry = app.buttons["profile.icloud"]
+        for _ in 0..<8 { if entry.isHittable { break }; app.swipeUp() }
+        entry.tap()
+        let bind = app.buttons["backup.google.bind"]
+        for _ in 0..<8 { if bind.isHittable { break }; app.swipeUp() }
+        bind.tap()
+        let upload = app.buttons["backup.google.upload"]
+        XCTAssertTrue(upload.waitForExistence(timeout: 5))
+        for _ in 0..<6 { if upload.isHittable { break }; app.swipeUp() }
+        upload.tap()
+        let uploadProgress = app.descendants(matching: .any)["backup.rowProgress"]
+        XCTAssertTrue(uploadProgress.waitForExistence(timeout: 2))
+        XCTAssertGreaterThan(uploadProgress.frame.midX, upload.frame.midX)
+        XCTAssertFalse(app.descendants(matching: .any)["backup.progress"].exists)
+        attachScreenshot(app)
+        XCTAssertTrue(app.alerts["备份与同步"].waitForExistence(timeout: 10)); app.buttons["好"].tap()
+        app.buttons["backup.google.list"].tap()
+        let backup = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "backup.remote.item.")).firstMatch
+        XCTAssertTrue(backup.waitForExistence(timeout: 10))
+        let rowY = backup.frame.minY
+        let backupID = String(backup.identifier.dropFirst("backup.remote.item.".count))
+        backup.tap()
+        let previewProgress = app.descendants(matching: .any)["backup.remote.loading.\(backupID)"]
+        XCTAssertTrue(previewProgress.waitForExistence(timeout: 2))
+        XCTAssertGreaterThan(previewProgress.frame.midX, backup.frame.midX)
+        XCTAssertEqual(backup.frame.minY, rowY, accuracy: 1)
+        XCTAssertFalse(backup.isEnabled)
+        XCTAssertFalse(app.staticTexts["正在读取…"].exists)
+        attachScreenshot(app)
+        XCTAssertTrue(app.navigationBars["恢复预览"].waitForExistence(timeout: 10))
+        XCTAssertFalse(previewProgress.exists)
+        app.buttons["backup.restoreConfirm"].tap()
+        XCTAssertTrue(app.alerts["备份与同步"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["备份已合并恢复，原有数据已保留。"].exists)
+        app.buttons["好"].tap()
+        XCTAssertTrue(app.navigationBars["Google Drive 备份"].exists)
+        attachScreenshot(app)
+    }
+
+    func testBackupRestorePreviewRequiresExplicitConfirmation() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-uiBackupPreview", "-themeMode", "2"]
+        app.launch()
+        let entry = app.buttons["profile.icloud"]
+        for _ in 0..<8 { if entry.exists && entry.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(entry.isHittable); entry.tap()
+        XCTAssertTrue(app.navigationBars["恢复预览"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.descendants(matching: .any)["backup.preview.readRecords"].exists)
+        XCTAssertTrue(app.staticTexts["2 条"].exists)
+        XCTAssertTrue(app.staticTexts["128 分钟"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["backup.preview.searchHistory"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["backup.preview.rssHistory"].exists)
+        XCTAssertTrue(app.buttons["backup.restoreConfirm"].isEnabled)
+        XCTAssertTrue(app.staticTexts["3 个"].firstMatch.exists)
+        attachScreenshot(app)
+        app.buttons["取消"].tap()
+        XCTAssertTrue(app.navigationBars["备份与同步"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["backup.restoreConfirm"].exists)
+    }
+
+    func testConfirmedBackupRestoreReturnsToManagerAndReportsSuccess() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-uiBackupPreview", "-themeMode", "1"]
+        app.launch()
+        let entry = app.buttons["profile.icloud"]
+        for _ in 0..<8 { if entry.exists && entry.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(entry.isHittable); entry.tap()
+        XCTAssertTrue(app.navigationBars["恢复预览"].waitForExistence(timeout: 15))
+        app.buttons["backup.restoreConfirm"].tap()
+        XCTAssertTrue(app.alerts["备份与同步"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["备份已合并恢复，原有数据已保留。"].exists)
+        app.buttons["好"].tap()
+        XCTAssertTrue(app.navigationBars["备份与同步"].exists)
+        XCTAssertTrue(app.buttons["backup.export"].isEnabled)
+        attachScreenshot(app)
+    }
+
 
     func testBackgroundSwitchRestoresPresetWithoutDeletingPhoto() throws {
         try exerciseBackgroundSwitch(readingMode: "0")

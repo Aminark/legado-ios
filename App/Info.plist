@@ -53,6 +53,12 @@
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<key>GIDClientID</key>
+	<string>$(GOOGLE_CLIENT_ID)</string>
+	<key>GoogleClientBundleID</key>
+	<string>$(GOOGLE_CLIENT_BUNDLE_ID)</string>
+	<key>LegadoICloudEnabled</key>
+	<string>$(LEGADO_ICLOUD_ENABLED)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -62,6 +68,7 @@
 			<array>
 				<string>legado</string>
 				<string>yuedu</string>
+				<string>$(GOOGLE_REVERSED_CLIENT_ID)</string>
 			</array>
 		</dict>
 	</array>
