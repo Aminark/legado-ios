@@ -65,6 +65,32 @@ struct RuleEditingCompatibilityTests {
         #expect(throws: BookSourceImportError.self) { try RuleImportInput.parse("https://") }
     }
 
+    @Test func yueduImportLinksPreserveRemoteURLsAndRequestOptions() throws {
+        let remote = "https://cdn.mgz.la/shuyuan/250701%E6%9C%80%E5%90%8E%E4%B8%80%E7%89%88%E4%B8%80%E7%A8%8B.json"
+        let catalogLink = "yuedu://booksource/importonline?src=" + remote
+        #expect(RuleImportInput.isDeepLink(try #require(URL(string: catalogLink))))
+        #expect(try RuleImportInput.parse(catalogLink) == .remote(URL(string: remote)!, withoutUserAgent: false))
+
+        let encoded = "YUEDU://bookSource/importOnline?src=https%3A%2F%2Fexample.test%2Fsources.json%3Fname%3D%E4%B9%A6%E6%BA%90%26page%3D2%23requestWithoutUA"
+        let parsed = try RuleImportInput.parse(encoded)
+        #expect(parsed == .remote(URL(string: "https://example.test/sources.json?name=%E4%B9%A6%E6%BA%90&page=2")!, withoutUserAgent: true))
+        #expect(parsed.request()?.value(forHTTPHeaderField: "User-Agent") == "null")
+    }
+
+    @Test func yueduBookSourceImportRejectsOtherKindsAndNestedDeepLinks() throws {
+        for link in [
+            "yuedu://rsssource/importonline?src=https://example.test/rss.json",
+            "yuedu://booksource/export?src=https://example.test/sources.json",
+            "yuedu://booksource/importonline",
+            "yuedu://booksource/importonline?src=file:///etc/passwd",
+            "yuedu://booksource/importonline?src=legado%3A%2F%2Fimport%2FbookSource%3Fsrc%3Dhttps%3A%2F%2Fexample.test%2Fsources.json",
+            "legado://import/bookSource?src=%20yuedu%3A%2F%2Fbooksource%2Fimportonline%3Fsrc%3Dhttps%3A%2F%2Fexample.test%2Fsources.json"
+        ] {
+            #expect(throws: BookSourceImportError.self) { try RuleImportInput.parse(link) }
+        }
+        #expect(!RuleImportInput.isDeepLink(URL(string: "yuedu://rsssource/importonline?src=https://example.test/rss.json")!))
+    }
+
     @Test func purificationTestMatchesReaderScopesAndCaptures() throws {
         var rule = ReplaceRule(id: 1, name: "替换", pattern: "第([0-9]+)章", replacement: "Chapter $1")
         rule.scopeTitle = true

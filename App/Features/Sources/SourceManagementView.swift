@@ -146,6 +146,11 @@ struct SourceManagementView: View {
                     Button("二维码导入", systemImage: "qrcode.viewfinder") { showsQRImporter = true }
                     Button("从文件导入", systemImage: "doc.badge.plus", action: presentFileImporter)
                     Button("URL 或粘贴 JSON", systemImage: "link.badge.plus") { showsTextImporter = true }
+                    NavigationLink {
+                        OnlineBookSourcesView()
+                    } label: {
+                        Label("在线书源", systemImage: "globe")
+                    }
                     Divider()
                     NavigationLink {
                         SourceBatchTestView()

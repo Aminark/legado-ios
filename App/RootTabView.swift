@@ -35,11 +35,7 @@ struct RootTabView: View {
             ReadingNavigationStack {
                 Group {
                     if ProcessInfo.processInfo.arguments.contains("-uiDemoSourceSwitch") {
-                        SourceSwitchView(
-                            book: DemoContent.books[0],
-                            sources: DemoContent.sources,
-                            demoCandidates: DemoContent.sourceSwitchCandidates
-                        ) { _, _ in }
+                        SourceSwitchDemoView()
                     } else if ProcessInfo.processInfo.arguments.contains("-uiDemoBookDetail") {
                         BookDetailView(
                             demoBook: DemoContent.books[0],
@@ -143,6 +139,31 @@ struct RootTabView: View {
         guard let index = arguments.firstIndex(of: "-uiAutomationSearch"),
               arguments.indices.contains(index + 1) else { return "" }
         return arguments[index + 1]
+    }
+}
+
+private struct SourceSwitchDemoView: View {
+    @State private var sourceSwitchCache = SourceSwitchCache()
+    @State private var book = DemoContent.sourceSwitchBook
+    @State private var showsSourceSwitch = true
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("当前书源：\(book.originName)")
+                .accessibilityIdentifier("sourceSwitch.demo.current")
+            Button("选择书源") { showsSourceSwitch = true }
+        }
+        .sheet(isPresented: $showsSourceSwitch) {
+            ReadingNavigationStack {
+                SourceSwitchView(book: book, sources: DemoContent.sources,
+                                 demoCandidates: DemoContent.sourceSwitchCandidates,
+                                 service: DemoContent.sourceSwitchService,
+                                 referenceService: DemoContent.sourceSwitchReferenceService,
+                                 cache: sourceSwitchCache) { report, _ in
+                    book = report.book
+                }
+            }
+        }
     }
 }
 

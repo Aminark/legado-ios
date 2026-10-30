@@ -33,7 +33,7 @@ public protocol BookDetailLoading: Sendable {
 
 extension NetworkBookService: BookDetailLoading {}
 
-public struct BookSourceCandidate: Identifiable, Sendable, Equatable {
+public struct BookSourceCandidate: Codable, Identifiable, Sendable, Equatable {
     public var book: SearchBook
     public var score: Int
     public var id: String { book.origin + "|" + book.bookURL }
@@ -44,7 +44,12 @@ public struct BookSourceCandidate: Identifiable, Sendable, Equatable {
     }
 }
 
-public struct BookSourceSwitchReport: Sendable {
+public struct BookSourceCandidateUpdate: Sendable {
+    public var candidates: [BookSourceCandidate]
+    public var searchedSourceIDs: Set<String>
+}
+
+public struct BookSourceSwitchReport: Codable, Sendable {
     public var book: Book
     public var chapters: [BookChapter]
     public var diagnostics: [RuleDiagnostic]
@@ -89,11 +94,7 @@ public struct BookSourceProgressMapper: Sendable {
         migrated.totalChapterNum = chapters.count
         migrated.latestChapterTitle = chapters.last(where: { !$0.isVolume })?.title ?? chapters.last?.title
 
-        let oldTitle = current.durChapterTitle ?? ""
-        let normalizedOldTitle = normalize(oldTitle)
-        let exactIndex = chapters.firstIndex { chapter in
-            chapter.title == oldTitle || (!normalizedOldTitle.isEmpty && normalize(chapter.title) == normalizedOldTitle)
-        }
+        let exactIndex = matchingChapterIndex(title: current.durChapterTitle ?? "", chapters: chapters)
         let resolvedIndex: Int
         if let exactIndex {
             resolvedIndex = exactIndex
@@ -111,6 +112,26 @@ public struct BookSourceProgressMapper: Sendable {
         migrated.durChapterTitle = chapters.indices.contains(resolvedIndex) ? chapters[resolvedIndex].title : nil
         migrated.durChapterTime = current.durChapterTime
         return .init(book: migrated, chapters: chapters, exactChapterMatch: exactIndex != nil)
+    }
+
+    private func matchingChapterIndex(title: String, chapters: [BookChapter]) -> Int? {
+        let normalizedTitle = normalize(title)
+        guard !normalizedTitle.isEmpty else { return nil }
+        let readable = chapters.indices.filter { !chapters[$0].isVolume }
+        let fullMatches = readable.filter { normalize(chapters[$0].title) == normalizedTitle }
+        if !fullMatches.isEmpty { return fullMatches.count == 1 ? fullMatches.first : nil }
+
+        let name = chapterName(title)
+        guard !name.isEmpty else { return nil }
+        let nameMatches = readable.filter { chapterName(chapters[$0].title) == name }
+        return nameMatches.count == 1 ? nameMatches.first : nil
+    }
+
+    private func chapterName(_ title: String) -> String {
+        // Sources can number chapters per volume or across the whole book.
+        // Keep the descriptive name, including any numbers within that name.
+        let prefix = #"^\s*第\s*[0-9０-９〇零一二两兩三四五六七八九十百千万萬壹贰貳叁參肆伍陆陸柒捌玖拾佰仟]+\s*[章回]\s*"#
+        return normalize(title.replacingOccurrences(of: prefix, with: "", options: .regularExpression))
     }
 
     private func normalize(_ value: String) -> String {
@@ -154,6 +175,20 @@ public actor BookSourceSwitchService {
     }
 
     public func candidateUpdates(for book: Book, sources: [BookSource]) -> AsyncStream<[BookSourceCandidate]> {
+        let updates = candidateSearchUpdates(for: book, sources: sources)
+        return AsyncStream { continuation in
+            let task = Task {
+                for await update in updates {
+                    guard !Task.isCancelled else { break }
+                    continuation.yield(update.candidates)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    public func candidateSearchUpdates(for book: Book, sources: [BookSource]) -> AsyncStream<BookSourceCandidateUpdate> {
         let eligible = sources.enumerated()
             .filter { $0.element.enabled && $0.element.bookSourceUrl != book.origin && $0.element.searchUrl?.isEmpty == false }
             .sorted {
@@ -167,12 +202,14 @@ public actor BookSourceSwitchService {
         return AsyncStream { continuation in
             let task = Task {
                 var found: [String: SearchBook] = [:]
+                var searched = Set<String>()
                 for await outcome in searcher.searchStream(keyword: book.name, sources: eligible) {
                     guard !Task.isCancelled else { break }
+                    if eligibleIDs.contains(outcome.sourceID) { searched.insert(outcome.sourceID) }
                     for candidate in outcome.books where eligibleIDs.contains(candidate.origin) {
                         found[BookSourceCandidate(book: candidate, score: 0).id] = candidate
                     }
-                    continuation.yield(Self.ranked(Array(found.values), for: book))
+                    continuation.yield(.init(candidates: Self.ranked(Array(found.values), for: book), searchedSourceIDs: searched))
                 }
                 continuation.finish()
             }
@@ -202,7 +239,9 @@ public actor BookSourceSwitchService {
         current: Book,
         candidate: SearchBook,
         source: BookSource,
-        now: Int64? = nil
+        now: Int64? = nil,
+        persistChapters: Bool = true,
+        requireExactChapterMatch: Bool = false
     ) async -> BookSourceSwitchReport? {
         guard !Task.isCancelled else { return nil }
         let detail = await detailLoader.loadDetail(searchBook: candidate, source: source)
@@ -217,6 +256,7 @@ public actor BookSourceSwitchService {
             now: now ?? Int64(Date().timeIntervalSince1970 * 1_000)
         )
         result.diagnostics = detail.diagnostics + toc.diagnostics
+        if requireExactChapterMatch, !result.exactChapterMatch { return result }
         let readableIndex = result.chapters.indices.dropFirst(result.book.durChapterIndex)
             .first(where: { !result.chapters[$0].isVolume })
             ?? result.chapters.indices.last(where: { !result.chapters[$0].isVolume })
@@ -225,6 +265,7 @@ public actor BookSourceSwitchService {
             result.book.durChapterIndex = readableIndex
             result.book.durChapterTitle = result.chapters[readableIndex].title
             result.book.durChapterPos = 0
+            result.exactChapterMatch = false
         }
         let chapter = result.chapters[readableIndex]
         let nextURL = result.chapters.dropFirst(readableIndex + 1).first(where: { !$0.isVolume })?.url
@@ -237,6 +278,11 @@ public actor BookSourceSwitchService {
               !content.diagnostics.contains(where: { $0.severity == .error }) else { return nil }
         result.verifiedContent = content
         result.diagnostics += content.diagnostics
+        return persistChapters ? await persistPreparedSwitch(result) : result
+    }
+
+    public func persistPreparedSwitch(_ report: BookSourceSwitchReport) async -> BookSourceSwitchReport {
+        var result = report
         do {
             try await chapterRepository.save(result.chapters, bookURL: result.book.bookUrl)
         } catch {

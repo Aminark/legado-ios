@@ -134,6 +134,12 @@
         ED1000000000000000000001 /* EPUBReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000001; };
         ED1000000000000000000002 /* Readium-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000002; };
         ED1000000000000000000003 /* EPUBReaderIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000003; };
+		2CB46AD1EB648C80223FD1A0 /* SourceSwitchViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9F8D3AD3AA1AEA23443223D /* SourceSwitchViewModel.swift */; };
+		FA0EFE615E15C93303008471 /* SourceChapterVerification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2055729792E782CB6ED4FD08 /* SourceChapterVerification.swift */; };
+		F4BB9B2806014E641618C2A3 /* SourceSwitchCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23753E80D4BC398548CFE759 /* SourceSwitchCache.swift */; };
+		E27A475B2546435ABD3CD8E2 /* OnlineBookSourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0376290E583A489A4397E6 /* OnlineBookSourcesView.swift */; };
+		56200A1FB456EF01272EFE2B /* RuleImportDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C5EC0473F0357860F9F154E /* RuleImportDownloader.swift */; };
+		C6A4C23E2574DEA8A921D6A8 /* OnlineSourceBrowserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F3DB7C3D981CC9714E7F490 /* OnlineSourceBrowserTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -263,6 +269,12 @@
         ED2000000000000000000001 /* EPUBReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EPUBReaderView.swift; sourceTree = "<group>"; };
         ED2000000000000000000002 /* Readium-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Readium-LICENSE.txt"; sourceTree = "<group>"; };
         ED2000000000000000000003 /* EPUBReaderIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/LegadoReaderTests/EPUBReaderIntegrationTests.swift; sourceTree = SOURCE_ROOT; };
+		B9F8D3AD3AA1AEA23443223D /* SourceSwitchViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Features/Books/SourceSwitchViewModel.swift"; sourceTree = SOURCE_ROOT; };
+		2055729792E782CB6ED4FD08 /* SourceChapterVerification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Features/Books/SourceChapterVerification.swift"; sourceTree = SOURCE_ROOT; };
+		23753E80D4BC398548CFE759 /* SourceSwitchCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Features/Books/SourceSwitchCache.swift"; sourceTree = SOURCE_ROOT; };
+		1B0376290E583A489A4397E6 /* OnlineBookSourcesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Features/Sources/OnlineBookSourcesView.swift"; sourceTree = SOURCE_ROOT; };
+		4C5EC0473F0357860F9F154E /* RuleImportDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/LegadoCore/Import/RuleImportDownloader.swift"; sourceTree = SOURCE_ROOT; };
+		0F3DB7C3D981CC9714E7F490 /* OnlineSourceBrowserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Tests/LegadoReaderTests/OnlineSourceBrowserTests.swift"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -305,7 +317,8 @@
 				A20000000000000000000024 /* txtTocRule.json */,
 				A20000000000000000000025 /* httpTTS.json */,
 				D40000000000000000000002 /* Products */,
-			);
+
+				0F3DB7C3D981CC9714E7F490 /* OnlineSourceBrowserTests.swift */,);
 			sourceTree = "<group>";
 		};
 		A30000000000000000000001 /* App */ = {
@@ -340,7 +353,8 @@
 				A20000000000000000000004 /* SourceManagementView.swift */,
 				A2000000000000000000000D /* SourceDebugView.swift */,
 				A2000000000000000000000E /* SourceLoginView.swift */,
-			);
+
+				1B0376290E583A489A4397E6 /* OnlineBookSourcesView.swift */,);
 			path = Features/Sources;
 			sourceTree = "<group>";
 		};
@@ -361,7 +375,10 @@
 				A20000000000000000000008 /* BookDetailView.swift */,
 				A20000000000000000000015 /* SourceSwitchView.swift */,
 				A2000000000000000000000F /* LocalBookDetailView.swift */,
-			);
+
+				B9F8D3AD3AA1AEA23443223D /* SourceSwitchViewModel.swift */,
+				2055729792E782CB6ED4FD08 /* SourceChapterVerification.swift */,
+				23753E80D4BC398548CFE759 /* SourceSwitchCache.swift */,);
 			path = Features/Books;
 			sourceTree = "<group>";
 		};
@@ -461,7 +478,8 @@
 				C20000000000000000000004 /* BookSourceValidator.swift */,
 				C20000000000000000000005 /* BookSourceImporter.swift */,
 				C20000000000000000000029 /* RSSSourceImporter.swift */,
-			);
+
+				4C5EC0473F0357860F9F154E /* RuleImportDownloader.swift */,);
 			path = Import;
 			sourceTree = "<group>";
 		};
@@ -721,7 +739,8 @@
 
 /* Begin PBXSourcesBuildPhase section */
 		B30000000000000000000050 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000050, AA1100000000000000000009, AA1100000000000000000010, DA1000000000000000000001); runOnlyForDeploymentPostprocessing = 0; };
-		B30000000000000000000030 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000030, BC1000000000000000000001, ED1000000000000000000003, DA1000000000000000000002); runOnlyForDeploymentPostprocessing = 0; };
+		B30000000000000000000030 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000030, BC1000000000000000000001, ED1000000000000000000003, DA1000000000000000000002,
+                C6A4C23E2574DEA8A921D6A8 /* OnlineSourceBrowserTests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
 		D30000000000000000000002 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -832,7 +851,12 @@
 				C1000000000000000000002B /* RSSReadingPolicy.swift in Sources */,
 				C1000000000000000000002C /* RSSSourceDebugger.swift in Sources */,
 				C1000000000000000000002E /* HttpTTSService.swift in Sources */,
-			);
+
+				2CB46AD1EB648C80223FD1A0 /* SourceSwitchViewModel.swift in Sources */,
+				FA0EFE615E15C93303008471 /* SourceChapterVerification.swift in Sources */,
+				F4BB9B2806014E641618C2A3 /* SourceSwitchCache.swift in Sources */,
+				E27A475B2546435ABD3CD8E2 /* OnlineBookSourcesView.swift in Sources */,
+				56200A1FB456EF01272EFE2B /* RuleImportDownloader.swift in Sources */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
