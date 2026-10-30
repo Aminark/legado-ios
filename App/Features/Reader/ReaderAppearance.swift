@@ -96,6 +96,20 @@ enum ReaderBackgroundStore {
 }
 
 enum ReaderFontStore {
+    static func resolvedFont(at path: String, size: CGFloat, weight: Int) -> UIFont {
+        if let imported = font(at: path, size: size, weight: weight) { return imported }
+        let name: String
+        let systemWeight: UIFont.Weight
+        switch weight {
+        case 1: name = "PingFangSC-Semibold"; systemWeight = .bold
+        case 2: name = "PingFangSC-Light"; systemWeight = .light
+        default: name = "PingFangSC-Regular"; systemWeight = .regular
+        }
+        // The Latin system font's fallback scales Chinese glyphs down. Select
+        // PingFang directly so the requested size also describes Chinese text.
+        return UIFont(name: name, size: size) ?? UIFont.systemFont(ofSize: size, weight: systemWeight)
+    }
+
     static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Legado/fonts", isDirectory: true)

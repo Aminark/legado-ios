@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import Testing
 import LegadoCore
 @testable import LegadoAppModels
@@ -394,6 +395,261 @@ struct ReaderRegressionTests {
         #expect(model.content == "正文4")
         #expect(model.scrollChapters.isEmpty)
         #expect(!model.isLoadingScrollAhead)
+    }
+
+    @Test func cachedChaptersKeepAdvancingThePrefetchWindow() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let book = Book(bookUrl: "rolling", name: "书", origin: "source")
+        let chapters = (0..<5).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.id, index: $0) }
+        try await cache.save(.init(bookURL: book.id, chapterURL: "c0", content: "初始缓存", sourceID: "source"))
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0,
+            source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: SourceAwareReaderLoader(), cache: cache, prefetchLimit: 1)
+        await model.load(rules: [])
+        #expect(model.loadedFromCache)
+        for target in 1...3 {
+            for _ in 0..<100 {
+                if try await cache.load(bookURL: book.id, chapterURL: "c\(target)") != nil { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            #expect(try await cache.load(bookURL: book.id, chapterURL: "c\(target)") != nil)
+            #expect(try await cache.load(bookURL: book.id, chapterURL: "c\(target + 1)") == nil)
+            #expect(await model.turnPagedChapter(direction: 1, rules: []))
+            #expect(model.currentIndex == target)
+            #expect(model.loadedFromCache)
+        }
+        model.cancelPreloading()
+    }
+
+    @Test func returningToAnAlreadyLoadedPageRestartsPreloading() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let book = Book(bookUrl: "resume", name: "书", origin: "source")
+        let chapters = (0..<3).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.id, index: $0) }
+        try await cache.save(.init(bookURL: book.id, chapterURL: "c0", content: "缓存正文", sourceID: "source"))
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0,
+            source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: SourceAwareReaderLoader(), cache: cache, prefetchLimit: 1)
+        await model.load(rules: [], prefetchNextChapter: false)
+        model.cancelPreloading()
+        await model.load(rules: [])
+        for _ in 0..<100 {
+            if try await cache.load(bookURL: book.id, chapterURL: "c1") != nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(try await cache.load(bookURL: book.id, chapterURL: "c1") != nil)
+        #expect(model.currentIndex == 0 && model.content == "缓存正文")
+        model.cancelPreloading()
+    }
+
+    @Test func preparingAPagedPreviewDoesNotNavigateAndCancellationRejectsItsCommit() async throws {
+        let book = Book(bookUrl: "preview", name: "书")
+        let chapters = (0..<3).map { BookChapter(url: "p\($0)", title: "第\($0)章", bookUrl: book.id, index: $0) }
+        let model = ReaderViewModel(demoBook: book, chapters: chapters, initialIndex: 1, content: "正文👨‍👩‍👧‍👦末尾")
+        let preview = try #require(await model.preparePagedChapter(direction: -1, rules: []))
+        #expect(model.currentIndex == 1 && model.requestedPosition == 0 && model.chapterTransition == nil)
+        #expect(preview.targetIndex == 0 && preview.content == model.content)
+        model.cancelPagedChapterTurn()
+        #expect(!model.commitPagedChapter(preview))
+        #expect(model.currentIndex == 1 && model.pagedChapterDirection == nil)
+        let retry = try #require(await model.preparePagedChapter(direction: -1, rules: []))
+        #expect(model.commitPagedChapter(retry))
+        #expect(model.currentIndex == 0 && model.requestedPosition == retry.content.utf16.count - 1)
+        #expect(!model.commitPagedChapter(retry), "A released gesture can commit only once")
+    }
+
+    @Test func aPreparedPageCannotCommitAfterDirectoryNavigation() async throws {
+        let book = Book(bookUrl: "preview-directory", name: "书")
+        let chapters = (0..<3).map { BookChapter(url: "p\($0)", title: "第\($0)章", bookUrl: book.id, index: $0) }
+        let model = ReaderViewModel(demoBook: book, chapters: chapters, initialIndex: 0, content: "原正文")
+        let preview = try #require(await model.preparePagedChapter(direction: 1, rules: []))
+        model.select(index: 2, position: 2)
+        await model.load(rules: [])
+        #expect(!model.commitPagedChapter(preview))
+        #expect(model.currentIndex == 2 && model.requestedPosition == 2)
+    }
+
+    @Test func aSlowPagedTurnKeepsTheOldDocumentAndRejectsDuplicateTurns() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let loader = SuspendedReaderChapterLoader()
+        let book = Book(bookUrl: "paged", name: "书", origin: "source")
+        let chapters = (0..<3).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.id, index: $0) }
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0,
+            source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: loader,
+            cache: .init(directory: directory), prefetchLimit: 0)
+        await model.load(rules: [])
+        let turn = Task { await model.turnPagedChapter(direction: 1, rules: []) }
+        await loader.waitUntilSuspended()
+        #expect(model.currentIndex == 0 && model.content == "正文0")
+        #expect(model.hasLoadedCurrentChapter && !model.isLoading)
+        #expect(model.pagedChapterDirection == 1)
+        #expect(!(await model.turnPagedChapter(direction: 1, rules: [])))
+        await loader.release()
+        #expect(await turn.value)
+        #expect(model.currentIndex == 1 && model.content == "迟到的正文")
+        #expect(model.requestedPosition == 0 && model.pagedChapterDirection == nil)
+        #expect(model.chapterTransition?.direction == 1)
+        #expect(await model.turnPagedChapter(direction: -1, rules: []))
+        #expect(model.content == "正文0" && model.currentIndex == 0)
+        #expect(model.requestedPosition == "正文0".utf16.count - 1)
+        #expect(model.chapterTransition?.direction == -1)
+    }
+
+    @Test(arguments: [false, true])
+    func latePagedTurnsCannotOverwriteDirectoryNavigationOrAClosedReader(_ navigate: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let loader = SuspendedReaderChapterLoader()
+        let book = Book(bookUrl: "cancel-paged", name: "书", origin: "source")
+        let chapters = (0..<3).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.id, index: $0) }
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0,
+            source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: loader,
+            cache: .init(directory: directory), prefetchLimit: 0)
+        await model.load(rules: [])
+        let turn = Task { await model.turnPagedChapter(direction: 1, rules: []) }
+        await loader.waitUntilSuspended()
+        if navigate { model.select(index: 2, position: 2); await model.load(rules: []) }
+        else { model.cancelPreloading() }
+        await loader.release()
+        #expect(!(await turn.value))
+        #expect(model.currentIndex == (navigate ? 2 : 0))
+        #expect(model.content == (navigate ? "正文2" : "正文0"))
+        #expect(model.chapterTransition == nil && model.pagedChapterDirection == nil)
+    }
+
+    @Test func failedPagedTurnsKeepTheCurrentChapterAndRetryWithoutCachingTheFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let loader = RecoveringReaderLoader()
+        let book = Book(bookUrl: "retry-paged", name: "书", origin: "source")
+        let chapters = (0..<3).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.id, index: $0) }
+        try await cache.save(.init(bookURL: book.id, chapterURL: "c0", content: "原章节", sourceID: "source"))
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0,
+            source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: loader, cache: cache, prefetchLimit: 0)
+        await model.load(rules: [])
+        #expect(!(await model.turnPagedChapter(direction: 1, rules: [])))
+        #expect(model.content == "原章节" && model.currentIndex == 0)
+        #expect(model.pagedChapterError?.contains("403") == true)
+        #expect(try await cache.load(bookURL: book.id, chapterURL: "c1") == nil)
+        await loader.recover()
+        #expect(await model.turnPagedChapter(direction: 1, rules: []))
+        #expect(model.content == "恢复正文1" && model.pagedChapterError == nil)
+        #expect(try await cache.load(bookURL: book.id, chapterURL: "c2") == nil, "A disabled preload setting must remain disabled")
+    }
+
+    @Test func readerPrefetchCachesUpcomingChaptersFromTheCurrentPage() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapters = (0..<4).map { BookChapter(url: "chapter\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        let model = ReaderViewModel(
+            book: book,
+            chapters: chapters,
+            initialIndex: 1,
+            source: .init(bookSourceUrl: "source", bookSourceName: "源"),
+            service: SourceAwareReaderLoader(),
+            cache: cache
+        )
+        await model.load(rules: [], prefetchNextChapter: false)
+        model.cacheNextTen()
+        for _ in 0..<80 where model.isCaching {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(!model.isCaching)
+        #expect(model.cacheTotal == 3)
+        #expect(model.cacheCompleted == 3)
+        #expect(model.cacheSucceeded == 3)
+        #expect(model.cacheFailed == 0)
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapters[1].url)?.content == "source正文1")
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapters[3].url)?.content == "source正文3")
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapters[0].url) == nil)
+        #expect(model.isChapterCached(chapters[1]))
+        #expect(model.isChapterCached(chapters[3]))
+        #expect(!model.isChapterCached(chapters[0]))
+    }
+
+    @Test func batchCachingPublishesIncrementalAvailabilityAndSeparatesFailures() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let book = Book(bookUrl: "batch", name: "书", origin: "source")
+        let chapters = (0..<20).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0,
+            source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: BatchCacheReaderLoader(), cache: cache)
+        var updates = 0
+        let token = model.$cacheCompleted.sink { _ in updates += 1 }
+        model.cacheRemaining()
+        var sawIncrementalState = false
+        for _ in 0..<200 {
+            if model.isCaching, model.cacheCompleted > 0 {
+                sawIncrementalState = model.isChapterCached(chapters[1])
+            }
+            if !model.isCaching { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        withExtendedLifetime(token) {}
+        #expect(sawIncrementalState)
+        #expect(!model.isCaching)
+        #expect(model.cacheCompleted == 20)
+        #expect(model.cacheFailed == 3)
+        #expect(model.cacheSucceeded == 17)
+        #expect(model.cacheError == "HTTP 403")
+        #expect(!model.isChapterCached(chapters[5]))
+        #expect(model.isChapterCached(chapters[19]))
+        #expect(updates < model.cacheCompleted, "Progress must be coalesced instead of invalidating the directory once per chapter")
+        try await cache.removeAll()
+        await model.refreshCachedChapters()
+        #expect(model.cachedChapterURLs.isEmpty)
+    }
+
+    @Test func stoppedBatchCannotOverwriteTheProgressOfANewBatch() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let book = Book(bookUrl: "batch", name: "书", origin: "source")
+        let chapters = (0..<20).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0,
+            source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: BatchCacheReaderLoader(), cache: .init(directory: directory))
+        model.cacheRemaining()
+        try await Task.sleep(nanoseconds: 30_000_000)
+        model.cancelCaching()
+        model.cacheNextTen()
+        for _ in 0..<200 where model.isCaching { try await Task.sleep(nanoseconds: 10_000_000) }
+        #expect(!model.isCaching)
+        #expect(model.cacheTotal == 10)
+        #expect(model.cacheCompleted == 10)
+        #expect(model.cacheFailed == 1)
+        #expect(!model.isChapterCached(chapters[15]))
+    }
+
+    @Test func clearingDiskCacheDoesNotTreatTheDisplayedBodyAsDownloaded() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapter = BookChapter(url: "c0", title: "一", bookUrl: book.bookUrl, index: 0)
+        let model = ReaderViewModel(book: book, chapters: [chapter], initialIndex: 0,
+            source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: SourceAwareReaderLoader(), cache: cache)
+        await model.load(rules: [], prefetchNextChapter: false)
+        await model.refreshCachedChapters()
+        #expect(model.isChapterCached(chapter))
+        try await cache.removeAll()
+        await model.refreshCachedChapters()
+        #expect(!model.content.isEmpty)
+        #expect(!model.isChapterCached(chapter))
+    }
+}
+
+private struct BatchCacheReaderLoader: ChapterContentLoading {
+    func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
+        try? await Task.sleep(nanoseconds: 90_000_000)
+        if chapter.index > 0, chapter.index.isMultiple(of: 5) {
+            return .init(diagnostics: [.init(severity: .error, code: "content.request", message: "HTTP 403", rule: chapter.url)])
+        }
+        return .init(title: chapter.title, content: "测试正文\(chapter.index)")
     }
 }
 

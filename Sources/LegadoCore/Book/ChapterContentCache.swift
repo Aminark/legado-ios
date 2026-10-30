@@ -117,15 +117,43 @@ public actor ChapterContentCache {
         return (files.count, files.reduce(0) { $0 + $1.size })
     }
 
+    public func cachedChapterURLs(bookURL: String, among chapters: [BookChapter]) throws -> Set<String> {
+        let digests = try cachedChapterDigests(bookURL: bookURL)
+        guard !digests.isEmpty else { return [] }
+        return Set(chapters.compactMap { chapter in
+            guard !chapter.url.isEmpty, digests.contains(digest(chapter.url)) else { return nil }
+            return chapter.url
+        })
+    }
+
     public func pruneIfNeeded() throws {
         let maximumTotalBytes = maximumTotalBytes ?? ApplicationSettingsStore.shared.settings.chapterCacheMB * 1024 * 1024
-        var files = try cacheFiles().sorted { $0.modified < $1.modified }
+        var files = try cacheFiles()
         var total = files.reduce(0) { $0 + $1.size }
-        while total > maximumTotalBytes, let oldest = files.first {
+        guard total > maximumTotalBytes else { return }
+        files.sort { $0.modified < $1.modified }
+        for oldest in files {
+            guard total > maximumTotalBytes else { break }
             try FileManager.default.removeItem(at: oldest.url)
             total -= oldest.size
-            files.removeFirst()
         }
+    }
+
+    private func cachedChapterDigests(bookURL: String) throws -> Set<String> {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+        let prefix = digest(bookURL) + "-"
+        var result: Set<String> = []
+        for url in try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            guard url.pathExtension == "json" else { continue }
+            let name = url.deletingPathExtension().lastPathComponent
+            guard name.hasPrefix(prefix) else { continue }
+            result.insert(String(name.dropFirst(prefix.count)))
+        }
+        return result
     }
 
     private func cacheFiles() throws -> [(url: URL, size: Int, modified: Date)] {
@@ -196,9 +224,36 @@ public struct CoordinatedChapterContent: Sendable {
     }
 }
 
+public enum ChapterPrefetchResult: Sendable, Equatable {
+    case cached
+    case downloaded
+    case failed(String)
+
+    public var isAvailable: Bool {
+        switch self {
+        case .cached, .downloaded: true
+        case .failed: false
+        }
+    }
+}
+
 public actor ChapterContentCoordinator {
     private let loader: any ChapterContentLoading
     private let cache: ChapterContentCache
+    private struct RequestKey: Hashable {
+        let book: String
+        let chapter: String
+        let source: String
+        let next: String?
+        let maxPages: Int
+        let generation: Int
+    }
+    private struct Download: Sendable {
+        let report: ChapterContentReport
+        var cacheError: String? = nil
+    }
+    private var requests: [RequestKey: (id: UUID, task: Task<Download, Never>)] = [:]
+    private var requestGenerations: [String: Int] = [:]
 
     public init(loader: any ChapterContentLoading = NetworkBookService(), cache: ChapterContentCache = .live()) {
         self.loader = loader
@@ -213,6 +268,7 @@ public actor ChapterContentCoordinator {
         maxPages: Int = 20,
         forceRefresh: Bool = false
     ) async -> CoordinatedChapterContent {
+        if forceRefresh { cancelRequests(bookURL: book.bookUrl) }
         if !forceRefresh, let cached = try? await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url),
                   cached.sourceID == nil || cached.sourceID == source.id {
             return .init(report: .init(
@@ -221,15 +277,47 @@ public actor ChapterContentCoordinator {
                 supplementalContent: cached.supplementalContent
             ), loadedFromCache: true)
         }
-        let report = await loader.loadContent(
-            book: book,
-            chapter: chapter,
-            source: source,
-            nextChapterURL: nextChapterURL,
-            maxPages: maxPages
-        )
-        await saveContent(report, book: book, chapter: chapter, source: source)
-        return .init(report: report, loadedFromCache: false)
+        let download = await download(book: book, chapter: chapter, source: source, nextChapterURL: nextChapterURL, maxPages: maxPages)
+        return .init(report: download.report, loadedFromCache: false)
+    }
+
+    private func download(book: Book, chapter: BookChapter, source: BookSource,
+                          nextChapterURL: String?, maxPages: Int) async -> Download {
+        let generation = requestGenerations[book.bookUrl, default: 0]
+        let key = RequestKey(book: book.bookUrl, chapter: chapter.url, source: source.id,
+                             next: nextChapterURL, maxPages: maxPages, generation: generation)
+        let request: (id: UUID, task: Task<Download, Never>)
+        if let existing = requests[key] { request = existing }
+        else {
+            let task = Task { [loader, cache] in
+                let report = await loader.loadContent(book: book, chapter: chapter, source: source,
+                                                      nextChapterURL: nextChapterURL, maxPages: maxPages)
+                guard !Task.isCancelled, requestGenerations[book.bookUrl, default: 0] == generation else {
+                    return Download(report: .init(diagnostics: [.init(severity: .error, code: "content.cancelled",
+                        message: "章节请求已取消", rule: chapter.url)]))
+                }
+                guard !report.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !report.diagnostics.contains(where: { $0.severity == .error }) else { return Download(report: report) }
+                do {
+                    try await cache.save(.init(bookURL: book.bookUrl, chapterURL: chapter.url, title: report.title,
+                        content: report.content, supplementalContent: report.supplementalContent, sourceID: source.id))
+                    return Download(report: report)
+                } catch { return Download(report: report, cacheError: error.localizedDescription) }
+            }
+            request = (UUID(), task)
+            requests[key] = request
+        }
+        let result = await request.task.value
+        if requests[key]?.id == request.id { requests[key] = nil }
+        return result
+    }
+
+    private func cancelRequests(bookURL: String) {
+        requestGenerations[bookURL, default: 0] &+= 1
+        for (key, request) in requests where key.book == bookURL {
+            request.task.cancel()
+            requests[key] = nil
+        }
     }
 
     public func saveContent(_ report: ChapterContentReport, book: Book, chapter: BookChapter, source: BookSource) async {
@@ -265,14 +353,37 @@ public actor ChapterContentCoordinator {
         source: BookSource,
         nextChapterURL: String? = nil
     ) async -> Bool {
+        await prefetchResult(book: book, chapter: chapter, source: source, nextChapterURL: nextChapterURL) == .downloaded
+    }
+
+    public func prefetchResult(
+        book: Book,
+        chapter: BookChapter,
+        source: BookSource,
+        nextChapterURL: String? = nil
+    ) async -> ChapterPrefetchResult {
+        guard !Task.isCancelled else { return .failed("缓存已停止") }
         if let cached = try? await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url),
-           cached.sourceID == nil || cached.sourceID == source.id { return false }
-        let result = await load(book: book, chapter: chapter, source: source, nextChapterURL: nextChapterURL)
-        return !Task.isCancelled && !result.report.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !result.report.diagnostics.contains(where: { $0.severity == .error })
+           cached.sourceID == nil || cached.sourceID == source.id { return .cached }
+        let result = await download(book: book, chapter: chapter, source: source, nextChapterURL: nextChapterURL, maxPages: 20)
+        let report = result.report
+        guard !Task.isCancelled else { return .failed("缓存已停止") }
+        if let error = report.diagnostics.first(where: { $0.severity == .error }) {
+            return .failed(error.message)
+        }
+        guard !report.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failed("书源未返回正文")
+        }
+        if let error = result.cacheError { return .failed(error) }
+        return .downloaded
     }
 
     public func invalidate(bookURL: String) async {
+        cancelRequests(bookURL: bookURL)
         try? await cache.remove(bookURL: bookURL)
+    }
+
+    public func cachedChapterURLs(bookURL: String, among chapters: [BookChapter]) async -> Set<String> {
+        (try? await cache.cachedChapterURLs(bookURL: bookURL, among: chapters)) ?? []
     }
 }
