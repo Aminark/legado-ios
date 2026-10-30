@@ -9,6 +9,8 @@
 
 在独立仓库根目录打开 `Legado.xcodeproj`，选择 `Legado` Scheme。真机运行需要自行设置签名团队；请勿将证书或描述文件提交到仓库。
 
+备份、WebDAV、Google Drive OAuth 构建配置及可选 iCloud 权限见 [备份与同步](BACKUP_SYNC.md)。Google Sign-In 依赖已锁定，本次验证环境为 Xcode 27.1；仍需维护者验证其发行构建环境。
+
 ## 代码结构
 
 | 路径 | 用途 |
