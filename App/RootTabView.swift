@@ -1271,6 +1271,9 @@ private struct SettingsView: View {
                         readingSection
                         rulesSection
                         settingSection("文件与存储") {
+                            settingLink("备份与同步", icon: "icloud") {
+                                BackupSyncView()
+                            }
                             settingLink("文件管理", icon: "folder", showsSeparator: false) {
                                 FileManagementView()
                             }

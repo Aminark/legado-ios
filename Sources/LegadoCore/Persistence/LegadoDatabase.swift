@@ -62,6 +62,42 @@ public actor LegadoDatabase {
         try Self.execute(handle, "VACUUM")
     }
 
+    public func librarySnapshot(includeChapters: Bool = true) throws -> LibrarySnapshot {
+        var value = LibrarySnapshot()
+        try transaction {
+            value.books = try loadBooks(); value.sources = try loadBookSources(); value.groups = try loadBookGroups()
+            value.bookmarks = try loadBookmarks(); value.records = try loadReadRecords()
+            value.searchKeywords = try loadSearchKeywords(order: .lastUseTime)
+            value.rssSources = try loadRssSources(); value.rssStars = try loadRssStars()
+            value.rssReadRecords = try loadRssReadRecords()
+            value.txtRules = try loadTxtTocRules(); value.tts = try loadHttpTTS()
+            value.subscriptions = try loadRuleSubs(); value.keyboardAssists = try loadKeyboardAssists()
+            if includeChapters {
+                for book in value.books { value.chapters[book.id] = try loadChapters(bookURL: book.id) }
+            }
+        }
+        return value
+    }
+
+    /// An optimistic check inside the write transaction prevents network waits from overwriting newer local edits.
+    public func applyLibrarySnapshot(_ value: LibrarySnapshot, expected: LibrarySnapshot, transactionID: String? = nil) throws {
+        _ = try value.validated()
+        try transaction {
+            guard try librarySnapshot(includeChapters: false).databaseOnly == expected.databaseOnly else {
+                throw LibraryBackupError.changed
+            }
+            try replaceBooks(value.books); try replaceBookSources(value.sources); try replaceBookGroups(value.groups)
+            try replaceBookmarks(value.bookmarks); try replaceReadRecords(value.records)
+            try replaceSearchKeywords(value.searchKeywords)
+            try replaceRssSources(value.rssSources); try replaceRssStars(value.rssStars)
+            try clearRssReadRecords(); try appendRssReadRecords(value.rssReadRecords)
+            try replaceTxtTocRules(value.txtRules); try replaceHttpTTS(value.tts)
+            try replaceRuleSubs(value.subscriptions); try replaceKeyboardAssists(value.keyboardAssists)
+            for (bookURL, chapters) in value.chapters { try replaceChapters(chapters, bookURL: bookURL) }
+            if let transactionID { try putCache(.init(key: "library.lastImport", value: transactionID)) }
+        }
+    }
+
     public func loadBookSources() throws -> [BookSource] {
         try load("SELECT payload FROM book_sources ORDER BY position, book_source_url", as: BookSource.self)
     }
@@ -284,6 +320,21 @@ public actor LegadoDatabase {
     }
 
     public func deleteAllSearchKeywords() throws { try Self.execute(handle, "DELETE FROM search_keywords") }
+
+    private func replaceSearchKeywords(_ values: [SearchKeyword]) throws {
+        try transaction {
+            try deleteAllSearchKeywords()
+            let statement = try prepare("INSERT INTO search_keywords(word, usage, last_use_time) VALUES(?, ?, ?)")
+            defer { sqlite3_finalize(statement) }
+            for value in values {
+                sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+                try bind(value.word, to: statement, at: 1)
+                sqlite3_bind_int64(statement, 2, Int64(value.usage))
+                sqlite3_bind_int64(statement, 3, value.lastUseTime)
+                try stepDone(statement)
+            }
+        }
+    }
 
     public func importLegacySearchKeywords(_ words: [String]) throws {
         guard try count("search_keywords") == 0, !words.isEmpty else { return }
@@ -1123,12 +1174,18 @@ public actor LegadoDatabase {
     }
 
     private func transaction(_ operation: () throws -> Void) throws {
-        try Self.execute(handle, "BEGIN IMMEDIATE")
+        // Savepoints compose with snapshot imports while retaining rollback for every repository write.
+        let outermost = sqlite3_get_autocommit(handle) != 0
+        try Self.execute(handle, outermost ? "BEGIN IMMEDIATE" : "SAVEPOINT legado_write")
         do {
             try operation()
-            try Self.execute(handle, "COMMIT")
+            try Self.execute(handle, outermost ? "COMMIT" : "RELEASE SAVEPOINT legado_write")
         } catch {
-            try? Self.execute(handle, "ROLLBACK")
+            if outermost { try? Self.execute(handle, "ROLLBACK") }
+            else {
+                try? Self.execute(handle, "ROLLBACK TO SAVEPOINT legado_write")
+                try? Self.execute(handle, "RELEASE SAVEPOINT legado_write")
+            }
             throw error
         }
     }
