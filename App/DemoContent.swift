@@ -107,6 +107,56 @@ enum DemoContent {
         return [.init(book: science, score: 190), .init(book: audio, score: 110)]
     }()
 
+    static var sourceSwitchBook: Book {
+        var book = books[0]
+        book.durChapterIndex = 1
+        book.durChapterTitle = readerChapters[1].title
+        book.totalChapterNum = readerChapters.count
+        return book
+    }
+
+    static var sourceSwitchService: BookSourceSwitchService {
+        let loader = DemoSourceSwitchLoader(body: readerText,
+            sameText: ProcessInfo.processInfo.arguments.contains("-uiDemoSourceGroups"))
+        return BookSourceSwitchService(detailLoader: loader, chapterLoader: loader, contentLoader: loader,
+                                       chapterRepository: InMemoryBookChapterRepository())
+    }
+
+    static var sourceSwitchReferenceService: any SourceChapterReferencing {
+        DemoSourceReference(value: ProcessInfo.processInfo.arguments.contains("-uiDemoSourceReference")
+            ? SourceChapterReference(provider: "QQ 阅读（演示）", chapterTitle: readerChapters[1].title,
+                                     url: "https://book.qq.com/book-read/1/2", content: String(readerText.prefix(240)))
+            : nil)
+    }
+
+    private struct DemoSourceReference: SourceChapterReferencing {
+        let value: SourceChapterReference?
+        func reference(for book: Book) async -> SourceChapterReference? { value }
+    }
+
+    private struct DemoSourceSwitchLoader: BookDetailLoading, ChapterListLoading, ChapterContentLoading {
+        let body: String
+        var sameText = false
+
+        func loadDetail(searchBook: SearchBook, source: BookSource) async -> BookDetailReport {
+            var book = Book(bookUrl: searchBook.bookURL, name: searchBook.name, author: searchBook.author, origin: source.id)
+            book.originName = source.bookSourceName
+            return .init(book: book)
+        }
+
+        func loadChapters(book: Book, source: BookSource, maxPages: Int) async -> ChapterListReport {
+            let titles = ["第一章 · 雨夜", source.bookSourceType == 1 && !sameText ? "第二节 灯塔" : "第二章 · 灯塔",
+                          "第三章 · 潮声", "第四章 · 来信", "第五章 · 天明"]
+            return .init(chapters: titles.enumerated().map {
+                BookChapter(url: book.bookUrl + "/\($0.offset)", title: $0.element, bookUrl: book.bookUrl, index: $0.offset)
+            })
+        }
+
+        func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
+            .init(content: sameText ? body : source.bookSourceName + "的本章正文。\n\n" + body)
+        }
+    }
+
     static let readerText = """
     雨落在旧城的瓦檐上，细密得像一封迟到了许多年的信。
     林深推开阁楼的窗，远处的灯塔正越过雾气，一次又一次照亮沉睡的海湾。桌上的书摊开在同一页，纸边压着一枚褪色的蓝色邮票。
