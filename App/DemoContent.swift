@@ -1,5 +1,17 @@
 import Foundation
 
+#if DEBUG
+struct ReaderCacheTestLoader: ChapterContentLoading {
+    func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        if chapter.index.isMultiple(of: 11) {
+            return .init(diagnostics: [.init(severity: .error, code: "cache.fixture", message: "缓存测试：模拟 HTTP 403", rule: chapter.url)])
+        }
+        return .init(title: chapter.title, content: DemoContent.readerText)
+    }
+}
+#endif
+
 enum DemoContent {
     static let sources: [BookSource] = {
         var classic = BookSource(bookSourceUrl: "https://classic.example", bookSourceName: "经典文学馆")
