@@ -115,6 +115,20 @@ private actor CloudHTTPFixture: HTTPTransport {
         #expect(requests[1].url?.query?.contains("pageToken=second") == true)
         #expect(requests[0].value(forHTTPHeaderField: "Authorization") == "Bearer synthetic-token")
     }
+    @Test(arguments: ["2026-10-28T10:00:00Z", "2026-10-28T10:00:00.000Z", "2026-10-28T10:00:00.125Z", "2026-10-28T18:00:00.125+08:00"])
+    func googleListsBackupsWithRFC3339Dates(_ timestamp: String) async throws {
+        let page = try JSONSerialization.data(withJSONObject: ["files": [
+            ["id": "dated", "name": "legado-dated.legadobackup", "size": "200", "modifiedTime": timestamp],
+            ["id": "undated", "name": "legado-undated.legadobackup", "size": "300"]
+        ]])
+        let http = CloudHTTPFixture([.init(status: 200, data: page)])
+        let list = try await GoogleDriveBackupStore(http: http) { "fixture" }.listBackups()
+        #expect(list.map(\.id) == ["dated", "undated"])
+        let date = try #require(list.first?.date)
+        let wholeSeconds = try #require(ISO8601DateFormatter().date(from: "2026-10-28T10:00:00Z"))
+        #expect(abs(date.timeIntervalSince(wholeSeconds) - (timestamp.contains(".125") ? 0.125 : 0)) < 0.001)
+        #expect(list.last?.date == nil)
+    }
     @Test func googleStopsRepeatedPageTokensAndAuthenticationErrors() async throws {
         let page = Data(#"{"files":[],"nextPageToken":"same"}"#.utf8)
         let http = CloudHTTPFixture([.init(status: 200, data: page), .init(status: 200, data: page)])

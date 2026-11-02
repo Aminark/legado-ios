@@ -150,8 +150,18 @@ public struct LibrarySnapshot: Codable, Equatable, Sendable {
         result.subscriptions = union(subscriptions, incoming.subscriptions)
         result.keyboardAssists = union(keyboardAssists, incoming.keyboardAssists)
         result.replaceRules = union(replaceRules, incoming.replaceRules)
-        result.chapters = chapters.merging(incoming.chapters) { old, new in old.isEmpty ? new : old }
-            .filter { key, _ in result.books.contains { $0.id == key } }
+        let localBooks = Dictionary(uniqueKeysWithValues: books.map { ($0.id, $0) })
+        let incomingBooks = Dictionary(uniqueKeysWithValues: incoming.books.map { ($0.id, $0) })
+        result.chapters = chapters.merging(incoming.chapters) { old, _ in old }
+        for book in result.books {
+            let old = chapters[book.id] ?? []
+            let new = incoming.chapters[book.id] ?? []
+            // Select the directory from the same snapshot as the winning progress, with an empty-directory fallback.
+            if !new.isEmpty && (old.isEmpty || (incomingBooks[book.id]?.durChapterTime ?? 0) >= (localBooks[book.id]?.durChapterTime ?? 0)) {
+                result.chapters[book.id] = new
+            }
+        }
+        result.chapters = result.chapters.filter { key, _ in result.books.contains { $0.id == key } }
         result.preferences = preferences.merging(incoming.preferences) { _, new in new }
         return result
     }
@@ -237,13 +247,17 @@ extension Book {
 private struct LibraryReadingProgress: Codable {
     var bookURL: String; var title: String?; var index: Int; var position: Int; var time: Int64
     var volume: Int; var inVolume: Int
+    var epubLocation: String?
     init(_ book: Book) {
         bookURL = book.id; title = book.durChapterTitle; index = book.durChapterIndex; position = book.durChapterPos
         time = book.durChapterTime; volume = book.durVolumeIndex; inVolume = book.chapterInVolumeIndex
+        epubLocation = book.readConfig?.epubLocation
     }
     func apply(to book: inout Book) {
         book.durChapterTitle = title; book.durChapterIndex = index; book.durChapterPos = position
         book.durChapterTime = time; book.durVolumeIndex = volume; book.chapterInVolumeIndex = inVolume
+        if epubLocation != nil, book.readConfig == nil { book.readConfig = BookReadConfig() }
+        book.readConfig?.epubLocation = epubLocation
     }
 }
 
