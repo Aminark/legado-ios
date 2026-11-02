@@ -105,6 +105,94 @@ import Testing
         #expect(prepared.manifest.attachments.isEmpty)
     }
 
+    @Test(arguments: ["txt", "epub"], [true, false])
+    func existingLocalBookRestoresNewestProgressWithoutReplacingItsFile(_ fileExtension: String, _ backupIsNewer: Bool) async throws {
+        for sameURL in [true, false] {
+            let original = try Fixture(); let target = try Fixture()
+            defer { original.cleanup(); target.cleanup() }
+            let localFile = target.directory.appendingPathComponent("LocalBooks/current.\(fileExtension)")
+            try FileManager.default.createDirectory(at: localFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let localBytes = Data("本机文件应保持不变".utf8)
+            try localBytes.write(to: localFile)
+            var local = LibrarySnapshot()
+            local.books = [.init(bookUrl: localFile.absoluteString, name: "恢复进度测试")]
+            local.books[0].tocUrl = localFile.absoluteString
+            local.books[0].durChapterTime = backupIsNewer ? 100 : 300
+            local.books[0].readConfig = BookReadConfig()
+            local.books[0].readConfig?.pageAnim = 2
+            local.books[0].readConfig?.epubLocation = fileExtension == "epub" ? "local-locator" : nil
+            local.chapters[localFile.absoluteString] = [.init(url: localFile.absoluteString + "#one", title: "第一章", bookUrl: localFile.absoluteString, index: 0)]
+            try await target.service.apply(local, expected: target.service.snapshot())
+
+            let backupFile = original.directory.appendingPathComponent("backup.\(fileExtension)")
+            try Data("备份附件不应覆盖本机文件".utf8).write(to: backupFile)
+            let backupURL = sameURL ? localFile.absoluteString : backupFile.absoluteString
+            var incoming = local
+            incoming.books[0].bookUrl = backupURL; incoming.books[0].tocUrl = backupURL
+            incoming.books[0].durChapterTime = 200; incoming.books[0].durChapterPos = 12
+            incoming.books[0].readConfig?.epubLocation = fileExtension == "epub" ? "backup-locator" : nil
+            incoming.chapters = [backupURL: [.init(url: backupURL + "#one", title: "第一章", bookUrl: backupURL, index: 0)]]
+            let archive = original.directory.appendingPathComponent("local.legadobackup")
+            try LibraryBackupArchive.write(snapshot: incoming, files: ["local/" + URL(string: backupURL)!.lastPathComponent: backupFile], to: archive)
+            let prepared = try await target.service.prepare(archive)
+            defer { try? FileManager.default.removeItem(at: prepared.directory) }
+            try await target.service.restore(prepared)
+            try await target.service.restore(prepared)
+            let restored = try await target.service.snapshot()
+            let book = try #require(restored.books.first)
+            #expect(restored.books.count == 1)
+            #expect(book.bookUrl == localFile.absoluteString)
+            #expect(book.tocUrl == localFile.absoluteString)
+            #expect(book.durChapterTime == (backupIsNewer ? 200 : 300))
+            #expect(book.durChapterPos == (backupIsNewer ? 12 : 0))
+            #expect(book.readConfig?.epubLocation == (backupIsNewer ? incoming : local).books[0].readConfig?.epubLocation)
+            #expect(book.readConfig?.pageAnim == 2)
+            #expect(restored.chapters[book.id]?.first?.url == book.id + "#one")
+            #expect(try Data(contentsOf: localFile) == localBytes)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: localFile.deletingLastPathComponent().path).count == 1)
+        }
+    }
+
+    @Test(arguments: [true, false])
+    func restoredDirectoryMatchesTheNewestReadingProgress(_ backupIsNewer: Bool) async throws {
+        let original = try Fixture(); let target = try Fixture()
+        defer { original.cleanup(); target.cleanup() }
+        let short = snapshot()
+        var complete = short
+        complete.chapters[complete.books[0].id]?.append(.init(url: "https://source.example/ch2", title: "第二章", bookUrl: complete.books[0].id, index: 1))
+        complete.books[0].durChapterIndex = 1; complete.books[0].durChapterTitle = "第二章"
+        complete.books[0].durChapterPos = 12; complete.books[0].durChapterTime = 200
+        complete.books[0].totalChapterNum = 2
+        let incoming = backupIsNewer ? complete : short
+        let current = backupIsNewer ? short : complete
+        try await original.service.apply(incoming, expected: original.service.snapshot())
+        try await target.service.apply(current, expected: target.service.snapshot())
+        let chapter = try #require(complete.chapters[complete.books[0].id]?.last)
+        let cache = ChapterContentCache(directory: original.directory.appendingPathComponent("cache"))
+        try await cache.save(.init(bookURL: chapter.bookUrl, chapterURL: chapter.url, title: chapter.title, content: "可离线续读的第二章", sourceID: complete.sources[0].id))
+        let archive = try await original.service.export(includeLocalBooks: false, includeCachedChapters: true)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        let prepared = try await target.service.prepare(archive)
+        defer { try? FileManager.default.removeItem(at: prepared.directory) }
+        try await target.service.restore(prepared)
+        let restored = try await target.service.snapshot()
+        let book = try #require(restored.books.first)
+        #expect(book.durChapterIndex == 1)
+        #expect(book.durChapterPos == 12)
+        #expect(restored.chapters[book.id] == complete.chapters[book.id])
+        let targetCache = ChapterContentCache(directory: target.directory.appendingPathComponent("cache"))
+        #expect(try await targetCache.load(bookURL: book.id, chapterURL: chapter.url)?.content == "可离线续读的第二章")
+    }
+
+    @Test func newerLocalEPUBLocatorIsKeptWhenMergingAnOlderSnapshot() throws {
+        var local = snapshot(); var older = local
+        local.books[0].durChapterTime = 200; local.books[0].readConfig = BookReadConfig()
+        local.books[0].readConfig?.epubLocation = "newer-locator"
+        older.books[0].durChapterTime = 100; older.books[0].readConfig = BookReadConfig()
+        older.books[0].readConfig?.epubLocation = "older-locator"
+        #expect(local.merging(older).books[0].readConfig?.epubLocation == "newer-locator")
+    }
+
     @Test func readingStatisticsSurviveMetadataArchiveAndRepeatedRestore() async throws {
         let original = try Fixture(); let target = try Fixture()
         defer { original.cleanup(); target.cleanup() }

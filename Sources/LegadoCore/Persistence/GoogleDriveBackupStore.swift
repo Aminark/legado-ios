@@ -10,7 +10,19 @@ public struct GoogleDriveBackupStore: RemoteLibraryBackupStore {
     public func listBackups() async throws -> [RemoteLibraryBackup] {
         struct File: Decodable { var id: String; var name: String; var modifiedTime: Date?; var size: String? }
         struct Page: Decodable { var files: [File]; var nextPageToken: String? }
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let value = try decoder.singleValueContainer()
+            let timestamp = try value.decode(String.self)
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = formatter.date(from: timestamp) { return date }
+            formatter.formatOptions = [.withInternetDateTime]
+            guard let date = formatter.date(from: timestamp) else {
+                throw DecodingError.dataCorruptedError(in: value, debugDescription: "Invalid RFC 3339 modifiedTime")
+            }
+            return date
+        }
         var items: [RemoteLibraryBackup] = []; var page: String?; var seen = Set<String>()
         repeat {
             var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!

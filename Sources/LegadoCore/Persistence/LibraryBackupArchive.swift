@@ -219,15 +219,25 @@ public actor LibraryBackupService {
     public func restore(_ prepared: PreparedLibraryBackup) async throws {
         var incoming = prepared.manifest.snapshot
         let before = try await snapshot()
-        let skipped = incoming.books.filter { book in book.origin == "local" && before.books.contains { $0.name == book.name && $0.author == book.author } }
+        let skipped = incoming.books.filter { book in book.origin == "local" && before.books.contains { $0.origin != "local" && $0.name == book.name && $0.author == book.author } }
         incoming.books.removeAll { book in skipped.contains { $0.id == book.id } }
         for book in skipped { incoming.chapters.removeValue(forKey: book.id) }
+        var retainedLocalBooks = Set<String>()
+        for index in incoming.books.indices where incoming.books[index].origin == "local" {
+            let book = incoming.books[index]
+            guard var existing = before.books.first(where: { $0.origin == "local" && ($0.id == book.id || ($0.name == book.name && $0.author == book.author)) }) else { continue }
+            // Keep the local file and metadata; the normal merge still chooses progress by its timestamp.
+            existing.copyProgress(from: book)
+            incoming.relocateLocalBook(at: index, to: existing.bookUrl)
+            incoming.books[index] = existing
+            retainedLocalBooks.insert(existing.id)
+        }
         var created: [URL] = []
         do {
             for attachment in prepared.manifest.attachments {
                 let source = prepared.directory.appendingPathComponent(attachment.path)
                 let local = attachment.path.hasPrefix("local/")
-                if local, !incoming.books.contains(where: { $0.origin == "local" && URL(string: $0.id)?.lastPathComponent == source.lastPathComponent }) { continue }
+                if local, !incoming.books.contains(where: { $0.origin == "local" && !retainedLocalBooks.contains($0.id) && URL(string: $0.id)?.lastPathComponent == source.lastPathComponent }) { continue }
                 var stem = source.deletingPathExtension().lastPathComponent
                 while stem.utf8.count > 180 { stem.removeLast() }
                 let target = local ? support.appendingPathComponent("LocalBooks/\(stem)-\(attachment.checksum.prefix(12)).\(source.pathExtension.lowercased())") : cache.appendingPathComponent(source.lastPathComponent)
@@ -243,17 +253,8 @@ public actor LibraryBackupService {
                     guard attributes.isRegularFile == true, attributes.isSymbolicLink != true else { throw LibraryBackupError.invalid("目标文件不是普通文件") }
                 }
                 if local {
-                    for index in incoming.books.indices where incoming.books[index].origin == "local" && URL(string: incoming.books[index].bookUrl)?.lastPathComponent == source.lastPathComponent {
-                        let old = incoming.books[index].bookUrl
-                        incoming.books[index].bookUrl = target.absoluteString
-                        if incoming.books[index].tocUrl == old { incoming.books[index].tocUrl = target.absoluteString }
-                        if let chapters = incoming.chapters.removeValue(forKey: old) {
-                            incoming.chapters[target.absoluteString] = chapters.map { chapter in
-                                var chapter = chapter; chapter.bookUrl = target.absoluteString
-                                if chapter.url.hasPrefix(old) { chapter.url = target.absoluteString + chapter.url.dropFirst(old.count) }
-                                return chapter
-                            }
-                        }
+                    for index in incoming.books.indices where incoming.books[index].origin == "local" && !retainedLocalBooks.contains(incoming.books[index].id) && URL(string: incoming.books[index].bookUrl)?.lastPathComponent == source.lastPathComponent {
+                        incoming.relocateLocalBook(at: index, to: target.absoluteString)
                     }
                 }
             }
@@ -320,6 +321,21 @@ public actor LibraryBackupService {
     private func readRules() throws -> [ReplaceRule] {
         guard FileManager.default.fileExists(atPath: rulesURL.path) else { return [] }
         return try JSONDecoder().decode([ReplaceRule].self, from: Data(contentsOf: rulesURL))
+    }
+}
+
+private extension LibrarySnapshot {
+    mutating func relocateLocalBook(at index: Int, to url: String) {
+        let old = books[index].bookUrl
+        books[index].bookUrl = url
+        if books[index].tocUrl == old { books[index].tocUrl = url }
+        if let chapters = chapters.removeValue(forKey: old) {
+            self.chapters[url] = chapters.map { chapter in
+                var chapter = chapter; chapter.bookUrl = url
+                if chapter.url.hasPrefix(old) { chapter.url = url + chapter.url.dropFirst(old.count) }
+                return chapter
+            }
+        }
     }
 }
 
