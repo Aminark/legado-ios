@@ -262,8 +262,10 @@ final class SourceLibraryModel: ObservableObject {
             guard visited.insert(url.absoluteString).inserted else {
                 throw BookSourceImportError.invalidDocument("订阅清单出现循环链接")
             }
-            guard let request = input.request() else { throw URLError(.badURL) }
-            let response = try await RuleImportDownloader.data(for: request, using: importTransport)
+            let response = try await importTransport.data(for: input.request()!)
+            guard (200...299).contains(response.statusCode) else {
+                throw BookSourceImportError.invalidDocument("服务器返回 HTTP \(response.statusCode)")
+            }
             data = response.data
         }
         let normalized = try importer.normalizedData(data)

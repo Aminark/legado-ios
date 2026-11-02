@@ -67,7 +67,6 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>legado</string>
-				<string>yuedu</string>
 				<string>$(GOOGLE_REVERSED_CLIENT_ID)</string>
 			</array>
 		</dict>
