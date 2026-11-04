@@ -86,6 +86,13 @@ public actor LegadoDatabase {
             guard try librarySnapshot(includeChapters: false).databaseOnly == expected.databaseOnly else {
                 throw LibraryBackupError.changed
             }
+            let retainedBooks = Set(value.books.map(\.id))
+            let replacedDirectories = Set(value.chapters.keys).union(expected.chapters.keys.filter { !retainedBooks.contains($0) })
+            for bookURL in replacedDirectories {
+                guard try loadChapters(bookURL: bookURL) == (expected.chapters[bookURL] ?? []) else {
+                    throw LibraryBackupError.changed
+                }
+            }
             try replaceBooks(value.books); try replaceBookSources(value.sources); try replaceBookGroups(value.groups)
             try replaceBookmarks(value.bookmarks); try replaceReadRecords(value.records)
             try replaceSearchKeywords(value.searchKeywords)

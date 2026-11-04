@@ -223,21 +223,27 @@ public actor LibraryBackupService {
         incoming.books.removeAll { book in skipped.contains { $0.id == book.id } }
         for book in skipped { incoming.chapters.removeValue(forKey: book.id) }
         var retainedLocalBooks = Set<String>()
+        var missingLocalBooks = Set<String>()
+        var localAttachments: [String: [Int]] = [:]
         for index in incoming.books.indices where incoming.books[index].origin == "local" {
             let book = incoming.books[index]
+            if let name = URL(string: book.bookUrl)?.lastPathComponent { localAttachments[name, default: []].append(index) }
             guard var existing = before.books.first(where: { $0.origin == "local" && ($0.id == book.id || ($0.name == book.name && $0.author == book.author)) }) else { continue }
             // Keep the local file and metadata; the normal merge still chooses progress by its timestamp.
             existing.copyProgress(from: book)
             incoming.relocateLocalBook(at: index, to: existing.bookUrl)
             incoming.books[index] = existing
-            retainedLocalBooks.insert(existing.id)
+            if Self.hasReadableLocalFile(existing) { retainedLocalBooks.insert(existing.id) }
+            else { missingLocalBooks.insert(existing.id) }
         }
         var created: [URL] = []
+        var replacements: [String: String] = [:]
         do {
             for attachment in prepared.manifest.attachments {
                 let source = prepared.directory.appendingPathComponent(attachment.path)
                 let local = attachment.path.hasPrefix("local/")
-                if local, !incoming.books.contains(where: { $0.origin == "local" && !retainedLocalBooks.contains($0.id) && URL(string: $0.id)?.lastPathComponent == source.lastPathComponent }) { continue }
+                let matchingBooks = (localAttachments[source.lastPathComponent] ?? []).filter { !retainedLocalBooks.contains(incoming.books[$0].id) }
+                if local, matchingBooks.isEmpty { continue }
                 var stem = source.deletingPathExtension().lastPathComponent
                 while stem.utf8.count > 180 { stem.removeLast() }
                 let target = local ? support.appendingPathComponent("LocalBooks/\(stem)-\(attachment.checksum.prefix(12)).\(source.pathExtension.lowercased())") : cache.appendingPathComponent(source.lastPathComponent)
@@ -253,14 +259,34 @@ public actor LibraryBackupService {
                     guard attributes.isRegularFile == true, attributes.isSymbolicLink != true else { throw LibraryBackupError.invalid("目标文件不是普通文件") }
                 }
                 if local {
-                    for index in incoming.books.indices where incoming.books[index].origin == "local" && !retainedLocalBooks.contains(incoming.books[index].id) && URL(string: incoming.books[index].bookUrl)?.lastPathComponent == source.lastPathComponent {
+                    for index in matchingBooks {
+                        let old = incoming.books[index].id
                         incoming.relocateLocalBook(at: index, to: target.absoluteString)
+                        if missingLocalBooks.contains(old) { replacements[old] = target.absoluteString }
                     }
                 }
             }
+            guard incoming.books.filter({ $0.origin == "local" }).allSatisfy(Self.hasReadableLocalFile) else {
+                throw LibraryBackupError.invalid("备份未能恢复可读取的本地书文件")
+            }
             let existing = try await snapshot()
-            try await apply(existing.merging(incoming), expected: existing)
+            var current = existing
+            for (old, replacement) in replacements {
+                if let index = current.books.firstIndex(where: { $0.id == old }) {
+                    current.relocateLocalBook(at: index, to: replacement)
+                }
+            }
+            try await apply(current.merging(incoming), expected: existing)
         } catch { for url in created { try? FileManager.default.removeItem(at: url) }; throw error }
+    }
+
+    private static func hasReadableLocalFile(_ book: Book) -> Bool {
+        guard let url = URL(string: book.bookUrl), url.isFileURL,
+              let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+              values.isRegularFile == true, values.isSymbolicLink != true,
+              let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        return true
     }
 
     public func apply(_ value: LibrarySnapshot, expected: LibrarySnapshot) async throws {

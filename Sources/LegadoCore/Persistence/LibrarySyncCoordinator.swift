@@ -47,7 +47,8 @@ public actor LibrarySyncCoordinator {
             guard try await cloud.accountIdentifier() == account else { throw LibraryCloudError.accountChanged }
             let remote = try await cloud.fetch()
             let expected = try await service.snapshot(includeChapters: false)
-            let merged = try LibrarySyncDocument.reconcile(local: expected, baseline: baseline, remote: remote.document,
+            let visibleBaseline = try excludingHiddenBooks(from: baseline, local: expected)
+            let merged = try LibrarySyncDocument.reconcile(local: expected, baseline: visibleBaseline, remote: remote.document,
                 device: device, now: Int64(Date().timeIntervalSince1970 * 1000))
             guard try await cloud.accountIdentifier() == account else { throw LibraryCloudError.accountChanged }
             do {
@@ -61,11 +62,23 @@ public actor LibrarySyncCoordinator {
                 value.books.append(contentsOf: localBooks)
                 try await service.apply(value, expected: expected)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                try LibrarySnapshot.encode(merged).write(to: baselineURL, options: .atomic)
+                // Only books actually represented locally can later become local deletions.
+                let appliedBaseline = try excludingHiddenBooks(from: merged, local: value)
+                try LibrarySnapshot.encode(appliedBaseline).write(to: baselineURL, options: .atomic)
                 return
             } catch LibraryCloudError.conflict where attempt < 2 { continue }
               catch LibraryBackupError.changed where attempt < 2 { continue }
         }
         throw LibraryCloudError.conflict
+    }
+
+    private func excludingHiddenBooks(from document: LibrarySyncDocument, local: LibrarySnapshot) throws -> LibrarySyncDocument {
+        let localNames = Set(local.books.filter { $0.origin == "local" }.map { [$0.name, $0.author] })
+        var result = document
+        for book in try document.snapshot.books where localNames.contains([book.name, book.author]) {
+            result.items.removeValue(forKey: "books|" + book.id)
+            result.items.removeValue(forKey: "progress|" + book.id)
+        }
+        return result
     }
 }

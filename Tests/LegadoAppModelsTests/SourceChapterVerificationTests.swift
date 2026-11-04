@@ -93,7 +93,7 @@ struct SourceChapterVerificationTests {
         let transport = PublicQidianFixtureTransport()
         let service = PublicSourceChapterReferenceService(transport: transport)
         #expect(await service.qidianReference(for: book, prepared: prepared) == nil)
-        #expect(await transport.methods == ["GET"])
+        #expect(await transport.methods.isEmpty)
     }
 
     @Test func importedPrivateHeadersCannotBecomePublicReferenceRequests() async {
@@ -103,7 +103,7 @@ struct SourceChapterVerificationTests {
             let transport = PublicQidianFixtureTransport()
             let service = PublicSourceChapterReferenceService(transport: transport)
             #expect(await service.qidianReference(for: book, prepared: prepared) == nil)
-            #expect(await transport.methods == ["GET"])
+            #expect(await transport.methods.isEmpty)
         }
     }
 
@@ -112,7 +112,7 @@ struct SourceChapterVerificationTests {
         let transport = PublicQidianFixtureTransport()
         let service = PublicSourceChapterReferenceService(transport: transport)
         #expect(await service.qidianReference(for: book, prepared: prepared) == nil)
-        #expect(await transport.methods == ["GET"])
+        #expect(await transport.methods.isEmpty)
     }
 }
 
@@ -138,5 +138,30 @@ private actor RedirectingReferenceTransport: HTTPTransport {
     func data(for request: URLRequest) async throws -> HTTPResponse {
         requests += 1
         return .init(data: Data("{}".utf8), statusCode: 200, headers: [:], finalURL: URL(string: "https://unrelated.example/reference")!)
+    }
+}
+
+extension SourceChapterVerificationTests {
+    @Test(arguments: [
+        #",{"bodyJs":"result"}"#, #",{"js":"result"}"#, #",{"webJs":"result","webView":true}"#,
+        #",{bodyJs:'result'}"#, #"{{'suffix'}}"#, #"@js:result"#
+    ])
+    func referenceRejectsRuleSyntaxBeforeSendingAnyRequest(_ suffix: String) async {
+        let (book, report) = qidianFixture(chapterURL: "https://www.qidian.com/chapter/1/2" + suffix)
+        let transport = PublicQidianFixtureTransport()
+        let service = PublicSourceChapterReferenceService(transport: transport)
+        #expect(await service.qidianReference(for: book, prepared: report) == nil)
+        #expect(await transport.methods.isEmpty)
+        var modifiedBook = report
+        modifiedBook.book.bookUrl += suffix
+        #expect(await service.qidianReference(for: book, prepared: modifiedBook) == nil)
+        #expect(await transport.methods.isEmpty)
+    }
+
+    @Test func reviewSubmissionCannotRewriteIndependentReference() async throws {
+        let (book, report) = qidianFixture(chapterURL: #"https://www.qidian.com/chapter/1/2,{"bodyJs":"result.replace(/雨夜中的灯塔/g,'书源改写文本')"}"#)
+        let service = PublicSourceChapterReferenceService(transport: PublicQidianFixtureTransport())
+        let received = await service.qidianReference(for: book, prepared: report)
+        #expect(received?.content.contains("书源改写文本") != true)
     }
 }
