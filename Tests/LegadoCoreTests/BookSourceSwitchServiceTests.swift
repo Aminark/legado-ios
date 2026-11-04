@@ -131,6 +131,118 @@ struct BookSourceSwitchServiceTests {
         #expect(report.book.durChapterPos == 0)
     }
 
+    @Test func matchesChapterNameAcrossVolumeAndGlobalNumbering() {
+        let (current, replacement, chapters) = renumberedChapters()
+
+        let report = BookSourceProgressMapper().migrate(current: current, replacement: replacement, chapters: chapters, now: 100)
+
+        #expect(report.exactChapterMatch)
+        #expect(report.book.durChapterIndex == 240)
+        #expect(report.book.durChapterTitle == "第239章 小黑巧施漩涡计，方显大破胎盘台")
+        #expect(report.book.durChapterPos == 88)
+    }
+
+    @Test func switchVerifiesTheChapterMatchedByNameInsteadOfRelativeProgress() async throws {
+        let (current, replacement, chapters) = renumberedChapters()
+        let loader = StubSwitchLoader(chapters: chapters)
+        let contentLoader = RecordingSwitchContentLoader()
+        let repository = InMemoryBookChapterRepository()
+        let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader, contentLoader: contentLoader,
+                                              chapterRepository: repository)
+
+        let report = try #require(await service.prepareSwitch(current: current,
+            candidate: SearchBook(bookURL: replacement.bookUrl, origin: "new", originName: "新源", type: 0, name: "书"),
+            source: BookSource(bookSourceUrl: "new", bookSourceName: "新源"), persistChapters: false))
+
+        #expect(report.exactChapterMatch)
+        #expect(report.book.durChapterIndex == 240)
+        #expect(await contentLoader.chapterURL == "new/241")
+        #expect(await contentLoader.nextURL == "new/242")
+        #expect(await repository.load(bookURL: replacement.bookUrl).isEmpty)
+    }
+
+    @Test func prefersFullTitleMatchOverMatchingNamesWithOtherChapterNumbers() {
+        var current = Book(bookUrl: "old", name: "书", origin: "old")
+        current.durChapterTitle = "第五章 · 重逢"
+        let chapters = [
+            BookChapter(url: "different-number", title: "第239章 重逢", bookUrl: "new", index: 0),
+            BookChapter(url: "same-number", title: "第五章 重逢", bookUrl: "new", index: 1)
+        ]
+
+        let report = BookSourceProgressMapper().migrate(current: current,
+            replacement: Book(bookUrl: "new", name: "书", origin: "new"), chapters: chapters, now: 100)
+
+        #expect(report.exactChapterMatch)
+        #expect(report.book.durChapterIndex == 1)
+    }
+
+    @Test func ambiguousOrEmptyChapterNamesDoNotBecomeExactMatches() {
+        for (oldTitle, firstTitle, secondTitle) in [
+            ("第五章 归途", "第2章 归途", "第90章 归途"),
+            ("第五章", "第2章", "第90章"),
+            ("", "", ""),
+            ("第一章 开端", "第一章 开端", "第一章 开端")
+        ] {
+            var current = Book(bookUrl: "old", name: "书", origin: "old")
+            current.totalChapterNum = 11
+            current.durChapterIndex = 5
+            current.durChapterTitle = oldTitle
+            current.durChapterPos = 88
+            var chapters = (0..<21).map { BookChapter(url: "new/\($0)", title: "其他章节\($0)", bookUrl: "new", index: $0) }
+            chapters[2].title = firstTitle
+            chapters[18].title = secondTitle
+
+            let report = BookSourceProgressMapper().migrate(current: current,
+                replacement: Book(bookUrl: "new", name: "书", origin: "new"), chapters: chapters, now: 100)
+
+            #expect(!report.exactChapterMatch)
+            #expect(report.book.durChapterIndex == 10)
+            #expect(report.book.durChapterPos == 0)
+        }
+    }
+
+    @Test func chapterNameMatchingSkipsVolumeHeadersAndKeepsNumbersInTheName() {
+        var current = Book(bookUrl: "old", name: "书", origin: "old")
+        current.durChapterTitle = "第一百章 第101次相遇"
+        var volume = BookChapter(url: "volume", title: "第239章 第101次相遇", bookUrl: "new", index: 0)
+        volume.isVolume = true
+        let chapters = [volume,
+            BookChapter(url: "wrong", title: "第２４０章 第102次相遇", bookUrl: "new", index: 1),
+            BookChapter(url: "right", title: "第２４１章：第101次相遇", bookUrl: "new", index: 2)]
+
+        let report = BookSourceProgressMapper().migrate(current: current,
+            replacement: Book(bookUrl: "new", name: "书", origin: "new"), chapters: chapters, now: 100)
+
+        #expect(report.exactChapterMatch)
+        #expect(report.book.durChapterIndex == 2)
+    }
+
+    @Test func matchesAnUnnumberedTitleToANumberedChapter() {
+        var current = Book(bookUrl: "old", name: "书", origin: "old")
+        current.durChapterTitle = "归途"
+        let chapters = [BookChapter(url: "wrong", title: "第一章 告别", bookUrl: "new", index: 0),
+                        BookChapter(url: "right", title: "第二百三十九章 归途", bookUrl: "new", index: 1)]
+
+        let report = BookSourceProgressMapper().migrate(current: current,
+            replacement: Book(bookUrl: "new", name: "书", origin: "new"), chapters: chapters, now: 100)
+
+        #expect(report.exactChapterMatch)
+        #expect(report.book.durChapterIndex == 1)
+    }
+
+    private func renumberedChapters() -> (Book, Book, [BookChapter]) {
+        var current = Book(bookUrl: "old", name: "书", origin: "old")
+        current.totalChapterNum = 708
+        current.durChapterIndex = 250
+        current.durChapterTitle = "第一百一十七章 小黑巧施漩涡计，方显大破胎盘台"
+        current.durChapterPos = 88
+        let replacement = Book(bookUrl: "new", name: "书", origin: "new")
+        var chapters = (0..<706).map { BookChapter(url: "new/\($0 + 1)", title: "目录项\($0)", bookUrl: "new", index: $0) }
+        chapters[240].title = "第239章 小黑巧施漩涡计，方显大破胎盘台"
+        chapters[249].title = "第248章 新的怪谈，新的敌人"
+        return (current, replacement, chapters)
+    }
+
     @Test func refusesSwitchWhenCandidateDirectoryCannotBeLoaded() async {
         let repository = InMemoryBookChapterRepository()
         let service = BookSourceSwitchService(
@@ -192,6 +304,27 @@ struct BookSourceSwitchServiceTests {
         }
     }
 
+    @Test func automaticChapterInspectionDoesNotFetchOrSaveAnApproximateChapter() async throws {
+        var current = Book(bookUrl: "old", name: "书", origin: "old")
+        current.durChapterTitle = "第212章 你的名字"
+        let chapters = [BookChapter(url: "wrong", title: "第212章 别的故事", bookUrl: "new", index: 0)]
+        let loader = StubSwitchLoader(chapters: chapters)
+        let content = RecordingSwitchContentLoader()
+        let repository = InMemoryBookChapterRepository()
+        let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader,
+                                              contentLoader: content, chapterRepository: repository)
+
+        let report = try #require(await service.prepareSwitch(current: current,
+            candidate: SearchBook(bookURL: "new", origin: "new", originName: "新源", type: 0, name: "书"),
+            source: BookSource(bookSourceUrl: "new", bookSourceName: "新源"),
+            persistChapters: false, requireExactChapterMatch: true))
+
+        #expect(!report.exactChapterMatch)
+        #expect(report.verifiedContent == nil)
+        #expect(await content.chapterURL == nil)
+        #expect(await repository.load(bookURL: "new").isEmpty)
+    }
+
     @Test func automaticRecoverySkipsSearchableSourcesWithDirectoriesButBrokenBodies() async throws {
         let candidates = ["broken-body", "valid"].map {
             SearchBook(bookURL: $0 + "-book", origin: $0, originName: $0, type: 0, name: "书")
@@ -232,6 +365,27 @@ struct BookSourceSwitchServiceTests {
         #expect(await contentLoader.chapterURL == "second")
         #expect(await contentLoader.nextURL == "third")
         #expect(report.book.durChapterPos == 88)
+        #expect(report.verifiedContent?.content == "验证后的正文")
+    }
+
+    @Test func skippingAMatchedVolumeMarksThePreviewAsApproximate() async throws {
+        var current = Book(bookUrl: "old", name: "书", origin: "old")
+        current.durChapterTitle = "卷二"
+        current.durChapterPos = 88
+        var volume = BookChapter(url: "volume", title: "卷二", bookUrl: "new", index: 0)
+        volume.isVolume = true
+        let chapters = [volume, BookChapter(url: "body", title: "第二章", bookUrl: "new", index: 1)]
+        let loader = StubSwitchLoader(chapters: chapters)
+        let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader,
+                                              contentLoader: SwitchContentLoader(),
+                                              chapterRepository: InMemoryBookChapterRepository())
+        let report = try #require(await service.prepareSwitch(current: current,
+            candidate: SearchBook(bookURL: "new", origin: "new", originName: "新源", type: 0, name: "书"),
+            source: BookSource(bookSourceUrl: "new", bookSourceName: "新源"), persistChapters: false))
+        #expect(!report.exactChapterMatch)
+        #expect(report.book.durChapterIndex == 1)
+        #expect(report.book.durChapterTitle == "第二章")
+        #expect(report.book.durChapterPos == 0)
         #expect(report.verifiedContent?.content == "验证后的正文")
     }
 }

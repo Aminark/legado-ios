@@ -102,6 +102,7 @@ final class DarkModeUITests: XCTestCase {
             ("text.badge.checkmark", "净化规则", "新建规则"),
             ("list.bullet.rectangle", "TXT目录规则", "新建"),
             ("folder", "文件管理", nil),
+            ("internaldrive", "缓存管理", nil),
             ("gearshape", "其他设置", nil),
             ("info.circle", "关于", nil)
         ]

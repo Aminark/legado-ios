@@ -334,7 +334,11 @@ struct ReaderScrollView: UIViewRepresentable {
             let index = row * 3 + column
             let actions = parent.configuration.clickActions
             let action = index == 4 ? 0 : (actions.indices.contains(index) ? actions[index] : 0)
-            if action != 1, action != 2, action != -1 { parent.configuration.onTapAction(action) }
+            if action == 1 || action == 2 {
+                parent.configuration.onTapAction(0)
+            } else if action != -1 {
+                parent.configuration.onTapAction(action)
+            }
         }
 
         @objc private func step(_ link: CADisplayLink) {
@@ -549,10 +553,7 @@ struct ReaderTypography {
     let headingAttributes: [NSAttributedString.Key: Any]
 
     init(configuration c: ReaderTextView) {
-        let weight: UIFont.Weight = switch c.fontWeight { case 1: .bold; case 2: .light; default: .regular }
-        let font = ReaderFontStore.font(at: c.fontPath, size: CGFloat(c.fontSize), weight: c.fontWeight)
-            ?? (c.fontWeight == 0 ? (UIFont(name: "STSongti-SC-Regular", size: CGFloat(c.fontSize))
-                ?? UIFont.systemFont(ofSize: CGFloat(c.fontSize))) : UIFont.systemFont(ofSize: CGFloat(c.fontSize), weight: weight))
+        let font = ReaderFontStore.resolvedFont(at: c.fontPath, size: CGFloat(c.fontSize), weight: c.fontWeight)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = CGFloat(c.lineSpacing)
         paragraph.paragraphSpacing = CGFloat(c.paragraphSpacing)
@@ -571,8 +572,7 @@ struct ReaderTypography {
             body[.underlineColor] = c.foregroundColor
         }
         bodyAttributes = body
-        let headingFont = ReaderFontStore.font(at: c.fontPath, size: CGFloat(max(5, c.fontSize + c.titleSize)), weight: c.fontWeight)
-            ?? UIFont.systemFont(ofSize: CGFloat(max(5, c.fontSize + c.titleSize)), weight: weight)
+        let headingFont = ReaderFontStore.resolvedFont(at: c.fontPath, size: CGFloat(max(5, c.fontSize + c.titleSize)), weight: 1)
         let heading = NSMutableParagraphStyle()
         heading.alignment = c.titleMode == 1 ? .center : .left
         heading.paragraphSpacingBefore = CGFloat(c.titleTopSpacing)

@@ -14,6 +14,7 @@ final class BookDetailViewModel: ObservableObject {
     @Published private(set) var isCaching = false
     @Published private(set) var cacheCompleted = 0
     @Published private(set) var cacheTotal = 0
+    @Published private(set) var cachedChapterURLs: Set<String> = []
 
     @Published private(set) var source: BookSource
     private var searchBook: SearchBook?
@@ -119,6 +120,7 @@ final class BookDetailViewModel: ObservableObject {
         book = toc.book
         if !chapters.isEmpty {
             state = .ready
+            await refreshCachedChapters()
             return
         }
 
@@ -128,6 +130,14 @@ final class BookDetailViewModel: ObservableObject {
         } else {
             state = .failed
         }
+    }
+
+    func refreshCachedChapters() async {
+        cachedChapterURLs = await contentCoordinator.cachedChapterURLs(bookURL: book.bookUrl, among: chapters)
+    }
+
+    func isChapterCached(_ chapter: BookChapter) -> Bool {
+        cachedChapterURLs.contains(chapter.url)
     }
 
     func cacheNextTen() { startCaching(limit: 10) }
@@ -252,6 +262,7 @@ final class BookDetailViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
             self?.isCaching = false
             self?.cacheTask = nil
+            await self?.refreshCachedChapters()
         }
     }
 }

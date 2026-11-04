@@ -464,6 +464,8 @@ final class BookLibraryModel: ObservableObject {
 
     func clearError() { errorMessage = nil }
 
+    func waitForPendingSaves() async { _ = await bookSaveTask?.value }
+
     func clearUpdateMessage() { updateMessage = nil }
 
     func reportError(_ error: Error) { errorMessage = error.localizedDescription }

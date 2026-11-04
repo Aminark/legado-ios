@@ -22,7 +22,7 @@ public struct ChapterListReport: Sendable {
     }
 }
 
-public struct ChapterContentReport: Sendable {
+public struct ChapterContentReport: Codable, Sendable {
     public var title: String?
     public var content: String
     public var supplementalContent: String?
