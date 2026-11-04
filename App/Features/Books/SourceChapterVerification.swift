@@ -117,11 +117,10 @@ struct PublicSourceChapterReferenceService: SourceChapterReferencing {
     }
 
     func qidianReference(for book: Book, prepared: BookSourceSwitchReport) async -> SourceChapterReference? {
-        guard prepared.exactChapterMatch, let url = URL(string: prepared.book.bookUrl),
-              Self.isQidian(url), !book.author.isEmpty,
+        guard prepared.exactChapterMatch, let url = Self.plainQidianURL(prepared.book.bookUrl), !book.author.isEmpty,
               prepared.chapters.indices.contains(prepared.book.durChapterIndex) else { return nil }
         let chapter = prepared.chapters[prepared.book.durChapterIndex]
-        guard let chapterURL = URL(string: chapter.url), Self.isQidian(chapterURL) else { return nil }
+        guard Self.plainQidianURL(chapter.url) != nil else { return nil }
         // Imported rules are not evidence of origin. Read the official pages
         // again with fixed public HTML selectors and no imported JS or cookies.
         var source = BookSource(bookSourceUrl: "https://www.qidian.com", bookSourceName: "起点")
@@ -145,7 +144,16 @@ struct PublicSourceChapterReferenceService: SourceChapterReferencing {
     }
 
     private static func isQidian(_ url: URL) -> Bool {
-        url.scheme == "https" && ["www.qidian.com", "m.qidian.com", "read.qidian.com"].contains(url.host ?? "")
+        url.scheme == "https" && url.user == nil && url.password == nil && (url.port == nil || url.port == 443)
+            && ["www.qidian.com", "m.qidian.com", "read.qidian.com"].contains(url.host ?? "")
+    }
+
+    private static func plainQidianURL(_ value: String) -> URL? {
+        // Validate before the rule engine sees the string: response scripts do not change the HTTP method.
+        let ruleCharacters = CharacterSet(charactersIn: ",{}<>\"\\").union(.whitespacesAndNewlines).union(.controlCharacters)
+        guard value.rangeOfCharacter(from: ruleCharacters) == nil, !value.lowercased().contains("@js:"),
+              let url = URL(string: value), url.absoluteString == value, Self.isQidian(url) else { return nil }
+        return url
     }
 
     private static func sameBook(name: String, author: String, book: Book) -> Bool {

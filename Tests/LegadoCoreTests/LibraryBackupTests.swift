@@ -541,3 +541,155 @@ import Testing
         }
     }
 }
+
+extension LibraryBackupTests {
+    @Test(arguments: [false, true])
+    func reviewSubmissionSecondSyncPreservesRemoteBookHiddenByLocalCopy(_ legacyBaseline: Bool) async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let networkBook = snapshot().books[0]
+        var remote = snapshot()
+        remote.books[0].durChapterTime = 222
+        remote.books[0].durChapterPos = 12
+        let cloud = FakeCloud()
+        let seed = try LibrarySyncDocument.reconcile(local: remote, baseline: .init(), remote: .init(), device: "other", now: 1)
+        try await cloud.save(seed, replacing: nil)
+        var local = LibrarySnapshot()
+        local.books = [Book(bookUrl: fixture.directory.appendingPathComponent("local.txt").absoluteString, name: networkBook.name, author: networkBook.author, origin: "local")]
+        try await fixture.service.apply(local, expected: fixture.service.snapshot())
+        let syncDirectory = fixture.directory.appendingPathComponent("sync")
+        if legacyBaseline {
+            try FileManager.default.createDirectory(at: syncDirectory, withIntermediateDirectories: true)
+            let hash = SHA256.hash(data: Data("account".utf8)).map { String(format: "%02x", $0) }.joined()
+            try LibrarySnapshot.encode(seed).write(to: syncDirectory.appendingPathComponent(hash + ".json"))
+        }
+        for _ in 0..<3 {
+            let sync = LibrarySyncCoordinator(service: fixture.service, cloud: cloud, directory: syncDirectory, device: "this-device")
+            try await sync.synchronize(account: "account")
+            let remoteBook = try #require(try await cloud.document.snapshot.books.first)
+            #expect(remoteBook.id == networkBook.id)
+            #expect(remoteBook.durChapterTime == 222)
+            #expect(remoteBook.durChapterPos == 12)
+            #expect(try await fixture.service.snapshot().books.first?.origin == "local")
+        }
+        let sync = LibrarySyncCoordinator(service: fixture.service, cloud: cloud, directory: syncDirectory, device: "this-device")
+        let beforeRemoval = try await fixture.service.snapshot()
+        var removedCopy = beforeRemoval; removedCopy.books = []; removedCopy.chapters = [:]
+        try await fixture.service.apply(removedCopy, expected: beforeRemoval)
+        try await sync.synchronize(account: "account")
+        let imported = try await fixture.service.snapshot()
+        #expect(imported.books.first?.id == networkBook.id)
+        #expect(imported.books.first?.durChapterPos == 12)
+        var deletedNetworkBook = imported; deletedNetworkBook.books = []; deletedNetworkBook.chapters = [:]
+        try await fixture.service.apply(deletedNetworkBook, expected: imported)
+        try await sync.synchronize(account: "account")
+        #expect(try await cloud.document.snapshot.books.isEmpty)
+    }
+
+    @Test func reviewSubmissionFullBackupRecoversMissingLocalAttachment() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let directory = fixture.directory.appendingPathComponent("LocalBooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("original.txt")
+        try Data("测试正文".utf8).write(to: url)
+        var local = LibrarySnapshot()
+        local.books = [Book(bookUrl: url.absoluteString, name: "测试 TXT", origin: "local")]
+        try await fixture.service.apply(local, expected: fixture.service.snapshot())
+        let archive = try await fixture.service.export(includeLocalBooks: true, includeCachedChapters: false)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        try FileManager.default.removeItem(at: url)
+        let prepared = try await fixture.service.prepare(archive)
+        defer { try? FileManager.default.removeItem(at: prepared.directory) }
+        try await fixture.service.restore(prepared)
+        let restored = try #require(try await fixture.service.snapshot().books.first)
+        let restoredURL = try #require(URL(string: restored.id))
+        #expect(FileManager.default.fileExists(atPath: restoredURL.path))
+        #expect(try Data(contentsOf: restoredURL) == Data("测试正文".utf8))
+    }
+
+    @Test func reviewSubmissionConcurrentChapterRefreshSurvivesImport() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        try await fixture.service.apply(snapshot(), expected: fixture.service.snapshot())
+        let before = try await fixture.service.snapshot()
+        let id = before.books[0].id
+        var directory = before.chapters[id]!
+        directory.append(.init(url: "second", title: "第二章", bookUrl: id, index: 1))
+        try await fixture.database.replaceChapters(directory, bookURL: id)
+        do { try await fixture.service.apply(before, expected: before) } catch LibraryBackupError.changed { }
+        #expect(try await fixture.database.loadChapters(bookURL: id).count == 2)
+    }
+
+    @Test(arguments: ["txt", "epub"], [true, false])
+    func missingCrossDeviceLocalFileRestoresBytesAndNewestProgress(_ fileExtension: String, _ backupIsNewer: Bool) async throws {
+        let original = try Fixture(); let target = try Fixture()
+        defer { original.cleanup(); target.cleanup() }
+        let file = original.directory.appendingPathComponent("LocalBooks/original.\(fileExtension)")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let bytes = Data("经备份校验的合成书籍附件".utf8)
+        try bytes.write(to: file)
+        var backup = LibrarySnapshot()
+        backup.books = [.init(bookUrl: file.absoluteString, name: "缺失文件恢复")]
+        backup.books[0].tocUrl = file.absoluteString
+        backup.books[0].durChapterTime = 200; backup.books[0].durChapterPos = 12
+        backup.books[0].readConfig = BookReadConfig()
+        backup.books[0].readConfig?.epubLocation = fileExtension == "epub" ? "backup-location" : nil
+        backup.chapters[file.absoluteString] = [.init(url: file.absoluteString + "#one", title: "第一章", bookUrl: file.absoluteString, index: 0)]
+        try await original.service.apply(backup, expected: original.service.snapshot())
+        let missing = target.directory.appendingPathComponent("LocalBooks/missing.\(fileExtension)").absoluteString
+        var local = backup
+        local.books[0].bookUrl = missing; local.books[0].tocUrl = missing
+        local.books[0].durChapterTime = backupIsNewer ? 100 : 300
+        local.books[0].durChapterPos = 42
+        local.books[0].readConfig?.epubLocation = fileExtension == "epub" ? "local-location" : nil
+        local.chapters = [missing: [.init(url: missing + "#one", title: "第一章", bookUrl: missing, index: 0)]]
+        try await target.service.apply(local, expected: target.service.snapshot())
+        let archive = try await original.service.export(includeLocalBooks: true, includeCachedChapters: false)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        let prepared = try await target.service.prepare(archive)
+        defer { try? FileManager.default.removeItem(at: prepared.directory) }
+        try await target.service.restore(prepared)
+        try await target.service.restore(prepared)
+        let restored = try await target.service.snapshot()
+        let book = try #require(restored.books.first)
+        #expect(restored.books.count == 1)
+        #expect(book.id != missing)
+        #expect(book.tocUrl == book.id)
+        #expect(book.durChapterTime == (backupIsNewer ? 200 : 300))
+        #expect(book.durChapterPos == (backupIsNewer ? 12 : 42))
+        #expect(book.readConfig?.epubLocation == (backupIsNewer ? backup : local).books[0].readConfig?.epubLocation)
+        #expect(restored.chapters[book.id]?.first?.url == book.id + "#one")
+        #expect(try Data(contentsOf: #require(URL(string: book.id))) == bytes)
+    }
+
+    @Test func missingLocalFileWithoutAttachmentFailsWithoutChangingLibrary() async throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        var value = LibrarySnapshot()
+        value.books = [.init(bookUrl: fixture.directory.appendingPathComponent("missing.txt").absoluteString, name: "无附件")]
+        try await fixture.service.apply(value, expected: fixture.service.snapshot())
+        let before = try await fixture.service.snapshot()
+        let archive = fixture.directory.appendingPathComponent("missing.legadobackup")
+        try LibraryBackupArchive.write(snapshot: value, files: [:], to: archive)
+        await #expect(throws: (any Error).self) {
+            let prepared = try await fixture.service.prepare(archive)
+            defer { try? FileManager.default.removeItem(at: prepared.directory) }
+            try await fixture.service.restore(prepared)
+        }
+        #expect(try await fixture.service.snapshot() == before)
+    }
+
+    @Test func metadataOnlySyncLeavesConcurrentChapterRefreshUntouched() async throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        try await fixture.service.apply(snapshot(), expected: fixture.service.snapshot())
+        let before = try await fixture.service.snapshot(includeChapters: false)
+        let id = before.books[0].id
+        var directory = try await fixture.database.loadChapters(bookURL: id)
+        directory.append(.init(url: "second", title: "第二章", bookUrl: id, index: 1))
+        try await fixture.database.replaceChapters(directory, bookURL: id)
+        var updated = before; updated.books[0].durChapterPos = 12
+        try await fixture.service.apply(updated, expected: before)
+        #expect(try await fixture.database.loadChapters(bookURL: id).count == 2)
+        #expect(try await fixture.database.loadBooks().first?.durChapterPos == 12)
+    }
+}

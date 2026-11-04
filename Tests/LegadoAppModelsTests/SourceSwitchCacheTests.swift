@@ -40,6 +40,14 @@ struct SourceSwitchCacheTests {
         #expect(await cache.load("future") == nil)
     }
 
+    @Test func referencesCachedBeforePlainURLValidationAreDiscarded() async {
+        let cache = SourceSwitchCache()
+        var legacy = snapshot()
+        legacy.version = 1
+        cache.store(legacy, key: "legacy")
+        #expect(await cache.load("legacy") == nil)
+    }
+
     @Test func corruptOrUnknownVersionDiskEntriesBecomeCacheMisses() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

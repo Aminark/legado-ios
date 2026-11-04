@@ -6,7 +6,7 @@ import LegadoCore
 #endif
 
 struct SourceSwitchSnapshot: Codable, Sendable {
-    var version = 1
+    var version = 2
     var createdAt: Date
     var candidates: [BookSourceCandidate]
     var searchComplete: Bool
@@ -60,7 +60,7 @@ final class SourceSwitchCache {
             }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(Identity(version: 1, bookURL: book.bookUrl, origin: book.origin,
+        guard let data = try? encoder.encode(Identity(version: 2, bookURL: book.bookUrl, origin: book.origin,
             name: book.name, author: book.author, chapter: book.durChapterTitle, index: book.durChapterIndex,
             total: book.totalChapterNum, sources: rules)) else { return nil }
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -107,7 +107,7 @@ final class SourceSwitchCache {
 
     private func valid(_ value: SourceSwitchSnapshot) -> Bool {
         let age = now().timeIntervalSince(value.createdAt)
-        return value.version == 1 && age >= -300 && age < maximumAge
+        return value.version == 2 && age >= -300 && age < maximumAge
     }
 
     private func discard(_ key: String) -> SourceSwitchSnapshot? { remove(key); return nil }
