@@ -34,6 +34,7 @@ final class SourceSwitchViewModel: ObservableObject {
     private let book: Book
     private let service: BookSourceSwitchService
     private let referenceService: any SourceChapterReferencing
+    private let loadsInitialReference: Bool
     private let cache: SourceSwitchCache
     private let initialCandidates: [BookSourceCandidate]
     private var cacheKey: String?
@@ -128,11 +129,12 @@ final class SourceSwitchViewModel: ObservableObject {
     }
 
     init(book: Book, service: BookSourceSwitchService = .init(), candidates: [BookSourceCandidate] = [],
-         referenceService: any SourceChapterReferencing = PublicSourceChapterReferenceService(),
+         referenceService: (any SourceChapterReferencing)? = nil,
          cache: SourceSwitchCache = .shared) {
         self.book = book
         self.service = service
-        self.referenceService = referenceService
+        self.referenceService = referenceService ?? PublicSourceChapterReferenceService()
+        loadsInitialReference = referenceService != nil
         self.cache = cache
         initialCandidates = candidates
         self.candidates = candidates
@@ -153,7 +155,7 @@ final class SourceSwitchViewModel: ObservableObject {
         guard !Task.isCancelled, generation == verificationGeneration else { return }
         if cacheCreatedAt == nil { cacheCreatedAt = Date() }
         let recentlyUnavailable = referenceCheckedAt.map { Date().timeIntervalSince($0) < 300 } ?? false
-        if reference == nil && !recentlyUnavailable {
+        if loadsInitialReference && reference == nil && !recentlyUnavailable {
             referenceState = .loading
             referenceTask = Task {
                 let loaded = await referenceService.reference(for: book)
@@ -163,7 +165,7 @@ final class SourceSwitchViewModel: ObservableObject {
                 referenceState = reference == nil ? .unavailable : .ready
                 saveSnapshot()
             }
-        }
+        } else if reference == nil { referenceState = .unavailable }
         if !searchComplete && (initialCandidates.isEmpty || loadedFromCache) {
             state = .searching
             let remaining = sources.filter { !searchedSourceIDs.contains($0.id) }

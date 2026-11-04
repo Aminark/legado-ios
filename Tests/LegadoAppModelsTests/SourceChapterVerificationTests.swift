@@ -51,12 +51,20 @@ struct SourceChapterVerificationTests {
     }
 
     @Test func redirectedNonOfficialPagesCannotBecomeOfficialReferences() async {
-        var book = Book(bookUrl: "old", name: "书", author: "作者甲")
-        book.durChapterTitle = "第2章 来信"
+        let (book, report) = qidianFixture(chapterURL: "https://www.qidian.com/chapter/1/2")
+        let transport = RedirectingReferenceTransport()
+        let service = PublicSourceChapterReferenceService(transport: transport)
+        #expect(await service.qidianReference(for: book, prepared: report) == nil)
+        #expect(await transport.requests == 1)
+    }
+
+    @Test func openingSourceSwitchHasNoBundledBookLookup() async {
+        var book = Book(bookUrl: "https://imported.example/book", name: "合成测试书", author: "合成作者")
+        book.durChapterTitle = "第二章"
         let transport = RedirectingReferenceTransport()
         let service = PublicSourceChapterReferenceService(transport: transport)
         #expect(await service.reference(for: book) == nil)
-        #expect(await transport.requests == 1)
+        #expect(await transport.requests == 0)
     }
 
     @Test func lookalikeQidianHostIsNotAnOfficialReference() async {
@@ -153,6 +161,7 @@ extension SourceChapterVerificationTests {
         #expect(await service.qidianReference(for: book, prepared: report) == nil)
         #expect(await transport.methods.isEmpty)
         var modifiedBook = report
+        modifiedBook.chapters[0].url = "https://www.qidian.com/chapter/1/2"
         modifiedBook.book.bookUrl += suffix
         #expect(await service.qidianReference(for: book, prepared: modifiedBook) == nil)
         #expect(await transport.methods.isEmpty)

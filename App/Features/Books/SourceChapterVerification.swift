@@ -76,6 +76,7 @@ protocol SourceChapterReferencing: Sendable {
 }
 
 extension SourceChapterReferencing {
+    func reference(for book: Book) async -> SourceChapterReference? { nil }
     func qidianReference(for book: Book, prepared: BookSourceSwitchReport) async -> SourceChapterReference? { nil }
 }
 
@@ -88,32 +89,6 @@ struct PublicSourceChapterReferenceService: SourceChapterReferencing {
         configuration.timeoutIntervalForRequest = 12
         configuration.timeoutIntervalForResource = 20
         self.transport = OfficialReferenceTransport(underlying: transport ?? URLSessionHTTPTransport(configuration: configuration))
-    }
-
-    func reference(for book: Book) async -> SourceChapterReference? {
-        guard !(book.durChapterTitle ?? "").isEmpty, !book.author.isEmpty else { return nil }
-        let source = Self.qqSource
-        let policy = SourceNetworkPolicy()
-        let searcher = BookSearchService(transport: transport, networkPolicy: policy, history: BookSearchHistory())
-        let network = NetworkBookService(transport: transport, networkPolicy: policy)
-        let search = await searcher.search(keyword: book.name, page: 1, source: source)
-        guard !Task.isCancelled, let candidate = search.books.first(where: {
-            Self.sameBook(name: $0.name, author: $0.author, book: book)
-                && URL(string: $0.bookURL)?.host == "book.qq.com"
-        }) else { return nil }
-        let detail = await network.loadDetail(searchBook: candidate, source: source)
-        guard !Task.isCancelled, Self.sameBook(name: detail.book.name, author: detail.book.author, book: book) else { return nil }
-        let directory = await network.loadChapters(book: detail.book, source: source, maxPages: 20)
-        let mapping = BookSourceProgressMapper().migrate(current: book, replacement: detail.book,
-                                                       chapters: directory.chapters, now: 0)
-        guard !Task.isCancelled, mapping.exactChapterMatch,
-              directory.chapters.indices.contains(mapping.book.durChapterIndex) else { return nil }
-        let chapter = directory.chapters[mapping.book.durChapterIndex]
-        guard let url = URL(string: chapter.url), url.scheme == "https", url.host == "book.qq.com",
-              url.path.hasPrefix("/book-read/") else { return nil }
-        let report = await network.loadContent(book: mapping.book, chapter: chapter, source: source,
-                                              nextChapterURL: nil, maxPages: 1)
-        return Self.reference(report: report, chapter: chapter, provider: "QQ 阅读", book: book)
     }
 
     func qidianReference(for book: Book, prepared: BookSourceSwitchReport) async -> SourceChapterReference? {
@@ -174,29 +149,6 @@ struct PublicSourceChapterReferenceService: SourceChapterReferencing {
         guard mapping.exactChapterMatch else { return nil }
         return .init(provider: provider, chapterTitle: title, url: chapter.url, content: report.content)
     }
-
-    private static var qqSource: BookSource {
-        var source = BookSource(bookSourceUrl: "https://book.qq.com", bookSourceName: "QQ 阅读")
-        source.enabledCookieJar = false
-        source.searchUrl = "https://book.qq.com/api/booksearch/query?keyWord={{key}}&pageNo={{page}}&pageSize=10"
-        source.ruleSearch = .init(bookList: ".bookList[*]", name: ".title", author: ".author",
-                                  bookUrl: "$.bid##(\\d+)##https://book.qq.com/book-detail/$1##")
-        var info = BookInfoRule()
-        info.name = "h1@text"
-        info.author = "a.author@text"
-        info.tocUrl = "text.目录@href"
-        source.ruleBookInfo = info
-        var toc = TocRule()
-        toc.chapterList = "ul:nth-of-type(2)@li"
-        toc.chapterName = "span.name@text"
-        toc.chapterUrl = "a@href"
-        source.ruleToc = toc
-        var content = ContentRule()
-        content.title = "h1@text"
-        content.content = ".chapter-content@p@text"
-        source.ruleContent = content
-        return source
-    }
 }
 
 private struct OfficialReferenceTransport: HTTPTransport {
@@ -205,7 +157,7 @@ private struct OfficialReferenceTransport: HTTPTransport {
     func data(for request: URLRequest) async throws -> HTTPResponse {
         func isOfficial(_ url: URL?) -> Bool {
             guard let url, url.scheme == "https", url.user == nil, url.password == nil else { return false }
-            return ["book.qq.com", "www.qidian.com", "m.qidian.com", "read.qidian.com"].contains(url.host ?? "")
+            return ["www.qidian.com", "m.qidian.com", "read.qidian.com"].contains(url.host ?? "")
         }
         // Chapter URLs may carry Legado request options. The independent
         // reference path accepts only anonymous, read-only public requests.

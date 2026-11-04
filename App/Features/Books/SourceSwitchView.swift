@@ -12,7 +12,7 @@ struct SourceSwitchView: View {
         sources: [BookSource],
         demoCandidates: [BookSourceCandidate] = [],
         service: BookSourceSwitchService = .init(),
-        referenceService: any SourceChapterReferencing = PublicSourceChapterReferenceService(),
+        referenceService: (any SourceChapterReferencing)? = nil,
         cache: SourceSwitchCache = .shared,
         onSwitched: @escaping @MainActor (BookSourceSwitchReport, BookSource) -> Void
     ) {
