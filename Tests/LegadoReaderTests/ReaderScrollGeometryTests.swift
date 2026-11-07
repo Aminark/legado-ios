@@ -4,6 +4,33 @@ import UIKit
 import XCTest
 @testable import Legado
 
+@MainActor private final class LiveSliderFixtureState: ObservableObject {
+    @Published var value = 0.0
+    @Published var active: ReadingSliderPreview?
+}
+
+private struct LiveSliderFixture: View {
+    @ObservedObject var state: LiveSliderFixtureState
+
+    var body: some View {
+        // AppStorage's projected binding can capture a particular render's
+        // value. The floating row must use live events, not this old getter.
+        let snapshot = state.value
+        let value = Binding(get: { snapshot }, set: { state.value = $0 })
+        VStack {
+            ReadingPreviewSlider(title: "右边距", id: "正文右边距", value: value, range: 0...100,
+                                 step: 1, format: { "\(Int($0))" }, activeSlider: $state.active)
+            if let active = state.active {
+                // Render the same row as the floating overlay directly. Its
+                // UIKit view need not remain in the hierarchy when SwiftUI
+                // renders a noninteractive overlay.
+                ReadingSliderRow(preview: active)
+            }
+        }
+        .padding()
+    }
+}
+
 private final class BackgroundPhotoProvider: NSItemProvider, @unchecked Sendable {
     let photoData: Data?
     let photoError: (any Error)?
@@ -158,6 +185,214 @@ final class ReaderBookmarkPersistenceTests: XCTestCase {
 
 @MainActor
 final class ReaderScrollGeometryTests: XCTestCase {
+    func testChapterSnapshotsKeepBlankRegionsOpaqueAndExcludeTheOutgoingPage() throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        let controller = UIViewController()
+        controller.view.backgroundColor = .red
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; previous?.makeKeyAndVisible() }
+        let page = UIView(frame: CGRect(x: 24, y: 70, width: 120, height: 100))
+        page.backgroundColor = .red
+        let label = UILabel(frame: CGRect(x: 8, y: 4, width: 100, height: 30))
+        label.text = "旧页文字"
+        page.addSubview(label)
+        let mask = CAShapeLayer()
+        mask.frame = page.bounds
+        mask.path = UIBezierPath(rect: CGRect(x: 0, y: 0, width: 120, height: 40)).cgPath
+        page.layer.mask = mask
+        controller.view.addSubview(page)
+        controller.view.layoutIfNeeded()
+        let outgoing = try XCTUnwrap(ReaderChapterSnapshot.capture(page))
+        let oldImage = try XCTUnwrap(outgoing.image)
+        let oldData = oldImage.pngData()
+        outgoing.frame = page.frame
+        controller.view.addSubview(outgoing)
+        controller.view.backgroundColor = .blue
+        page.backgroundColor = .blue
+        label.text = "新页文字"
+        let incoming = try XCTUnwrap(ReaderChapterSnapshot.capture(page, excluding: outgoing))
+        let newImage = try XCTUnwrap(incoming.image)
+        func blankPixel(_ image: UIImage) throws -> [UInt8] {
+            let source = try XCTUnwrap(image.cgImage)
+            let crop = try XCTUnwrap(source.cropping(to: CGRect(x: 110 * image.scale, y: 75 * image.scale, width: 1, height: 1)))
+            var pixel = [UInt8](repeating: 0, count: 4)
+            return try pixel.withUnsafeMutableBytes { bytes in
+                let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1,
+                    bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue))
+                context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+                return Array(bytes)
+            }
+        }
+        let oldPixel = try blankPixel(oldImage), newPixel = try blankPixel(newImage)
+        XCTAssertGreaterThan(oldPixel[0], 240)
+        XCTAssertLessThan(oldPixel[2], 10)
+        XCTAssertGreaterThan(newPixel[2], 240)
+        XCTAssertLessThan(newPixel[0], 10)
+        XCTAssertEqual(oldPixel[3], 255)
+        XCTAssertEqual(newPixel[3], 255)
+        XCTAssertFalse(outgoing.layer.isHidden)
+        XCTAssertEqual(oldImage.pngData(), oldData)
+    }
+
+    func testFloatingSliderTracksLiveValuesEvenWhenItsBindingCapturedTheStartingValue() async throws {
+        let state = LiveSliderFixtureState()
+        let controller = UIHostingController(rootView: LiveSliderFixture(state: state))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; previousKeyWindow?.makeKeyAndVisible() }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        controller.view.layoutIfNeeded()
+        func sliders(in view: UIView) -> [UISlider] {
+            (view as? UISlider).map { [$0] } ?? view.subviews.flatMap { sliders(in: $0) }
+        }
+        let original = try XCTUnwrap(sliders(in: controller.view).first)
+        original.sendActions(for: .touchDown)
+        for value in [Float(24), Float(67)] {
+            original.value = value
+            original.sendActions(for: .valueChanged)
+            let updated = expectation(description: "Live preview rendered")
+            DispatchQueue.main.async { updated.fulfill() }
+            await fulfillment(of: [updated], timeout: 3)
+            for _ in 0..<30 {
+                controller.view.setNeedsLayout()
+                controller.view.layoutIfNeeded()
+                if sliders(in: controller.view).contains(where: { $0 !== original && abs($0.value - value) < 0.01 }) { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            XCTAssertEqual(state.value, Double(value), accuracy: 0.01)
+            XCTAssertEqual(state.active?.displayValue ?? -1, Double(value), accuracy: 0.01)
+            let floating = try XCTUnwrap(sliders(in: controller.view).first { $0 !== original })
+            XCTAssertEqual(floating.value, value, accuracy: 0.01)
+            XCTAssertEqual(floating.accessibilityValue, "\(Int(value))")
+        }
+        original.sendActions(for: .touchUpInside)
+        XCTAssertNil(state.active)
+    }
+
+    func testChapterEndJumpWaitsForViewportAndHandlesTrailingNewlines() async {
+        let coordinator = configuration(pageAnimation: 0).makeCoordinator()
+        let container = NSTextContainer(size: CGSize(width: 280, height: CGFloat.greatestFiniteMagnitude))
+        let manager = NSLayoutManager()
+        let storage = NSTextStorage(string: String(repeating: "上一章的正文，返回时应从最后一屏继续阅读。\n", count: 80) + "\n\n",
+                                   attributes: [.font: UIFont.systemFont(ofSize: 20)])
+        storage.addLayoutManager(manager)
+        manager.addTextContainer(container)
+        let view = UITextView(frame: .zero, textContainer: container)
+        view.contentInsetAdjustmentBehavior = .never
+        view.textContainerInset = UIEdgeInsets.zero
+        coordinator.installDisplayLink(for: view)
+        defer { coordinator.invalidate() }
+
+        coordinator.scroll(to: Int.max, in: view)
+        let scheduled = expectation(description: "Initial scroll attempted before viewport exists")
+        DispatchQueue.main.async { scheduled.fulfill() }
+        await fulfillment(of: [scheduled], timeout: 2)
+        XCTAssertTrue(coordinator.hasPendingScroll)
+
+        view.frame = CGRect(x: 0, y: 0, width: 280, height: 317)
+        view.layoutIfNeeded()
+        XCTAssertTrue(coordinator.applyPendingScroll(in: view))
+        let lastOffset = view.contentSize.height - view.bounds.height
+        XCTAssertGreaterThan(lastOffset, 0)
+        XCTAssertEqual(view.contentOffset.y, lastOffset, accuracy: 0.5)
+        XCTAssertFalse(coordinator.hasPendingScroll)
+
+        coordinator.scroll(to: 0, in: view)
+        let returned = expectation(description: "Normal chapter-start navigation still works")
+        DispatchQueue.main.async { returned.fulfill() }
+        await fulfillment(of: [returned], timeout: 2)
+        XCTAssertEqual(view.contentOffset.y, 0, accuracy: 0.5)
+    }
+
+    func testWholeLinePageBoundariesCoverEveryGlyphAfterReflow() {
+        for height in [CGFloat(317), 619.3, 803.5] {
+            for size in [20.0, 28.0, 34.0] {
+                let reader = configuration(fontSize: size, pageAnimation: 0)
+                let container = NSTextContainer(size: CGSize(width: 280, height: CGFloat.greatestFiniteMagnitude))
+                let manager = NSLayoutManager()
+                let text = String(repeating: "他说：“他们说的没错……打仗打的就是国力。”🌙\n\n韩信笑着说道。\n", count: 50) + "\n\n"
+                let storage = NSTextStorage(string: text, attributes: ReaderTypography(configuration: reader).bodyAttributes)
+                storage.addLayoutManager(manager)
+                manager.addTextContainer(container)
+                let view = UITextView(frame: CGRect(x: 0, y: 0, width: 280, height: height), textContainer: container)
+                view.textContainerInset = UIEdgeInsets.zero
+                let pages = ReaderTextPagination.pages(in: view)
+                XCTAssertGreaterThan(pages.count, 2)
+                var nextGlyph = 0
+                for page in pages {
+                    XCTAssertEqual(page.glyphRange.location, nextGlyph)
+                    XCTAssertGreaterThan(page.glyphRange.length, 0)
+                    XCTAssertLessThanOrEqual(page.visibleHeight, height)
+                    nextGlyph = NSMaxRange(page.glyphRange)
+                }
+                XCTAssertEqual(nextGlyph, manager.numberOfGlyphs)
+                manager.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: manager.numberOfGlyphs)) { _, _, _, range, _ in
+                    let characters = manager.characterRange(forGlyphRange: range, actualGlyphRange: nil)
+                    if (text as NSString).substring(with: characters).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return }
+                    let page = pages[ReaderTextPagination.index(containing: range.location, pages: pages)]
+                    XCTAssertLessThanOrEqual(NSMaxRange(range), NSMaxRange(page.glyphRange), "A line must belong to exactly one page")
+                    let ink = manager.boundingRect(forGlyphRange: range, in: container)
+                    XCTAssertGreaterThanOrEqual(ink.minY, page.offset - 0.01)
+                    XCTAssertLessThanOrEqual(ink.maxY, page.offset + page.visibleHeight + 0.01)
+                    XCTAssertLessThanOrEqual(ink.maxY, page.offset + height + 0.01)
+                }
+            }
+        }
+    }
+
+    func testRestoringInsideALineAndChangingChapterUseTheNewPageBoundaries() async {
+        let coordinator = configuration(pageAnimation: 0).makeCoordinator()
+        let view = ReaderLayoutTextView()
+        view.paginates = true
+        view.contentInsetAdjustmentBehavior = .never
+        view.textContainerInset = UIEdgeInsets.zero
+        view.frame = CGRect(x: 0, y: 0, width: 280, height: 317)
+        view.attributedText = NSAttributedString(string: String(repeating: "恢复阅读后每一行都应完整，不能露出下一页的半行文字。\n", count: 70),
+                                                 attributes: [.font: UIFont.systemFont(ofSize: 28)])
+        view.invalidatePagination()
+        view.layoutIfNeeded()
+        coordinator.installDisplayLink(for: view)
+        defer { coordinator.invalidate() }
+        guard view.pages.count > 2 else { XCTFail("Expected a multipage layout"); return }
+        let page = view.pages[min(2, view.pages.count - 1)]
+        let characters = view.layoutManager.characterRange(forGlyphRange: page.glyphRange, actualGlyphRange: nil)
+        let position = characters.location + 2
+        @MainActor func restore(_ position: Int) async {
+            coordinator.scroll(to: position, in: view)
+            let applied = expectation(description: "Restored with complete layout")
+            DispatchQueue.main.async { applied.fulfill() }
+            await fulfillment(of: [applied], timeout: 2)
+        }
+        await restore(position)
+        XCTAssertEqual(view.contentOffset.y, page.offset, accuracy: 0.5)
+        view.frame.size.height = 389.5
+        view.invalidatePagination()
+        view.layoutIfNeeded()
+        await restore(position)
+        let glyph = view.layoutManager.glyphIndexForCharacter(at: position)
+        let rebuilt = view.pages[ReaderTextPagination.index(containing: glyph, pages: view.pages)]
+        XCTAssertEqual(view.contentOffset.y, rebuilt.offset, accuracy: 0.5)
+        let mask = view.layer.mask as? CAShapeLayer
+        XCTAssertEqual(mask?.path?.boundingBoxOfPath.height ?? -1, rebuilt.visibleHeight, accuracy: 0.5)
+
+        view.invalidatePagination()
+        view.attributedText = NSAttributedString(string: String(repeating: "上一章的最后一页也必须使用重新计算的边界。\n", count: 40) + "\n\n",
+                                                 attributes: [.font: UIFont.systemFont(ofSize: 23)])
+        view.invalidatePagination()
+        view.layoutIfNeeded()
+        await restore(Int.max)
+        XCTAssertEqual(view.contentOffset.y, view.pages.last?.offset ?? -1, accuracy: 0.5)
+    }
+
     func testPrependingAndRecyclingStayWithinOnePhysicalPixel() async throws {
         let chapters = (4...6).map { chapter($0) }
         let fixture = host(chapters: chapters, active: 5)
@@ -320,14 +555,14 @@ final class ReaderScrollGeometryTests: XCTestCase {
               onRetainChapters: { _ in })
     }
 
-    private func configuration(fontSize: Double = 20) -> ReaderTextView {
+    private func configuration(fontSize: Double = 20, pageAnimation: Int = 3) -> ReaderTextView {
         .init(text: "", title: "", previousTitle: nil, previousText: "", isPreviousReady: false,
               continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
               fontSize: fontSize, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
               paragraphIndent: "　　", paddingLeft: 20, paddingRight: 20, paddingTop: 16, paddingBottom: 16,
               headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
               titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
-              fullJustify: true, pageAnimation: 3, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
+              fullJustify: true, pageAnimation: pageAnimation, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
               backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
               renderRevision: 0, readerPosition: .constant(0), pageRanges: .constant([]),
               currentPage: .constant(1), totalPages: .constant(1), isAutoReading: false,

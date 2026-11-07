@@ -31,6 +31,8 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         try await waitForLocation("Text/chapter.xhtml", in: model)
         let locator = try XCTUnwrap(model.location)
         XCTAssertEqual(EPUBReaderModel.path(locator.href.string), "Text/chapter.xhtml")
+        let selectedEntry = try XCTUnwrap(model.tableOfContents.first { $0.id == model.currentTOCEntryID })
+        XCTAssertEqual(EPUBReaderModel.path(selectedEntry.link.href), "Text/chapter.xhtml")
         var saved = report.book
         saved.readConfig?.epubLocation = locator.jsonString
         saved.durChapterIndex = try XCTUnwrap(model.currentChapter).index
@@ -42,6 +44,7 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         try await waitForJavaScript("!!document.querySelector('#body') && !!document.querySelector('table')", in: reopened)
         try await waitForLocation("Text/chapter.xhtml", in: restored)
         XCTAssertEqual(EPUBReaderModel.path(try XCTUnwrap(restored.location).href.string), "Text/chapter.xhtml")
+        XCTAssertEqual(restored.currentTOCEntryID, model.currentTOCEntryID)
     }
 
     private func waitForLocation(_ path: String, in model: EPUBReaderModel) async throws {

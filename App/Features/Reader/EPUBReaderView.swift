@@ -48,6 +48,16 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
 
     var progress: Double { location?.locations.totalProgression ?? 0 }
 
+    var currentTOCEntryID: Int? {
+        guard let chapter = currentChapter else { return nil }
+        let matches = tableOfContents.filter { Self.path($0.link.href) == chapter.resourceUrl }
+        if let fragment = chapter.startFragmentId,
+           let exact = matches.first(where: { URLComponents(string: $0.link.href)?.fragment == fragment }) {
+            return exact.id
+        }
+        return matches.first(where: { $0.link.title == chapter.title })?.id ?? matches.first?.id
+    }
+
     func open(preferences: EPUBPreferences) async {
         guard navigator == nil, !isLoading else { return }
         isLoading = true
@@ -165,6 +175,7 @@ struct EPUBReaderView: View {
     @State private var showsTextReader = false
     @State private var sliderProgress = 0.0
     @State private var isScrubbing = false
+    @State private var activeSlider: ReadingSliderPreview?
     @State private var saveTask: Task<Void, Never>?
     @AppStorage("epubFontScale") private var fontScale = 1.0
     @AppStorage("epubScroll") private var scroll = false
@@ -182,7 +193,9 @@ struct EPUBReaderView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if model.showsControls { topBar }
+            if model.showsControls {
+                topBar.opacity(activeSlider == nil ? 1 : 0.001)
+            }
             Group {
                 if let navigator = model.navigator {
                     EPUBNavigatorHost(navigator: navigator)
@@ -198,7 +211,9 @@ struct EPUBReaderView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if model.showsControls, model.navigator != nil { bottomBar }
+            if model.showsControls, model.navigator != nil {
+                bottomBar.opacity(activeSlider == nil ? 1 : 0.001)
+            }
         }
         .background(Color(uiColor: .systemBackground))
         .navigationBarHidden(true)
@@ -229,7 +244,17 @@ struct EPUBReaderView: View {
             }
         }
         .sheet(isPresented: $showsTOC) { tocSheet }
-        .sheet(isPresented: $showsSettings) { settingsSheet }
+        .modifier(ReadingSliderPreviewLayer(preview: showsSettings ? nil : activeSlider))
+        .overlay {
+            if showsSettings {
+                ReadingPreviewPanel(activeSlider: $activeSlider, dismiss: { showsSettings = false }) {
+                    settingsSheet
+                }
+            }
+        }
+        .onChange(of: showsSettings) { shown in
+            if !shown { activeSlider = nil }
+        }
         .sheet(isPresented: $showsBookmarks) { bookmarksSheet }
         .fullScreenCover(isPresented: $showsTextReader, onDismiss: {
             if let book = library.books.first(where: { $0.bookUrl == model.book.bookUrl }) {
@@ -274,13 +299,10 @@ struct EPUBReaderView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 10) {
-            HStack {
-                Slider(value: $sliderProgress, in: 0...1) { editing in
-                    isScrubbing = editing
-                    if !editing { Task { await model.go(toProgress: sliderProgress) } }
-                }.accessibilityLabel("阅读进度")
-                Text("\(Int(sliderProgress * 100))%")
-                    .font(.caption.monospacedDigit()).frame(width: 42)
+            ReadingPreviewSlider(title: "进度", id: "阅读进度", value: $sliderProgress, range: 0...1,
+                                 format: { "\(Int($0 * 100))%" }, activeSlider: $activeSlider) { editing in
+                isScrubbing = editing
+                if !editing { Task { await model.go(toProgress: sliderProgress) } }
             }
             HStack {
                 Button { Task { _ = await model.navigator?.goBackward() } } label: { Image(systemName: "chevron.left") }
@@ -298,17 +320,44 @@ struct EPUBReaderView: View {
 
     private var tocSheet: some View {
         ReadingNavigationStack {
-            List(model.tableOfContents) { entry in
-                Button {
-                    showsTOC = false
-                    Task { await model.go(to: entry.link) }
-                } label: {
-                    Text(entry.link.title ?? "未命名章节")
-                        .foregroundStyle(.primary).padding(.leading, CGFloat(min(entry.depth, 6)) * 14)
+            ScrollViewReader { proxy in
+                List(model.tableOfContents) { entry in
+                    let isCurrent = entry.id == model.currentTOCEntryID
+                    Button {
+                        showsTOC = false
+                        Task { await model.go(to: entry.link) }
+                    } label: {
+                        HStack {
+                            Text(entry.link.title ?? "未命名章节")
+                                .foregroundStyle(.primary).padding(.leading, CGFloat(min(entry.depth, 6)) * 14)
+                            Spacer()
+                            if isCurrent { Image(systemName: "checkmark.circle.fill").foregroundStyle(ReadingTheme.accent) }
+                        }
+                    }
+                    .id(entry.id)
+                    .listRowBackground(isCurrent ? ReadingTheme.accent.opacity(0.08) : Color.clear)
+                    .accessibilityValue(isCurrent ? "正在阅读" : "")
+                }
+                .task(id: model.currentTOCEntryID) {
+                    await Task.yield()
+                    guard !Task.isCancelled, let id = model.currentTOCEntryID else { return }
+                    proxy.scrollTo(id, anchor: .center)
+                }
+                .navigationTitle("目录").navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("完成") { showsTOC = false } }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("当前章节", systemImage: "location") {
+                            if let id = model.currentTOCEntryID {
+                                withAnimation { proxy.scrollTo(id, anchor: .center) }
+                            }
+                        }
+                        .labelStyle(.iconOnly)
+                        .accessibilityLabel("定位当前章节")
+                        .disabled(model.currentTOCEntryID == nil)
+                    }
                 }
             }
-            .navigationTitle("目录").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { showsTOC = false } } }
         }
     }
 
@@ -320,8 +369,8 @@ struct EPUBReaderView: View {
                     Toggle("使用原书排版", isOn: $publisherStyles)
                 }
                 Section("字号") {
-                    Slider(value: $fontScale, in: 0.7...2.0, step: 0.1)
-                    Text("\(Int(fontScale * 100))%")
+                    ReadingPreviewSlider(title: "字号", id: "EPUB 字号", value: $fontScale, range: 0.7...2.0,
+                                         step: 0.1, format: { "\(Int(($0 * 100).rounded()))%" }, activeSlider: $activeSlider)
                 }
                 Section("背景") {
                     Picker("主题", selection: $theme) {
