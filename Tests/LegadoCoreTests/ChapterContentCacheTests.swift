@@ -3,6 +3,29 @@ import Testing
 @testable import LegadoCore
 
 struct ChapterContentCacheTests {
+    @Test func foregroundSharesAnInFlightPreloadEvenWhenItsWindowIsCancelled() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let loader = GatedPrefetchLoader()
+        let coordinator = ChapterContentCoordinator(loader: loader, cache: cache)
+        let book = Book(bookUrl: "shared", name: "书", origin: "source")
+        let chapter = BookChapter(url: "shared-next", title: "下一章", bookUrl: book.bookUrl, index: 1)
+        let source = BookSource(bookSourceUrl: book.origin, bookSourceName: "源")
+        let preload = Task { await coordinator.prefetch(book: book, chapter: chapter, source: source) }
+        await loader.waitForRequest()
+        let foreground = Task { await coordinator.load(book: book, chapter: chapter, source: source) }
+        // Hold the network response while the foreground request joins it.
+        try await Task.sleep(nanoseconds: 40_000_000)
+        preload.cancel()
+        await loader.release()
+        let result = await foreground.value
+        #expect(result.report.content == "预加载正文")
+        #expect(!(await preload.value))
+        #expect(await loader.count() == 1)
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url)?.content == "预加载正文")
+    }
+
     @Test func failedPageDoesNotTurnPartialContentIntoSuccessfulCache() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -165,5 +188,24 @@ private actor StubChapterLoader: ChapterContentLoading {
 private struct PartialChapterLoader: ChapterContentLoading {
     func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
         .init(content: "仅第一页", diagnostics: [.init(severity: .error, code: "content.request", message: "第二页加载失败", rule: chapter.url)])
+    }
+}
+
+private actor GatedPrefetchLoader: ChapterContentLoading {
+    private var calls = 0
+    private var released = false
+    private var waiting: [CheckedContinuation<ChapterContentReport, Never>] = []
+    func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
+        calls += 1
+        if released { return .init(content: "预加载正文") }
+        return await withCheckedContinuation { waiting.append($0) }
+    }
+    func waitForRequest() async { while waiting.isEmpty { await Task.yield() } }
+    func count() -> Int { calls }
+    func release() {
+        released = true
+        let continuations = waiting
+        waiting = []
+        for continuation in continuations { continuation.resume(returning: .init(content: "预加载正文")) }
     }
 }

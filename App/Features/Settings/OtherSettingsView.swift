@@ -141,6 +141,8 @@ struct NetworkSettingsView: View {
                     }
                 }
                 Stepper(settings.prefetchChapters == 0 ? "关闭章节预加载" : "预加载 \(settings.prefetchChapters) 章", value: $settings.prefetchChapters, in: 0...20)
+                Text("默认提前缓存后续 10 章，翻章或滚动进入下一章时继续补齐；已缓存章节不重复下载。")
+                    .font(.footnote).foregroundStyle(.secondary)
                 Text("超出上限时清理最久未读取的章节；容量调整在保存时生效。")
                     .font(.footnote).foregroundStyle(.secondary)
             }

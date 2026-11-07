@@ -3,6 +3,36 @@ import Testing
 @testable import LegadoCore
 
 struct ApplicationSettingsTests {
+    @Test func upgradesTheOldPreloadDefaultOnceAndKeepsLaterChoices() throws {
+        let suite = "legado.settings.preload.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var old = ApplicationSettings()
+        old.prefetchChapters = 1
+        old.userAgent = "Keep this setting"
+        defaults.set(try JSONEncoder().encode(old), forKey: ApplicationSettingsStore.key)
+        let store = ApplicationSettingsStore(defaults: defaults)
+        #expect(ApplicationSettings().prefetchChapters == 10)
+        #expect(store.settings.prefetchChapters == 10)
+        #expect(store.settings.userAgent == old.userAgent)
+        var chosen = store.settings
+        chosen.prefetchChapters = 1
+        try store.save(chosen)
+        #expect(ApplicationSettingsStore(defaults: defaults).settings.prefetchChapters == 1)
+    }
+
+    @Test func preloadDefaultMigrationPreservesDisabledOrCustomCounts() throws {
+        for count in [0, 5, 20] {
+            let suite = "legado.settings.preload.custom.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            var old = ApplicationSettings()
+            old.prefetchChapters = count
+            defaults.set(try JSONEncoder().encode(old), forKey: ApplicationSettingsStore.key)
+            #expect(ApplicationSettingsStore(defaults: defaults).settings.prefetchChapters == count)
+        }
+    }
+
     @Test func validatesAndPersistsWithoutOverwritingOnFailure() throws {
         let suite = "legado.settings.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

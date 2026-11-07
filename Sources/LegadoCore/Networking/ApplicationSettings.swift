@@ -8,7 +8,7 @@ public struct ApplicationSettings: Codable, Equatable, Sendable {
     public var timeoutSeconds = 0
     public var concurrentSources = 32
     public var chapterCacheMB = 256
-    public var prefetchChapters = 1
+    public var prefetchChapters = 10
     public var recordLog = false
     public var ignoreCertificateErrors = true
 
@@ -102,7 +102,21 @@ public final class ApplicationSettingsStore: @unchecked Sendable {
     public static let key = "legado.applicationSettings.v1"
     private let defaults: UserDefaults
 
-    public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let migrationKey = "legado.prefetchDefault10.v1"
+        if !defaults.bool(forKey: migrationKey) {
+            if let data = defaults.data(forKey: Self.key),
+               var old = try? JSONDecoder().decode(ApplicationSettings.self, from: data),
+               old.prefetchChapters == 1 {
+                old.prefetchChapters = 10
+                if let validated = try? old.validated(), let updated = try? JSONEncoder().encode(validated) {
+                    defaults.set(updated, forKey: Self.key)
+                }
+            }
+            defaults.set(true, forKey: migrationKey)
+        }
+    }
 
     public var settings: ApplicationSettings {
         guard let data = defaults.data(forKey: Self.key),

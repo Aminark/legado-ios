@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 struct ReaderView: View {
     private var usesEPUBLayout = true
+    private var isStylePreview = false
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -22,6 +23,8 @@ struct ReaderView: View {
     @State private var illustrationChapter: BookChapter?
     @State private var showsAutoReadControls = false
     @State private var showsStyleControls = false
+    @State private var activeSlider: ReadingSliderPreview?
+    @State private var styleSection = 0
     @State private var isAutoReading = false
     @State private var showsReaderMenu = false
     @State private var followsSystemBrightness = true
@@ -51,6 +54,7 @@ struct ReaderView: View {
     @State private var readerRenderRevision = 0
     @State private var isWaitingForNextChapter = false
     @State private var isWaitingForPreviousChapter = false
+    @State private var pendingPagedPosition: Int?
     @State private var httpTTSEngines: [HttpTTS] = []
     @State private var resumesSpeechAfterChapterLoad = false
     @State private var speechTimerTask: Task<Void, Never>?
@@ -186,6 +190,19 @@ struct ReaderView: View {
     }
 
 
+    init(stylePreview: Bool) {
+        let book = Book(bookUrl: "demo://reading-style-preview", name: "阅读排版预览", author: "示例正文")
+        let chapter = BookChapter(url: "demo://reading-style-preview/chapter", title: "第一章 · 窗边的光", bookUrl: book.bookUrl, index: 0)
+        let paragraphs = [
+            "清晨，阳光穿过窗帘，在书页上留下温暖的光影。远处传来几声鸟鸣，街道正缓缓醒来。她翻开昨天读到的那一页，继续寻找故事里的答案。",
+            "这是一段用于调整阅读样式的示例正文。试着拖动上、下、左、右边距，观察文字区域如何变化；彩色区域表示对应的留白。松开滑块，设置面板就会恢复。",
+            "一阵风吹过，窗外的树叶轻轻摇晃。文字在纸上安静排列，每一行都有自己的位置，每一页也留着恰到好处的空白。"
+        ]
+        self.init(demoBook: book, chapters: [chapter], initialIndex: 0, content: Array(repeating: paragraphs.joined(separator: "\n\n"), count: 6).joined(separator: "\n\n"))
+        isStylePreview = stylePreview
+        _showsStyleControls = State(initialValue: stylePreview)
+    }
+
     var body: some View {
         if usesEPUBLayout, book.origin == "local", URL(string: book.bookUrl)?.pathExtension.lowercased() == "epub" {
             EPUBReaderView(book: book, chapters: model.chapters, initialIndex: model.currentIndex)
@@ -213,7 +230,12 @@ struct ReaderView: View {
         }
         .animation(.easeOut(duration: 0.22), value: showsReaderMenu)
         .onAppear {
+            if isStylePreview {
+                backgroundImage = ReaderBackgroundStore.load()
+                return
+            }
             activity.beginReading(book)
+            model.resumePreloading()
             speech.onNextChapter = { moveSpeechToChapter(direction: 1) }
             speech.onPreviousChapter = { moveSpeechToChapter(direction: -1) }
             speech.onRemoteStop = {
@@ -244,6 +266,8 @@ struct ReaderView: View {
             }
         }
         .onDisappear {
+            guard !isStylePreview else { return }
+            model.cancelPreloading()
             isAutoReading = false
             UIApplication.shared.isIdleTimerDisabled = false
             if speech.isSpeaking || speech.isPaused { speech.toggle(text: "") }
@@ -267,12 +291,35 @@ struct ReaderView: View {
             }
         }
         .sheet(isPresented: $showsTableOfContents) { tableOfContents }
+        .onChange(of: showsTableOfContents) { shown in
+            if shown { tocSearch = "" }
+        }
         .sheet(isPresented: $showsBookmarks) { bookmarksSheet }
         .sheet(item: $illustrationChapter) { chapter in
             EPUBIllustrationsView(book: book, chapter: chapter)
         }
-        .sheet(isPresented: $showsAutoReadControls) { autoReadControls }
-        .sheet(isPresented: $showsStyleControls) { styleControls }
+        .overlay {
+            if showsStyleControls || showsAutoReadControls {
+                ReadingPreviewPanel(activeSlider: $activeSlider, dismiss: {
+                    if isStylePreview { dismiss() }
+                    else {
+                        showsStyleControls = false
+                        showsAutoReadControls = false
+                    }
+                }) {
+                    if showsStyleControls { styleControls }
+                    else { autoReadControls }
+                }
+            }
+        }
+        .onChange(of: showsStyleControls) { shown in
+            if shown { showsReaderMenu = false }
+            else { activeSlider = nil }
+        }
+        .onChange(of: showsAutoReadControls) { shown in
+            if shown { showsReaderMenu = false }
+            else { activeSlider = nil }
+        }
         .sheet(isPresented: $showsContentSearch) { contentSearchSheet }
         .sheet(item: $sourceSwitchBook) { currentBook in
             ReadingNavigationStack {
@@ -298,8 +345,10 @@ struct ReaderView: View {
         .sheet(isPresented: $showsClickActionSettings) { clickActionSettings }
         .sheet(isPresented: $showsContentEditor) { contentEditor }
         .task(id: model.chapterLoadGeneration) {
+            guard !isStylePreview else { return }
             isWaitingForNextChapter = false
             isWaitingForPreviousChapter = false
+            pendingPagedPosition = nil
             let needsInitialPosition = !model.hasLoadedCurrentChapter
             if let pending = progressSaveTask {
                 let pendingGeneration = progressSaveGeneration
@@ -314,7 +363,7 @@ struct ReaderView: View {
             readerJumpPosition = nil
             readerPageRanges = []
             if needsInitialPosition { readerPosition = model.requestedPosition }
-            await model.load(rules: model.usesReplaceRules ? replaceRules.rules : [], prefetchNextChapter: pageAnimation != 3)
+            await model.load(rules: model.usesReplaceRules ? replaceRules.rules : [])
             guard !Task.isCancelled else { return }
             if needsInitialPosition {
                 readerPosition = pageAnimation == 3
@@ -330,8 +379,12 @@ struct ReaderView: View {
             }
         }
         .task(id: "\(model.chapterLoadGeneration):\(pageAnimation == 3):\(model.hasLoadedCurrentChapter):\(model.scrollRevision)") {
-            guard pageAnimation == 3 else { return }
-            await model.prepareContinuousReading(rules: model.usesReplaceRules ? replaceRules.rules : [])
+            guard model.hasLoadedCurrentChapter else { return }
+            if pageAnimation == 3 {
+                await model.prepareContinuousReading(rules: model.usesReplaceRules ? replaceRules.rules : [])
+            } else {
+                await model.loadAdjacentChapters(rules: model.usesReplaceRules ? replaceRules.rules : [])
+            }
         }
         .onAppear { updateIdleTimer() }
         .onChange(of: keepScreenOn) { _ in
@@ -340,10 +393,12 @@ struct ReaderView: View {
         .onChange(of: adjacentReadiness) { _ in
             if model.isContinuationWindowReady, isWaitingForNextChapter {
                 isWaitingForNextChapter = false
-                readerRenderRevision &+= 1
+                if pageAnimation == 3 { readerRenderRevision &+= 1 }
+                else { advanceToPreparedPagedChapter(1, position: pendingPagedPosition) }
             }
             if model.isPreviousWindowReady, isWaitingForPreviousChapter {
-                advanceToPreparedPreviousChapter()
+                if pageAnimation == 3 { advanceToPreparedPreviousChapter() }
+                else { advanceToPreparedPagedChapter(-1, position: pendingPagedPosition) }
             }
         }
         .onChange(of: isAutoReading) { _ in
@@ -371,6 +426,7 @@ struct ReaderView: View {
             updateIdleTimer()
         }
         .onChange(of: scenePhase) { phase in
+            guard !isStylePreview else { return }
             if phase == .active {
                 if !followsSystemBrightness {
                     UIScreen.main.brightness = CGFloat(readerBrightness)
@@ -401,6 +457,7 @@ struct ReaderView: View {
             currentPage = 1
             totalPages = 1
             UserDefaults.standard.set(value, forKey: "pageAnim")
+            guard !isStylePreview else { return }
             let updatedBook = model.useGlobalPageAnimation()
             Task { await library.addOrUpdate(updatedBook) }
         }
@@ -462,9 +519,19 @@ struct ReaderView: View {
             .background(backgroundColor.ignoresSafeArea())
         } else {
             VStack(spacing: 0) {
-                if headerVisible { readerTipBar(isHeader: true) }
+                if headerVisible {
+                    readerTipBar(isHeader: true)
+                        .overlay { marginGuides(group: "页眉", top: headerPaddingTop, bottom: headerPaddingBottom, left: headerPaddingLeft, right: headerPaddingRight) }
+                }
                 readerSurface
-                if footerVisible { readerTipBar(isHeader: false) }
+                    .clipped()
+                    .padding(.top, CGFloat(max(paddingTop, 0)))
+                    .padding(.bottom, CGFloat(max(paddingBottom, 0)))
+                    .overlay { marginGuides(group: "正文", top: paddingTop, bottom: paddingBottom, left: paddingLeft, right: paddingRight) }
+                if footerVisible {
+                    readerTipBar(isHeader: false)
+                        .overlay { marginGuides(group: "页脚", top: footerPaddingTop, bottom: footerPaddingBottom, left: footerPaddingLeft, right: footerPaddingRight) }
+                }
             }
             .frame(maxWidth: readingColumnMaxWidth)
             .frame(maxWidth: .infinity)
@@ -551,12 +618,12 @@ struct ReaderView: View {
         ReaderTextView(
             text: readerDisplayText,
             title: model.title,
-            previousTitle: pageAnimation == 3 ? model.previousTitle : nil,
+            previousTitle: model.canGoPrevious ? model.previousTitle : nil,
             previousText: pageAnimation == 3 ? model.previousContent : "",
-            isPreviousReady: pageAnimation == 3 && model.isPreviousWindowReady,
-            continuationTitle: pageAnimation == 3 ? model.continuationTitle : nil,
+            isPreviousReady: model.isPreviousWindowReady,
+            continuationTitle: model.canGoNext ? model.continuationTitle : nil,
             continuationText: pageAnimation == 3 ? model.continuationContent : "",
-            isContinuationReady: pageAnimation == 3 && model.isContinuationWindowReady,
+            isContinuationReady: model.isContinuationWindowReady,
             isVolume: model.currentChapter?.isVolume == true,
             fontSize: fontSize,
             fontPath: fontPath,
@@ -566,8 +633,8 @@ struct ReaderView: View {
             paragraphIndent: paragraphIndent,
             paddingLeft: paddingLeft,
             paddingRight: paddingRight,
-            paddingTop: paddingTop,
-            paddingBottom: paddingBottom,
+            paddingTop: 0,
+            paddingBottom: 0,
             headerInset: 0,
             footerInset: 0,
             fontWeight: fontWeight,
@@ -586,6 +653,8 @@ struct ReaderView: View {
             requestedPosition: pageAnimation == 3 ? readerPosition : model.requestedPosition,
             jumpPosition: readerJumpPosition,
             renderRevision: readerRenderRevision,
+            chapterRevision: model.chapterLoadGeneration,
+            chapterIndex: model.currentIndex,
             readerPosition: $readerPosition,
             pageRanges: $readerPageRanges,
             currentPage: $currentPage,
@@ -602,13 +671,11 @@ struct ReaderView: View {
                 if model.canGoNext {
                     showsReaderMenu = false
                     readerPosition = boundaryPosition
-                    saveProgress(immediate: true)
                     readerJumpPosition = nil
                     // Keep every chapter in its own TextKit document. Appending
                     // text here makes the absolute UTF-16 offset belong to the
                     // previous chapter while progress is saved under the next.
-                    model.goNext()
-                    readerPosition = model.requestedPosition
+                    advanceToPreparedPagedChapter(1)
                 } else {
                     isAutoReading = false
                 }
@@ -621,9 +688,8 @@ struct ReaderView: View {
                 guard model.canGoPrevious else { return }
                 showsReaderMenu = false
                 readerPosition = boundaryPosition
-                saveProgress(immediate: true)
                 readerJumpPosition = nil
-                model.goPrevious(position: Int.max)
+                advanceToPreparedPagedChapter(-1)
             },
             onEnteredPrevious: { position in
                 guard pageAnimation == 3, model.canGoPrevious, model.hasPreviousWindow else { return }
@@ -1014,10 +1080,33 @@ struct ReaderView: View {
     private func moveChapter(_ direction: Int) {
         stopSpeechIfNeeded()
         showsReaderMenu = false
+        if pageAnimation != 3 {
+            advanceToPreparedPagedChapter(direction, position: 0)
+            return
+        }
         saveProgress(immediate: true)
         readerJumpPosition = nil
         if direction < 0 { model.goPrevious() } else { model.goNext() }
         readerPosition = model.requestedPosition
+    }
+
+    private func advanceToPreparedPagedChapter(_ direction: Int, position: Int? = nil) {
+        guard (direction < 0 ? model.canGoPrevious : model.canGoNext) else { return }
+        let ready = direction < 0 ? model.isPreviousWindowReady : model.isContinuationWindowReady
+        guard ready else {
+            pendingPagedPosition = position
+            if direction < 0 { isWaitingForPreviousChapter = true }
+            else { isWaitingForNextChapter = true }
+            return
+        }
+        isWaitingForPreviousChapter = false
+        isWaitingForNextChapter = false
+        pendingPagedPosition = nil
+        saveProgress(immediate: true)
+        readerJumpPosition = nil
+        if direction < 0 { model.goPrevious(position: position ?? Int.max) }
+        else { model.goNext(position: position ?? 0) }
+        readerPosition = min(model.requestedPosition, max(model.content.utf16.count - 1, 0))
     }
 
     private func requestNextChapter() {
@@ -1064,11 +1153,13 @@ struct ReaderView: View {
     }
 
     private func updateIdleTimer() {
+        guard !isStylePreview else { return }
         UIApplication.shared.isIdleTimerDisabled = keepScreenOn || isAutoReading
             || (readAloudWakeLock && speech.isSpeaking)
     }
 
     private func pageDidChange() {
+        guard !isStylePreview else { return }
         saveProgress()
         guard enableReadRecord else { return }
         Task { await activity.checkpoint(book) }
@@ -1079,19 +1170,10 @@ struct ReaderView: View {
         ReadingNavigationStack {
             Form {
                 Section {
-                    HStack {
-                        Text("自动翻页速度")
-                        Spacer()
-                        Text("\(autoReadSpeed)s").monospacedDigit().foregroundStyle(.secondary)
-                    }
-                    Slider(
-                        value: Binding(
-                            get: { Double(autoReadSpeed) },
-                            set: { autoReadSpeed = max(1, min(Int($0.rounded()), 120)) }
-                        ),
-                        in: 1...120,
-                        step: 1
-                    )
+                    valueSlider("自动翻页速度", value: Binding(
+                        get: { Double(autoReadSpeed) },
+                        set: { autoReadSpeed = max(1, min(Int($0.rounded()), 120)) }
+                    ), range: 1...120, format: { "\(Int($0))s" })
                 } footer: {
                     Text("数值表示自动阅读一屏所用的秒数，范围 1–120 秒。")
                 }
@@ -1132,251 +1214,43 @@ struct ReaderView: View {
 
     private var styleControls: some View {
         ReadingNavigationStack {
-            Form {
-                Section("快速排版") {
-                    HStack(spacing: 12) {
-                        Button {
-                            fontSize = max(5, fontSize - 1)
-                        } label: {
-                            Image(systemName: "textformat.size.smaller")
-                                .frame(width: 38, height: 32)
-                        }
-                        .readingSecondaryButtonStyle()
-
-                        VStack(spacing: 2) {
-                            Text("字号")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text("\(Int(fontSize))")
-                                .font(.headline.monospacedDigit())
-                        }
-                        .frame(maxWidth: .infinity)
-
-                        Button {
-                            fontSize = min(50, fontSize + 1)
-                        } label: {
-                            Image(systemName: "textformat.size.larger")
-                                .frame(width: 38, height: 32)
-                        }
-                        .readingSecondaryButtonStyle()
-                    }
-
-                    HStack(spacing: 8) {
-                        Text("行距")
-                            .font(.subheadline)
-                        Spacer(minLength: 8)
-                        readerChoiceChip("紧凑", selected: lineSpacing <= 7) { lineSpacing = 6 }
-                        readerChoiceChip("标准", selected: lineSpacing > 7 && lineSpacing < 18) { lineSpacing = 12 }
-                        readerChoiceChip("宽松", selected: lineSpacing >= 18) { lineSpacing = 22 }
-                    }
-                    Toggle("两端对齐", isOn: $fullJustify)
+            VStack(spacing: 0) {
+                Picker("样式分类", selection: $styleSection) {
+                    Text("文字").tag(0)
+                    Text("边距").tag(1)
+                    Text("外观").tag(2)
+                    Text("高级").tag(3)
                 }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .accessibilityIdentifier("reader.style.categories")
+                .onChange(of: styleSection) { _ in activeSlider = nil }
 
-                Section("阅读背景") {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 12) {
-                            ForEach(ReaderStylePreset.legadoDefaults) { preset in
-                                let isSelected = resolvedStyle.id == preset.id && activeBackgroundImage == nil
-                                Button {
-                                    useBackgroundImage = false
-                                    theme = preset.id
-                                } label: {
-                                    VStack(spacing: 6) {
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .fill(Color(uiColor: preset.background))
-                                            .frame(width: 54, height: 72)
-                                            .overlay {
-                                                Text("文字")
-                                                    .font(.caption)
-                                                    .foregroundStyle(Color(uiColor: preset.foreground))
-                                            }
-                                            .overlay {
-                                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                    .strokeBorder(
-                                                        Color(uiColor: preset.foreground).opacity(isSelected ? 0.4 : 0.12),
-                                                        lineWidth: isSelected ? 1.25 : 0.75
-                                                    )
-                                            }
-                                            .overlay(alignment: .topTrailing) {
-                                                if isSelected {
-                                                    Image(systemName: "checkmark")
-                                                        .font(.system(size: 10, weight: .semibold))
-                                                        .foregroundStyle(Color(uiColor: preset.foreground))
-                                                        .padding(6)
-                                                }
-                                            }
-                                        Text(preset.name)
-                                            .font(.caption2)
-                                            .foregroundStyle(isSelected ? .primary : .secondary)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(preset.name)
-                                .accessibilityAddTraits(isSelected ? .isSelected : [])
-                            }
-                        }
-                    }
-                    Button("选择背景图片", systemImage: "photo") {
-                        backgroundError = nil
-                        showsBackgroundPicker = true
-                    }
-                    if backgroundImage != nil {
-                        HStack(spacing: 0) {
-                            Text("使用背景图片")
-                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .onTapGesture { useBackgroundImage.toggle() }
-                                .accessibilityHidden(true)
-                            Toggle("使用背景图片", isOn: $useBackgroundImage)
-                                .labelsHidden()
-                                .fixedSize()
-                        }
-                        Button("删除背景图片", systemImage: "trash", role: .destructive) {
-                            ReaderBackgroundStore.remove()
-                            backgroundImage = nil
-                            useBackgroundImage = false
-                        }
-                    }
-                    if let backgroundError {
-                        Text(backgroundError).font(.footnote).foregroundStyle(.red)
+                Form {
+                    switch styleSection {
+                    case 0: typographyStyleSections
+                    case 1: marginStyleSections
+                    case 2: backgroundStyleSection
+                    default: otherStyleSections
                     }
                 }
-
-                Section("文字") {
-                    valueSlider("字号", value: $fontSize, range: 5...50, format: { "\(Int($0))" })
-                    valueSlider("字间距", value: $letterSpacing, range: -0.5...0.5, step: 0.01, format: { String(format: "%.2f", $0) })
-                    valueSlider("行间距", value: $lineSpacing, range: 0...50, format: { "\(Int($0))" })
-                    valueSlider("段距", value: $paragraphSpacing, range: 0...50, format: { String(format: "%.1f", $0) })
-                    Picker("字重", selection: $fontWeight) {
-                        Text("正常").tag(0)
-                        Text("粗体").tag(1)
-                        Text("细体").tag(2)
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("段落缩进")
-                        TextField("请输入缩进字符", text: $paragraphIndent)
-                            .textInputAutocapitalization(.never)
-                            .accessibilityLabel("段落缩进字符")
-                        Text("控制每段开头的缩进，默认两个全角空格；清空后不缩进。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button(fontPath.isEmpty ? "选择字体文件" : "更换字体文件", systemImage: "textformat") {
-                        showsFontImporter = true
-                    }
-                    if !fontPath.isEmpty {
-                        HStack {
-                            Text("当前字体")
-                            Spacer()
-                            Text(URL(fileURLWithPath: fontPath).lastPathComponent)
-                                .foregroundStyle(.secondary)
-                        }
-                        Button("恢复默认字体", role: .destructive) { fontPath = "" }
-                    }
-                    if let fontError {
-                        Text(fontError).font(.footnote).foregroundStyle(.red)
-                    }
-                    Picker("下划线", selection: $underlineMode) {
-                        Text("关闭").tag(0)
-                        Text("实线").tag(1)
-                        Text("虚线").tag(2)
-                    }
-                }
-
-                Section("章节标题") {
-                    Picker("标题模式", selection: $titleMode) {
-                        Text("左对齐").tag(0)
-                        Text("居中").tag(1)
-                        Text("隐藏").tag(2)
-                    }
-                    .pickerStyle(.segmented)
-                    valueSlider("标题字号增量", value: $titleSize, range: -10...30, format: { String(format: "%+.0f", $0) })
-                    valueSlider("标题上间距", value: $titleTopSpacing, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("标题下间距", value: $titleBottomSpacing, range: 0...100, format: { "\(Int($0))" })
-                }
-
-                Section("翻页动画") {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(Self.pageAnimationChoices, id: \.0) { choice in
-                                Button {
-                                    pageAnimation = choice.value
-                                } label: {
-                                    VStack(spacing: 6) {
-                                        Image(systemName: choice.icon)
-                                            .font(.headline)
-                                        Text(choice.title)
-                                            .font(.caption2)
-                                    }
-                                    .foregroundStyle(pageAnimation == choice.value ? ReadingTheme.onAccent : Color.primary)
-                                    .frame(width: 58, height: 54)
-                                    .background(
-                                        pageAnimation == choice.value ? ReadingTheme.accentFill : Color.secondary.opacity(0.1),
-                                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    )
-                                    .overlay {
-                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                            .strokeBorder(pageAnimation == choice.value ? ReadingTheme.selectionBorder : .clear, lineWidth: 1)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityAddTraits(pageAnimation == choice.value ? .isSelected : [])
-                            }
-                        }
-                    }
-                    Text(pageAnimation == 3
-                         ? "滚动模式连续滚动；其余模式按整屏翻页。左右滑动或点击左右三分之一区域翻页，点击中间区域打开菜单。"
-                         : "当前模式按整屏翻页；左右滑动或点击左右三分之一区域翻页，点击中间区域打开菜单。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("正文边距") {
-                    valueSlider("左边距", value: $paddingLeft, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("右边距", value: $paddingRight, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("上边距", value: $paddingTop, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("下边距", value: $paddingBottom, range: 0...100, format: { "\(Int($0))" })
-                }
-
-                Section("页眉页脚") {
-                    Picker("页眉显示", selection: $headerMode) {
-                        Text("状态栏显示时隐藏").tag(0)
-                        Text("显示").tag(1)
-                        Text("隐藏").tag(2)
-                    }
-                    Picker("页脚显示", selection: $footerMode) {
-                        Text("显示").tag(0)
-                        Text("隐藏").tag(1)
-                    }
-                    tipPicker("页眉左", selection: $tipHeaderLeft)
-                    tipPicker("页眉中", selection: $tipHeaderMiddle)
-                    tipPicker("页眉右", selection: $tipHeaderRight)
-                    tipPicker("页脚左", selection: $tipFooterLeft)
-                    tipPicker("页脚中", selection: $tipFooterMiddle)
-                    tipPicker("页脚右", selection: $tipFooterRight)
-                    Toggle("页眉分隔线", isOn: $showHeaderLine)
-                    Toggle("页脚分隔线", isOn: $showFooterLine)
-                }
-
-                Section("页眉边距") {
-                    valueSlider("左边距", value: $headerPaddingLeft, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("右边距", value: $headerPaddingRight, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("上边距", value: $headerPaddingTop, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("下边距", value: $headerPaddingBottom, range: 0...100, format: { "\(Int($0))" })
-                }
-
-                Section("页脚边距") {
-                    valueSlider("左边距", value: $footerPaddingLeft, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("右边距", value: $footerPaddingRight, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("上边距", value: $footerPaddingTop, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("下边距", value: $footerPaddingBottom, range: 0...100, format: { "\(Int($0))" })
-                }
+                .id(styleSection)
             }
+            .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("阅读样式")
             .navigationBarTitleDisplayMode(.inline)
+            .readingNavigationBarBackground()
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("恢复默认值") { restoreCurrentStyleDefaults() }
+                        .accessibilityHint("恢复当前分类的默认设置")
+                }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { showsStyleControls = false }
+                    Button("完成") {
+                        if isStylePreview { dismiss() }
+                        else { showsStyleControls = false }
+                    }
                 }
             }
         }
@@ -1408,6 +1282,275 @@ struct ReaderView: View {
         .readingPresentationDragIndicator()
     }
 
+    private func restoreCurrentStyleDefaults() {
+        activeSlider = nil
+        switch styleSection {
+        case 0:
+            fontSize = 20
+            letterSpacing = 0.1
+            lineSpacing = 12
+            paragraphSpacing = 2
+            paragraphIndent = "　　"
+            fontWeight = 0
+            fontPath = ""
+            titleMode = 0
+            titleSize = 0
+            titleTopSpacing = 0
+            titleBottomSpacing = 0
+            underlineMode = 0
+            fullJustify = true
+        case 1:
+            paddingLeft = 16
+            paddingRight = 16
+            paddingTop = 6
+            paddingBottom = 6
+            headerPaddingLeft = 16
+            headerPaddingRight = 16
+            headerPaddingTop = 0
+            headerPaddingBottom = 0
+            footerPaddingLeft = 16
+            footerPaddingRight = 16
+            footerPaddingTop = 6
+            footerPaddingBottom = 6
+            headerMode = 0
+            footerMode = 0
+            showHeaderLine = false
+            showFooterLine = true
+            tipHeaderLeft = 2
+            tipHeaderMiddle = 0
+            tipHeaderRight = 3
+            tipFooterLeft = 1
+            tipFooterMiddle = 0
+            tipFooterRight = 6
+        case 2:
+            theme = "wechat"
+            previousDayTheme = "wechat"
+            useBackgroundImage = false
+            backgroundError = nil
+        default:
+            pageAnimation = 0
+            keepScreenOn = false
+            hideHomeIndicator = false
+        }
+    }
+
+    @ViewBuilder private var typographyStyleSections: some View {
+        Section("字号与间距") {
+            valueSlider("字号", value: $fontSize, range: 5...50, format: { "\(Int($0))" })
+            valueSlider("字间距", value: $letterSpacing, range: -0.5...0.5, step: 0.01, format: { String(format: "%.2f", $0) })
+            valueSlider("行间距", value: $lineSpacing, range: 0...50, format: { "\(Int($0))" })
+            valueSlider("段距", value: $paragraphSpacing, range: 0...50, format: { String(format: "%.1f", $0) })
+        }
+        Section {
+            DisclosureGroup("字体与段落") {
+                Picker("字重", selection: $fontWeight) {
+                    Text("正常").tag(0)
+                    Text("粗体").tag(1)
+                    Text("细体").tag(2)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("段落缩进")
+                    TextField("请输入缩进字符", text: $paragraphIndent)
+                        .textInputAutocapitalization(.never)
+                        .accessibilityLabel("段落缩进字符")
+                    Text("控制每段开头的缩进，默认两个全角空格；清空后不缩进。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button(fontPath.isEmpty ? "选择字体文件" : "更换字体文件", systemImage: "textformat") {
+                    showsFontImporter = true
+                }
+                if !fontPath.isEmpty {
+                    HStack {
+                        Text("当前字体")
+                        Spacer()
+                        Text(URL(fileURLWithPath: fontPath).lastPathComponent)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("恢复默认字体", role: .destructive) { fontPath = "" }
+                }
+                if let fontError {
+                    Text(fontError).font(.footnote).foregroundStyle(.red)
+                }
+                Picker("下划线", selection: $underlineMode) {
+                    Text("关闭").tag(0)
+                    Text("实线").tag(1)
+                    Text("虚线").tag(2)
+                }
+                Toggle("两端对齐", isOn: $fullJustify)
+            }
+            DisclosureGroup("章节标题") {
+                Picker("标题模式", selection: $titleMode) {
+                    Text("左对齐").tag(0)
+                    Text("居中").tag(1)
+                    Text("隐藏").tag(2)
+                }
+                .pickerStyle(.segmented)
+                valueSlider("标题字号增量", value: $titleSize, range: -10...30, format: { String(format: "%+.0f", $0) })
+                valueSlider("标题上间距", value: $titleTopSpacing, range: 0...100, format: { "\(Int($0))" })
+                valueSlider("标题下间距", value: $titleBottomSpacing, range: 0...100, format: { "\(Int($0))" })
+            }
+        }
+    }
+
+    @ViewBuilder private var marginStyleSections: some View {
+        Section("正文边距") {
+            valueSlider("左边距", value: $paddingLeft, range: 0...100, marginID: "正文左边距", format: { "\(Int($0))" })
+            valueSlider("右边距", value: $paddingRight, range: 0...100, marginID: "正文右边距", format: { "\(Int($0))" })
+            valueSlider("上边距", value: $paddingTop, range: 0...100, marginID: "正文上边距", format: { "\(Int($0))" })
+            valueSlider("下边距", value: $paddingBottom, range: 0...100, marginID: "正文下边距", format: { "\(Int($0))" })
+        }
+        Section("页眉页脚") {
+            DisclosureGroup("页眉") {
+                Picker("页眉显示", selection: $headerMode) {
+                    Text("状态栏显示时隐藏").tag(0)
+                    Text("显示").tag(1)
+                    Text("隐藏").tag(2)
+                }
+                if headerMode != 2 {
+                    tipPicker("页眉左", selection: $tipHeaderLeft)
+                    tipPicker("页眉中", selection: $tipHeaderMiddle)
+                    tipPicker("页眉右", selection: $tipHeaderRight)
+                    Toggle("页眉分隔线", isOn: $showHeaderLine)
+                    valueSlider("左边距", value: $headerPaddingLeft, range: 0...100, marginID: "页眉左边距", format: { "\(Int($0))" })
+                    valueSlider("右边距", value: $headerPaddingRight, range: 0...100, marginID: "页眉右边距", format: { "\(Int($0))" })
+                    valueSlider("上边距", value: $headerPaddingTop, range: 0...100, marginID: "页眉上边距", format: { "\(Int($0))" })
+                    valueSlider("下边距", value: $headerPaddingBottom, range: 0...100, marginID: "页眉下边距", format: { "\(Int($0))" })
+                }
+            }
+            DisclosureGroup("页脚") {
+                Picker("页脚显示", selection: $footerMode) {
+                    Text("显示").tag(0)
+                    Text("隐藏").tag(1)
+                }
+                if footerMode != 1 {
+                    tipPicker("页脚左", selection: $tipFooterLeft)
+                    tipPicker("页脚中", selection: $tipFooterMiddle)
+                    tipPicker("页脚右", selection: $tipFooterRight)
+                    Toggle("页脚分隔线", isOn: $showFooterLine)
+                    valueSlider("左边距", value: $footerPaddingLeft, range: 0...100, marginID: "页脚左边距", format: { "\(Int($0))" })
+                    valueSlider("右边距", value: $footerPaddingRight, range: 0...100, marginID: "页脚右边距", format: { "\(Int($0))" })
+                    valueSlider("上边距", value: $footerPaddingTop, range: 0...100, marginID: "页脚上边距", format: { "\(Int($0))" })
+                    valueSlider("下边距", value: $footerPaddingBottom, range: 0...100, marginID: "页脚下边距", format: { "\(Int($0))" })
+                }
+            }
+        }
+    }
+
+    private var backgroundStyleSection: some View {
+        Section("阅读背景") {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(ReaderStylePreset.legadoDefaults) { preset in
+                        let isSelected = resolvedStyle.id == preset.id && activeBackgroundImage == nil
+                        Button {
+                            useBackgroundImage = false
+                            theme = preset.id
+                        } label: {
+                            VStack(spacing: 6) {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color(uiColor: preset.background))
+                                    .frame(width: 54, height: 72)
+                                    .overlay {
+                                    Text("文字")
+                                        .font(.caption)
+                                        .foregroundStyle(Color(uiColor: preset.foreground))
+                                }
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .strokeBorder(
+                                            Color(uiColor: preset.foreground).opacity(isSelected ? 0.4 : 0.12),
+                                            lineWidth: isSelected ? 1.25 : 0.75
+                                        )
+                                }
+                                .overlay(alignment: .topTrailing) {
+                                    if isSelected {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 10, weight: .semibold))
+                                            .foregroundStyle(Color(uiColor: preset.foreground))
+                                            .padding(6)
+                                    }
+                                }
+                                Text(preset.name)
+                                    .font(.caption2)
+                                    .foregroundStyle(isSelected ? .primary : .secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(preset.name)
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    }
+                }
+            }
+            Button("选择背景图片", systemImage: "photo") {
+                backgroundError = nil
+                showsBackgroundPicker = true
+            }
+            if backgroundImage != nil {
+                HStack(spacing: 0) {
+                    Text("使用背景图片")
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { useBackgroundImage.toggle() }
+                        .accessibilityHidden(true)
+                    Toggle("使用背景图片", isOn: $useBackgroundImage)
+                        .labelsHidden()
+                        .fixedSize()
+                }
+                Button("删除背景图片", systemImage: "trash", role: .destructive) {
+                    ReaderBackgroundStore.remove()
+                    backgroundImage = nil
+                    useBackgroundImage = false
+                }
+            }
+            if let backgroundError {
+                Text(backgroundError).font(.footnote).foregroundStyle(.red)
+            }
+        }
+    }
+
+    @ViewBuilder private var otherStyleSections: some View {
+        Section("翻页动画") {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(Self.pageAnimationChoices, id: \.0) { choice in
+                        Button {
+                            pageAnimation = choice.value
+                        } label: {
+                            VStack(spacing: 6) {
+                                Image(systemName: choice.icon)
+                                    .font(.headline)
+                                Text(choice.title)
+                                    .font(.caption2)
+                            }
+                            .foregroundStyle(pageAnimation == choice.value ? ReadingTheme.onAccent : Color.primary)
+                            .frame(width: 58, height: 54)
+                            .background(
+                                pageAnimation == choice.value ? ReadingTheme.accentFill : Color.secondary.opacity(0.1),
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            )
+                                .overlay {
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .strokeBorder(pageAnimation == choice.value ? ReadingTheme.selectionBorder : .clear, lineWidth: 1)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(pageAnimation == choice.value ? .isSelected : [])
+                    }
+                }
+            }
+            Text(pageAnimation == 3
+                ? "滚动模式连续滚动；其余模式按整屏翻页。左右滑动或点击左右三分之一区域翻页，点击中间区域打开菜单。"
+                : "当前模式按整屏翻页；左右滑动或点击左右三分之一区域翻页，点击中间区域打开菜单。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        Section("屏幕") {
+            Toggle("阅读时不自动锁屏", isOn: $keepScreenOn)
+            Toggle("阅读时隐藏小横条", isOn: $hideHomeIndicator)
+        }
+    }
+
     private static let pageAnimationChoices: [(value: Int, title: String, icon: String)] = [
         (0, "覆盖", "rectangle.on.rectangle"),
         (1, "滑动", "rectangle.portrait.and.arrow.right"),
@@ -1416,37 +1559,54 @@ struct ReaderView: View {
         (4, "无动画", "rectangle")
     ]
 
-    private func readerChoiceChip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(selected ? ReadingTheme.onAccent : Color.primary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(selected ? ReadingTheme.accentFill : Color.secondary.opacity(0.1), in: Capsule())
-                .overlay {
-                    Capsule().strokeBorder(selected ? ReadingTheme.selectionBorder : .clear, lineWidth: 1)
-                }
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-
     private func valueSlider(
         _ title: String,
         value: Binding<Double>,
         range: ClosedRange<Double>,
         step: Double = 1,
+        marginID: String? = nil,
         format: @escaping (Double) -> String
     ) -> some View {
-        VStack(spacing: 6) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(format(value.wrappedValue)).monospacedDigit().foregroundStyle(.secondary)
+        ReadingPreviewSlider(title: title, id: marginID ?? title, value: value, range: range,
+                             step: step, format: format, activeSlider: $activeSlider)
+    }
+
+    @ViewBuilder private func marginGuides(group: String, top: Double, bottom: Double, left: Double, right: Double) -> some View {
+        if let activeSlider, activeSlider.id.hasPrefix(group) {
+            GeometryReader { geometry in
+                ZStack {
+                    marginBand(isActive: activeSlider.id == "\(group)上边距")
+                        .frame(width: geometry.size.width, height: min(CGFloat(top), geometry.size.height))
+                        .frame(maxHeight: .infinity, alignment: .top)
+                    marginBand(isActive: activeSlider.id == "\(group)下边距")
+                        .frame(width: geometry.size.width, height: min(CGFloat(bottom), geometry.size.height))
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                    marginBand(isActive: activeSlider.id == "\(group)左边距")
+                        .frame(width: min(CGFloat(left), geometry.size.width), height: geometry.size.height)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    marginBand(isActive: activeSlider.id == "\(group)右边距")
+                        .frame(width: min(CGFloat(right), geometry.size.width), height: geometry.size.height)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .overlay(alignment: .top) {
+                    Text("\(activeSlider.id) \(Int(activeSlider.displayValue)) pt")
+                        .font(.caption.weight(.semibold))
+                        .padding(6)
+                        .background(.regularMaterial, in: Capsule())
+                }
             }
-            Slider(value: value, in: range, step: step)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
+    }
+
+    private func marginBand(isActive: Bool) -> some View {
+        // One muted hue for every edge; only the current edge is emphasized.
+        let tint = Color(red: 0.43, green: 0.51, blue: 0.57)
+        return tint.opacity(isActive ? 0.22 : 0.09)
+            .overlay {
+                Rectangle().strokeBorder(tint.opacity(isActive ? 0.6 : 0.24), lineWidth: 1)
+            }
     }
 
     private static let readerTipChoices: [(Int, String)] = [
@@ -1538,6 +1698,10 @@ struct ReaderView: View {
     }
 
     private func handleTapAction(_ action: Int) {
+        if isStylePreview {
+            showsStyleControls = true
+            return
+        }
         switch action {
         case 0: showsReaderMenu.toggle()
         case 3: if model.canGoNext { moveChapter(1) }
@@ -1720,7 +1884,7 @@ struct ReaderView: View {
     private func refreshCurrentChapter() {
         stopSpeechIfNeeded()
         Task {
-            await model.load(rules: replaceRules.rules, forceRefresh: true, prefetchNextChapter: pageAnimation != 3)
+            await model.load(rules: replaceRules.rules, forceRefresh: true)
             readerPosition = min(readerPosition, model.content.utf16.count)
         }
     }
@@ -1728,7 +1892,7 @@ struct ReaderView: View {
     private func refreshEditorFromSource() {
         contentEditError = nil
         Task {
-            await model.load(rules: replaceRules.rules, forceRefresh: true, prefetchNextChapter: pageAnimation != 3)
+            await model.load(rules: replaceRules.rules, forceRefresh: true)
             editedContent = model.content
             if let error = model.diagnostics.first(where: { $0.severity == .error }) {
                 contentEditError = error.message
@@ -1752,88 +1916,128 @@ struct ReaderView: View {
 
     private var tableOfContents: some View {
         ReadingNavigationStack {
-            List {
-                Section {
-                    ForEach(tocChapters) { chapter in
-                        if chapter.isVolume {
-                            HStack(spacing: 10) {
-                                Image(systemName: "books.vertical.fill")
-                                Text(chapter.title).font(.headline)
-                                Spacer()
-                            }
-                            .foregroundStyle(ReadingTheme.accent)
-                            .padding(.vertical, 4)
-                            .listRowBackground(ReadingTheme.accent.opacity(0.07))
-                        } else {
-                            let isCurrent = chapter.id == model.currentChapter?.id
-                            Button {
-                                guard let index = model.chapters.firstIndex(where: { $0.id == chapter.id }) else { return }
-                                stopSpeechIfNeeded()
-                                saveProgress(immediate: true)
-                                readerJumpPosition = nil
-                                model.select(index: index)
-                                readerPosition = 0
-                                showsTableOfContents = false
-                            } label: {
-                                HStack(spacing: 12) {
-                                    Text(tocChapterNumber(chapter))
-                                        .font(.caption.monospacedDigit())
-                                        .foregroundStyle(isCurrent ? ReadingTheme.accent : .secondary)
-                                        .frame(width: 30, alignment: .trailing)
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(chapter.title)
-                                            .foregroundStyle(.primary)
-                                            .lineLimit(2)
-                                        if isCurrent {
-                                            HStack(spacing: 6) {
-                                                Text("正在阅读")
-                                                ProgressView(value: chapterProgress)
-                                                    .tint(ReadingTheme.accent)
+            ScrollViewReader { proxy in
+                List {
+                    Section {
+                        ForEach(tocChapters) { chapter in
+                            Group {
+                                if chapter.isVolume {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "books.vertical.fill")
+                                        Text(chapter.title).font(.headline)
+                                        Spacer()
+                                    }
+                                    .foregroundStyle(ReadingTheme.accent)
+                                    .padding(.vertical, 4)
+                                    .listRowBackground(ReadingTheme.accent.opacity(0.07))
+                                } else {
+                                    let isCurrent = chapter.id == model.currentChapter?.id
+                                    Button {
+                                        guard let index = model.chapters.firstIndex(where: { $0.id == chapter.id }) else { return }
+                                        stopSpeechIfNeeded()
+                                        saveProgress(immediate: true)
+                                        readerJumpPosition = nil
+                                        model.select(index: index)
+                                        readerPosition = 0
+                                        showsTableOfContents = false
+                                    } label: {
+                                        HStack(spacing: 12) {
+                                            Text(tocChapterNumber(chapter))
+                                                .font(.caption.monospacedDigit())
+                                                .foregroundStyle(isCurrent ? ReadingTheme.accent : .secondary)
+                                                .frame(width: 30, alignment: .trailing)
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text(chapter.title)
+                                                    .foregroundStyle(.primary)
+                                                    .lineLimit(2)
+                                                if isCurrent {
+                                                    HStack(spacing: 6) {
+                                                        Text("正在阅读")
+                                                        ProgressView(value: chapterProgress)
+                                                            .tint(ReadingTheme.accent)
+                                                    }
+                                                    .font(.caption2)
+                                                    .foregroundStyle(ReadingTheme.accent)
+                                                }
                                             }
-                                            .font(.caption2)
-                                            .foregroundStyle(ReadingTheme.accent)
+                                            Spacer(minLength: 8)
+                                            if isCurrent {
+                                                Image(systemName: "checkmark.circle.fill")
+                                                    .foregroundStyle(ReadingTheme.accent)
+                                            }
                                         }
+                                        .padding(.vertical, 4)
                                     }
-                                    Spacer(minLength: 8)
-                                    if isCurrent {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(ReadingTheme.accent)
-                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier(isCurrent ? "reader.toc.current" : "reader.toc.chapter.\(chapter.index)")
+                                    .listRowBackground(isCurrent ? ReadingTheme.accent.opacity(0.08) : Color.clear)
                                 }
-                                .padding(.vertical, 4)
                             }
-                            .buttonStyle(.plain)
-                            .listRowBackground(isCurrent ? ReadingTheme.accent.opacity(0.08) : Color.clear)
+                            .id(chapter.id)
                         }
-                    }
-                } header: {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(book.name).font(.headline).lineLimit(1)
-                            Spacer()
-                            Text("\(tocReadableChapterCount) 章")
-                                .font(.caption.monospacedDigit())
+                    } header: {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(book.name).font(.headline).lineLimit(1)
+                                Spacer()
+                                Text("\(tocReadableChapterCount) 章")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            ProgressView(value: chapterProgress)
+                                .tint(ReadingTheme.accent)
+                            Text("第 \(max(model.currentIndex + 1, 1)) 章 · \(Int(chapterProgress * 100))%")
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        ProgressView(value: chapterProgress)
-                            .tint(ReadingTheme.accent)
-                        Text("第 \(max(model.currentIndex + 1, 1)) 章 · \(Int(chapterProgress * 100))%")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        .textCase(nil)
+                        .padding(.vertical, 4)
                     }
-                    .textCase(nil)
-                    .padding(.vertical, 4)
                 }
-            }
-            .listStyle(.insetGrouped)
-            .navigationTitle("目录")
-            .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $tocSearch, prompt: "搜索章节")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { showsTableOfContents = false } }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(tocDescending ? "正序" : "倒序", systemImage: "arrow.up.arrow.down") {
-                        tocDescending.toggle()
+                .listStyle(.insetGrouped)
+                .navigationTitle("目录")
+                .navigationBarTitleDisplayMode(.inline)
+                .safeAreaInset(edge: .bottom) {
+                    if !tocSearch.isEmpty {
+                        ReadingSearchExitButton {
+                            tocSearch = ""
+                            if let chapter = model.currentChapter {
+                                withAnimation { proxy.scrollTo(chapter.id, anchor: .center) }
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .padding(8)
+                        .frame(maxWidth: .infinity)
+                        .background(.bar)
+                    }
+                }
+                .searchable(text: $tocSearch, prompt: "搜索章节")
+                .task(id: "\(model.currentChapter?.id ?? "")|\(tocDescending)|\(tocSearch.isEmpty)|\(model.chapters.count)") {
+                    // Filtering and keyboard changes rebuild the list before
+                    // ScrollViewReader can resolve the current chapter's ID.
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    guard !Task.isCancelled, let chapter = model.currentChapter,
+                        tocChapters.contains(where: { $0.id == chapter.id }) else { return }
+                    proxy.scrollTo(chapter.id, anchor: .center)
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    guard !Task.isCancelled else { return }
+                    proxy.scrollTo(chapter.id, anchor: .center)
+                }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("关闭") { showsTableOfContents = false } }
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        Button("当前章节", systemImage: "location") {
+                            tocSearch = ""
+                            if let chapter = model.currentChapter {
+                                withAnimation { proxy.scrollTo(chapter.id, anchor: .center) }
+                            }
+                        }
+                        .labelStyle(.iconOnly)
+                        .accessibilityLabel("定位当前章节")
+                        .disabled(model.currentChapter == nil)
+                        Button(tocDescending ? "正序" : "倒序", systemImage: "arrow.up.arrow.down") {
+                            tocDescending.toggle()
+                        }
                     }
                 }
             }
@@ -1973,6 +2177,7 @@ struct ReaderView: View {
 
 
     private func saveProgress(immediate: Bool = false) {
+        guard !isStylePreview else { return }
         guard let chapter = model.currentChapter else { return }
         let position = readerPosition
         let currentBook = book

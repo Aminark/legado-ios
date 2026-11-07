@@ -321,7 +321,7 @@ extension View {
             scrollContentBackground(.hidden)
         } else {
             background(ReadingUIKitConfiguration { controller in
-                func clearTables(in view: UIView) {
+                @MainActor func clearTables(in view: UIView) {
                     if let table = view as? UITableView { table.backgroundColor = .clear }
                     for child in view.subviews { clearTables(in: child) }
                 }

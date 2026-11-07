@@ -199,6 +199,18 @@ public struct CoordinatedChapterContent: Sendable {
 public actor ChapterContentCoordinator {
     private let loader: any ChapterContentLoading
     private let cache: ChapterContentCache
+    private struct RequestKey: Hashable {
+        let bookURL: String
+        let chapterURL: String
+        let sourceID: String
+        let nextChapterURL: String?
+        let maxPages: Int
+    }
+    private struct Request {
+        let id: UUID
+        let task: Task<CoordinatedChapterContent, Never>
+    }
+    private var inFlight: [RequestKey: Request] = [:]
 
     public init(loader: any ChapterContentLoading = NetworkBookService(), cache: ChapterContentCache = .live()) {
         self.loader = loader
@@ -221,15 +233,31 @@ public actor ChapterContentCoordinator {
                 supplementalContent: cached.supplementalContent
             ), loadedFromCache: true)
         }
-        let report = await loader.loadContent(
-            book: book,
-            chapter: chapter,
-            source: source,
-            nextChapterURL: nextChapterURL,
-            maxPages: maxPages
-        )
-        await saveContent(report, book: book, chapter: chapter, source: source)
-        return .init(report: report, loadedFromCache: false)
+        guard !Task.isCancelled else {
+            return .init(report: .init(diagnostics: [
+                .init(severity: .error, code: "content.cancelled", message: "章节加载已取消", rule: chapter.url)
+            ]), loadedFromCache: false)
+        }
+        let key = RequestKey(bookURL: book.bookUrl, chapterURL: chapter.url, sourceID: source.id,
+                             nextChapterURL: nextChapterURL, maxPages: maxPages)
+        if forceRefresh {
+            inFlight.removeValue(forKey: key)?.task.cancel()
+        } else if let request = inFlight[key] {
+            return await request.task.value
+        }
+        let id = UUID()
+        // Keep the shared fetch alive if a rolling preload window is cancelled:
+        // a foreground chapter load may already be waiting for this same fetch.
+        let task = Task { [loader] in
+            let report = await loader.loadContent(book: book, chapter: chapter, source: source,
+                                                  nextChapterURL: nextChapterURL, maxPages: maxPages)
+            await self.saveContent(report, book: book, chapter: chapter, source: source)
+            return CoordinatedChapterContent(report: report, loadedFromCache: false)
+        }
+        inFlight[key] = Request(id: id, task: task)
+        let result = await task.value
+        if inFlight[key]?.id == id { inFlight[key] = nil }
+        return result
     }
 
     public func saveContent(_ report: ChapterContentReport, book: Book, chapter: BookChapter, source: BookSource) async {
@@ -265,6 +293,7 @@ public actor ChapterContentCoordinator {
         source: BookSource,
         nextChapterURL: String? = nil
     ) async -> Bool {
+        guard !Task.isCancelled else { return false }
         if let cached = try? await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url),
            cached.sourceID == nil || cached.sourceID == source.id { return false }
         let result = await load(book: book, chapter: chapter, source: source, nextChapterURL: nextChapterURL)
@@ -273,6 +302,9 @@ public actor ChapterContentCoordinator {
     }
 
     public func invalidate(bookURL: String) async {
+        for key in inFlight.keys.filter({ $0.bookURL == bookURL }) {
+            inFlight.removeValue(forKey: key)?.task.cancel()
+        }
         try? await cache.remove(bookURL: bookURL)
     }
 }
