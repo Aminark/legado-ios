@@ -3,6 +3,39 @@ import UIKit
 
 @MainActor
 final class ReaderScrollGestureTests: XCTestCase {
+    func testComicImagesLoadInOrderAndFailedImageCanRetry() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiComicRegression", "-pageAnim", "3", "-themeMode", "1"]
+        app.launchEnvironment["COMIC_TEST_BASE_URL"] = "http://127.0.0.1:18089"
+        app.launch()
+        let reader = app.tables["reader.comic"]
+        XCTAssertTrue(reader.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.images["reader.comic.image.1"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.textViews["reader.text"].exists)
+        attachScreenshot(app)
+        reader.swipeUp()
+        let retry = app.buttons["reader.comic.retry.2"]
+        for _ in 0..<4 where !retry.isHittable { reader.swipeUp() }
+        XCTAssertTrue(retry.waitForExistence(timeout: 10))
+        XCTAssertTrue(retry.isHittable)
+        retry.tap()
+        XCTAssertTrue(app.images["reader.comic.image.2"].waitForExistence(timeout: 15))
+        attachScreenshot(app)
+        XCTAssertFalse(retry.exists)
+        reader.swipeUp()
+        XCTAssertTrue(app.images["reader.comic.image.3"].waitForExistence(timeout: 15))
+        let third = app.images["reader.comic.image.3"]
+        XCTAssertGreaterThan(third.frame.height, third.frame.width * 2)
+        attachScreenshot(app)
+        app.buttons["下一章"].tap()
+        XCTAssertTrue(app.images["reader.comic.image.1"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["上一章"].isEnabled)
+        app.buttons["上一章"].tap()
+        XCTAssertTrue(app.images["reader.comic.image.1"].waitForExistence(timeout: 15))
+        app.terminate()
+    }
+
     func testBackgroundSwitchRestoresPresetWithoutDeletingPhoto() throws {
         try exerciseBackgroundSwitch(readingMode: "0")
     }

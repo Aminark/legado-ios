@@ -435,3 +435,57 @@ final class ReaderScrollGeometryTests: XCTestCase {
               onPageChanged: {}, onTapAction: { _ in })
     }
 }
+
+@MainActor
+final class ReaderComicGeometryTests: XCTestCase {
+    func testRestoresImageOffsetAndKeepsAspectRatioAfterWidthChange() async throws {
+        let data = UIGraphicsImageRenderer(size: CGSize(width: 120, height: 240)).image { context in
+            UIColor.systemBlue.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 120, height: 240))
+        }.pngData()!
+        let address = "data:image/png;base64," + data.base64EncodedString()
+        let content = Array(repeating: "<img src=\"\(address)\">", count: 4).joined(separator: "\n")
+        let blocks = ChapterImageParser().blocks(in: content, baseURL: nil)
+        let requested = blocks[1].range.location + blocks[1].range.length / 2
+        var lastPosition = 0
+        var lastPage = 0
+        let book = Book(bookUrl: "comic", name: "漫画", origin: "https://comic.invalid")
+        let chapter = BookChapter(url: "https://comic.invalid/chapter", title: "第一话", bookUrl: book.bookUrl, index: 0)
+        let reader = ReaderComicView(blocks: blocks,
+            source: BookSource(bookSourceUrl: book.origin, bookSourceName: "测试源"), book: book, chapter: chapter,
+            background: .white, foreground: .black, fontSize: 20, requestedPosition: requested, jumpPosition: nil,
+            onPosition: { position, page, count in lastPosition = position; lastPage = page; XCTAssertEqual(count, 4) }, onTap: {})
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 700))
+        let host = UIHostingController(rootView: reader)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        host.view.frame = window.bounds
+        host.view.layoutIfNeeded()
+        func table(in view: UIView) -> UITableView? {
+            if let table = view as? UITableView { return table }
+            return view.subviews.compactMap { table(in: $0) }.first
+        }
+        let view = try XCTUnwrap(table(in: host.view))
+        for _ in 0..<60 {
+            if abs(view.rectForRow(at: IndexPath(row: 1, section: 0)).height - view.bounds.width * 2) < 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(view.rectForRow(at: IndexPath(row: 1, section: 0)).height, view.bounds.width * 2, accuracy: 1)
+        XCTAssertEqual(lastPage, 2)
+        XCTAssertEqual(lastPosition, requested, accuracy: 2)
+        host.view.frame.size.width = 600
+        host.view.layoutIfNeeded()
+        for _ in 0..<30 {
+            if abs(view.rectForRow(at: IndexPath(row: 1, section: 0)).height - view.bounds.width * 2) < 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(view.rectForRow(at: IndexPath(row: 1, section: 0)).height, view.bounds.width * 2, accuracy: 1)
+        XCTAssertEqual(lastPosition, requested, accuracy: 2)
+        view.delegate?.scrollViewWillBeginDragging?(view)
+        view.setContentOffset(CGPoint(x: 0, y: view.rectForRow(at: IndexPath(row: 2, section: 0)).minY + 40), animated: false)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(lastPage, 3)
+        XCTAssertGreaterThan(lastPosition, blocks[2].range.location)
+    }
+}

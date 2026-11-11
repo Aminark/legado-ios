@@ -134,6 +134,8 @@
         ED1000000000000000000001 /* EPUBReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000001; };
         ED1000000000000000000002 /* Readium-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000002; };
         ED1000000000000000000003 /* EPUBReaderIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED2000000000000000000003; };
+		C01800000000000000000001 /* ChapterImages.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01700000000000000000001; };
+		C01800000000000000000002 /* ReaderComicView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01700000000000000000002; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -263,6 +265,8 @@
         ED2000000000000000000001 /* EPUBReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EPUBReaderView.swift; sourceTree = "<group>"; };
         ED2000000000000000000002 /* Readium-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Readium-LICENSE.txt"; sourceTree = "<group>"; };
         ED2000000000000000000003 /* EPUBReaderIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/LegadoReaderTests/EPUBReaderIntegrationTests.swift; sourceTree = SOURCE_ROOT; };
+		C01700000000000000000001 /* ChapterImages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LegadoCore/Book/ChapterImages.swift; sourceTree = SOURCE_ROOT; };
+		C01700000000000000000002 /* ReaderComicView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/Features/Reader/ReaderComicView.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -377,6 +381,7 @@
 				A20000000000000000000028 /* ReaderAppearance.swift */,
 				A2000000000000000000002B /* ReaderSupport.swift */,
 				EB2000000000000000000003 /* EPUBIllustrationsView.swift */,
+				C01700000000000000000002 /* ReaderComicView.swift */,
 			);
 			path = Features/Reader;
 			sourceTree = "<group>";
@@ -520,6 +525,7 @@
 			children = (
 				C20000000000000000000012 /* NetworkBookService.swift */,
 				C20000000000000000000019 /* ContentSanitizer.swift */,
+				C01700000000000000000001 /* ChapterImages.swift */,
 				C2000000000000000000001C /* ChapterContentCache.swift */,
 				C2000000000000000000001E /* BookUpdateCoordinator.swift */,
 				C2000000000000000000001F /* BookSourceSwitchService.swift */,
@@ -753,6 +759,8 @@
 				A10000000000000000000021 /* ReaderAppearance.swift in Sources */,
 				A10000000000000000000022 /* ReaderSpeechController.swift in Sources */,
 				A10000000000000000000023 /* ReaderTextView.swift in Sources */,
+				C01800000000000000000002 /* ReaderComicView.swift in Sources */,
+				C01800000000000000000001 /* ChapterImages.swift in Sources */,
 				B10000000000000000000029 /* ReaderScrollView.swift in Sources */,
 				A10000000000000000000024 /* ReaderSupport.swift in Sources */,
 				A10000000000000000000025 /* ReaderViewModel.swift in Sources */,

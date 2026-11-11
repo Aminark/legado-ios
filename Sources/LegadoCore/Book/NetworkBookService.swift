@@ -327,7 +327,9 @@ public struct NetworkBookService: Sendable {
                 execution.variables = content.variables
                 contentVariables = execution.variables
                 var pageContent = content.strings.filter { !$0.isEmpty }.joined(separator: "\n")
-                if source.bookSourceType == 0 {
+                pageContent = ChapterImageParser().normalize(pageContent, baseURL: response.finalURL,
+                    allowBareURLs: source.bookSourceType == 2 || rules.imageStyle?.uppercased() == "FULL")
+                if source.bookSourceType == 0 || source.bookSourceType == 2 {
                     pageContent = ChapterHTMLFormatter().format(pageContent, baseURL: response.finalURL)
                 }
                 if !pageContent.isEmpty { contents.append(pageContent) }

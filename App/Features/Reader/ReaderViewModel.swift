@@ -27,7 +27,25 @@ enum ReaderPositionResolver {
 final class ReaderViewModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var title: String
-    @Published private(set) var content = ""
+    @Published private(set) var content = "" {
+        didSet { updateImageBlocks() }
+    }
+    @Published private(set) var imageBlocks: [ChapterContentBlock] = []
+    var hasImageContent: Bool { imageBlocks.contains { if case .image = $0.content { return true }; return false } }
+    var imageSource: BookSource { source ?? BookSource(bookSourceUrl: book.origin, bookSourceName: book.originName) }
+
+    private func updateImageBlocks() {
+        let allowBareURLs = source?.bookSourceType == 2 || source?.ruleContent?.imageStyle?.uppercased() == "FULL"
+        guard allowBareURLs || content.range(of: "<img", options: .caseInsensitive) != nil
+                || content.range(of: "<mip-img", options: .caseInsensitive) != nil
+                || content.contains("://") else {
+            imageBlocks = []
+            return
+        }
+        imageBlocks = ChapterImageParser().blocks(in: content,
+            baseURL: currentChapter.flatMap { URL(string: $0.baseUrl.isEmpty ? $0.url : $0.baseUrl) },
+            allowBareURLs: allowBareURLs)
+    }
     @Published private(set) var diagnostics: [RuleDiagnostic] = []
     @Published private(set) var currentIndex: Int
     @Published private(set) var chapterLoadGeneration = 0
@@ -72,7 +90,7 @@ final class ReaderViewModel: ObservableObject {
     }
 
     func prepareContinuousReading(rules: [ReplaceRule]) async {
-        guard hasLoadedCurrentChapter else { return }
+        guard hasLoadedCurrentChapter, !hasImageContent else { return }
         if scrollChapters.isEmpty {
             scrollChapters = [scrollChapterForCurrentContent()]
         }

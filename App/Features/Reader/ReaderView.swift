@@ -168,6 +168,23 @@ struct ReaderView: View {
         _pageAnimation = State(initialValue: book.readConfig?.pageAnim.flatMap { $0 >= 0 ? $0 : nil }
             ?? Self.globalPageAnimation())
         #if DEBUG
+        if arguments.contains("-uiComicRegression") {
+            let base = ProcessInfo.processInfo.environment["COMIC_TEST_BASE_URL"] ?? "http://127.0.0.1:18089"
+            var source = BookSource(bookSourceUrl: base, bookSourceName: "漫画回归测试")
+            source.bookSourceType = 2
+            source.header = "{\"X-Comic-Test\":\"fixture\"}"
+            var rules = ContentRule()
+            rules.content = ".page@html"
+            rules.imageStyle = "FULL"
+            source.ruleContent = rules
+            let session = UUID().uuidString
+            let chapters = (0..<3).map {
+                BookChapter(url: "\(base)/chapter/\($0)?session=\(session)", title: "第\($0 + 1)话 · 漫画测试", bookUrl: book.bookUrl, index: $0)
+            }
+            _model = StateObject(wrappedValue: ReaderViewModel(book: book, chapters: chapters,
+                initialIndex: 0, source: source, cache: ChapterContentCache(directory: FileManager.default.temporaryDirectory.appendingPathComponent(session))))
+            return
+        }
         if arguments.contains("-uiReaderFailure") {
             _model = StateObject(wrappedValue: ReaderViewModel(
                 book: book, chapters: readerChapters, initialIndex: readerInitialIndex,
@@ -520,7 +537,31 @@ struct ReaderView: View {
     }
 
     @ViewBuilder private var readerSurface: some View {
-        if pageAnimation == 3 {
+        if model.hasImageContent, let chapter = model.currentChapter {
+            VStack(spacing: 0) {
+                ReaderComicView(blocks: model.imageBlocks, source: model.imageSource, book: model.book, chapter: chapter,
+                    background: activeBackgroundImage == nil ? resolvedStyle.background : .clear,
+                    foreground: resolvedStyle.foreground, fontSize: CGFloat(fontSize),
+                    requestedPosition: model.requestedPosition, jumpPosition: readerJumpPosition,
+                    onPosition: { position, page, count in
+                        readerPosition = position
+                        currentPage = page
+                        totalPages = count
+                        readerPageRanges = model.imageBlocks.compactMap { block in
+                            if case .image = block.content { return block.range }; return nil
+                        }
+                    }, onTap: { showsReaderMenu.toggle() })
+                HStack {
+                    Button("上一章") { moveChapter(-1) }.disabled(!model.canGoPrevious)
+                    Spacer()
+                    Text("\(currentPage) / \(totalPages)").font(.caption.monospacedDigit())
+                    Spacer()
+                    Button("下一章") { moveChapter(1) }.disabled(!model.canGoNext)
+                }
+                .padding(.horizontal, 20).padding(.vertical, 10)
+                .foregroundStyle(foregroundColor)
+            }
+        } else if pageAnimation == 3 {
             ReaderScrollView(
                 configuration: readerTextConfiguration,
                 chapters: model.scrollChapters,
@@ -869,6 +910,7 @@ struct ReaderView: View {
                     showsAutoReadControls = true
                 }
             }
+            .disabled(model.hasImageContent)
             Divider()
             Button(resolvedStyle.id == "night" ? "切换为日间" : "切换为夜间", systemImage: resolvedStyle.id == "night" ? "sun.max" : "moon") {
                 toggleNightTheme()
@@ -899,6 +941,7 @@ struct ReaderView: View {
                     .accessibilityValue(book.originName)
                 }
                 readerChromeAction(speech.isSpeaking ? "stop" : "headphones", speech.isSpeaking ? "停止" : "朗读", isActive: speech.isSpeaking) { toggleSpeech() }
+                    .disabled(model.hasImageContent)
                 readerChromeAction("textformat.size", "外观") {
                     showsReaderMenu = false
                     showsStyleControls = true
@@ -2015,6 +2058,7 @@ struct ReaderView: View {
     }
 
     private func startConfiguredSpeech() {
+        guard !model.hasImageContent else { return }
         if readAloudByPage {
             guard !readerPageRanges.isEmpty else {
                 guard !model.content.isEmpty else { return }

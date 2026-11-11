@@ -45,24 +45,59 @@ public struct MetadataTextSanitizer: Sendable {
     }
 }
 
+/// A '>' inside a quoted attribute is data, not the end of the image tag.
+/// Keep the original ranges so text processing never rewrites image URLs.
+enum ChapterImageMarkup {
+    private static let startExpression = try? NSRegularExpression(pattern: #"(?i)<(?:img|mip-img)(?=[\s/>])"#)
+
+    static func ranges(in content: String) -> [Range<String.Index>] {
+        let starts = startExpression?.matches(in: content, range: NSRange(content.startIndex..., in: content)) ?? []
+        var ranges: [Range<String.Index>] = []
+        for match in starts {
+            guard let opening = Range(match.range, in: content),
+                  ranges.last.map({ $0.upperBound <= opening.lowerBound }) ?? true else { continue }
+            var index = opening.upperBound
+            var quote: Character?
+            var jsonDepth = 0
+            var jsonString = false
+            var escaped = false
+            while index < content.endIndex {
+                let char = content[index]
+                if jsonDepth > 0 {
+                    if escaped { escaped = false }
+                    else if jsonString && char == "\\" { escaped = true }
+                    else if char == "\"" { jsonString.toggle() }
+                    else if !jsonString && char == "{" { jsonDepth += 1 }
+                    else if !jsonString && char == "}" { jsonDepth -= 1 }
+                } else if char == "{", quote != nil,
+                          content[opening.upperBound..<index].last(where: { !$0.isWhitespace }) == "," {
+                    // Older sources concatenate JSON directly inside a quoted
+                    // src. Treat its quotes and > characters as JSON data.
+                    jsonDepth = 1
+                } else if let current = quote {
+                    if char == current { quote = nil }
+                } else if char == "\"" || char == "'" { quote = char }
+                else if char == ">" {
+                    ranges.append(opening.lowerBound..<content.index(after: index))
+                    break
+                }
+                index = content.index(after: index)
+            }
+        }
+        return ranges
+    }
+}
+
 struct ChapterHTMLFormatter {
     func format(_ html: String, baseURL: URL) -> String {
-        guard let expression = try? NSRegularExpression(pattern: #"(?i)<img\b[^>]*>"#) else {
-            return MetadataTextSanitizer().clean(html) ?? ""
-        }
         var protected = html
         var images: [String: String] = [:]
         let token = UUID().uuidString
-        for (index, match) in expression.matches(in: html, range: NSRange(html.startIndex..., in: html)).enumerated().reversed() {
-            guard let range = Range(match.range, in: html),
-                  let element = try? SwiftSoup.parseBodyFragment(String(html[range])).select("img").first() else { continue }
-            let src = ["data-src", "data-original", "data-srcset", "src"]
-                .compactMap { try? element.attr($0) }.first { !$0.isEmpty } ?? ""
+        for (index, range) in ChapterImageMarkup.ranges(in: html).enumerated().reversed() {
+            let src = ChapterImageParser().imageSource(in: String(html[range])) ?? ""
             let marker = "LEGADO_IMAGE_\(token)_\(index)"
             let url = LegadoURLBuilder.resolve(src, against: baseURL)
-                .replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "\"", with: "&quot;")
-            images[marker] = src.isEmpty ? "" : "<img src=\"\(url)\">"
+            images[marker] = src.isEmpty ? "" : ChapterImageParser.markup(for: url)
             protected.replaceSubrange(range, with: "\n\(marker)\n")
         }
         var result = MetadataTextSanitizer().clean(protected) ?? ""
