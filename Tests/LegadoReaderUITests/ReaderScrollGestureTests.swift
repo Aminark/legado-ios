@@ -223,9 +223,17 @@ final class ReaderScrollGestureTests: XCTestCase {
     }
 
     func testPagedReadingReportsPageCountAndTurnsWithinTheSameChapter() throws {
+        try exercisePagedReading(mode: "4", fontSize: "28")
+    }
+
+    func testLargeFontPagedReadingKeepsWholeLinesWhenTurningPages() throws {
+        try exercisePagedReading(mode: "0", fontSize: "40")
+    }
+
+    private func exercisePagedReading(mode: String, fontSize: String) throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiScrollRegression", "-uiPagingDiagnostics", "-pageAnim", "4", "-themeMode", "1", "-tipFooterRight", "6", "-textSize", "28"]
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiScrollRegression", "-uiPagingDiagnostics", "-pageAnim", mode, "-themeMode", "1", "-tipFooterRight", "6", "-textSize", fontSize]
         app.launch()
         let body = app.textViews["reader.text"]
         XCTAssertTrue(body.waitForExistence(timeout: 20))
@@ -237,10 +245,16 @@ final class ReaderScrollGestureTests: XCTestCase {
         }, evaluatedWith: nil)
         wait(for: [ready], timeout: 10)
         let chapter = body.value as? String
+        let viewport = body.frame
+        attachScreenshot(app)
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)).tap()
         let next = expectation(for: NSPredicate { _, _ in page.label.hasPrefix("2/") }, evaluatedWith: nil)
         wait(for: [next], timeout: 5)
+        print("[PagedReader second] \(body.label) frame=\(body.frame)")
+        XCTAssertEqual(body.frame.minY, viewport.minY, accuracy: 0.5)
+        XCTAssertEqual(body.frame.height, viewport.height, accuracy: 0.5)
         XCTAssertEqual(body.value as? String, chapter)
+        attachScreenshot(app)
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).tap()
         let previous = expectation(for: NSPredicate { _, _ in page.label.hasPrefix("1/") }, evaluatedWith: nil)
         wait(for: [previous], timeout: 5)

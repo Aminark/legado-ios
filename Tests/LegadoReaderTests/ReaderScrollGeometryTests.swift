@@ -4,6 +4,104 @@ import UIKit
 import XCTest
 @testable import Legado
 
+@MainActor
+final class ReaderPagingGeometryTests: XCTestCase {
+    func testPagesContainWholeLinesAndCoverTheDocumentWithoutGaps() throws {
+        for size in [CGSize(width: 430, height: 750), CGSize(width: 844, height: 280)] {
+            for fontSize in [28.0, 40.0] {
+                let view = UITextView(frame: CGRect(origin: .zero, size: size))
+                view.textContainerInset = UIEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.lineSpacing = 8
+                paragraph.paragraphSpacing = 12
+                let text = String(repeating: "完整的文字行不能被页脚遮挡，翻页后也不能只剩半行。English words 与表情🙂。\n", count: 40)
+                view.attributedText = NSAttributedString(string: text, attributes: [
+                    .font: UIFont.systemFont(ofSize: fontSize), .paragraphStyle: paragraph
+                ])
+                view.layoutIfNeeded()
+                let height = size.height - 32
+                let pages = ReaderTextPage.layout(in: view, height: height)
+                XCTAssertGreaterThan(pages.count, 1)
+                var end = 0
+                for page in pages {
+                    XCTAssertEqual(page.characterRange.location, end)
+                    XCTAssertLessThanOrEqual(page.height, height + 0.01)
+                    let glyphs = view.layoutManager.glyphRange(forCharacterRange: page.characterRange, actualCharacterRange: nil)
+                    view.layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, lineGlyphs, _ in
+                        XCTAssertGreaterThanOrEqual(rect.minY, page.offset - 0.01)
+                        XCTAssertLessThanOrEqual(rect.maxY, page.offset + page.height + 0.01)
+                        XCTAssertEqual(NSIntersectionRange(glyphs, lineGlyphs), lineGlyphs)
+                    }
+                    end = NSMaxRange(page.characterRange)
+                }
+                XCTAssertEqual(end, text.utf16.count)
+            }
+        }
+    }
+
+    func testTurningPagesKeepsMarginsAndReadingRangesInSync() async throws {
+        let text = String(repeating: "完整的文字行不能被页脚遮挡，翻页后也不能只剩半行。English words 与表情🙂。\n", count: 35)
+        var ranges: [NSRange] = []
+        var currentPage = 1
+        var totalPages = 1
+        let reader = ReaderTextView(
+            text: text, title: "第一章 分页边界", previousTitle: nil, previousText: "", isPreviousReady: false,
+            continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
+            fontSize: 32, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
+            paragraphIndent: "　　", paddingLeft: 18, paddingRight: 18, paddingTop: 16, paddingBottom: 16,
+            headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
+            titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
+            fullJustify: true, pageAnimation: 4, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
+            backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
+            renderRevision: 0, readerPosition: .constant(0), pageRanges: Binding(get: { ranges }, set: { ranges = $0 }),
+            currentPage: Binding(get: { currentPage }, set: { currentPage = $0 }),
+            totalPages: Binding(get: { totalPages }, set: { totalPages = $0 }), isAutoReading: false,
+            isAutoReadPaused: false, isLoadingNextChapter: false, secondsPerScreen: 10,
+            onReachedEnd: { _ in }, onReachedStart: { _ in }, onEnteredPrevious: { _ in },
+            onEnteredContinuation: { _ in }, onDeferredRender: {}, onCancelNextLoading: {},
+            onPageChanged: {}, onTapAction: { _ in })
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 850))
+        let host = UIHostingController(rootView: reader)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.layoutIfNeeded()
+        defer { window.isHidden = true }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        func findTextView(_ view: UIView) -> UITextView? {
+            (view as? UITextView) ?? view.subviews.lazy.compactMap(findTextView).first
+        }
+        let view = try XCTUnwrap(findTextView(host.view))
+        let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+        defer { coordinator.invalidate() }
+        let pages = ReaderTextPage.layout(in: view, height: view.bounds.height - 32)
+        XCTAssertGreaterThan(pages.count, 2)
+        XCTAssertEqual(totalPages, pages.count)
+        XCTAssertEqual(ranges.first?.location, 0)
+        XCTAssertEqual(ranges.last.map(NSMaxRange), text.utf16.count)
+        for index in pages.indices {
+            coordinator.updateInteractionMode(on: view, isScrollMode: false)
+            coordinator.updateLoadingFooter(in: view, visible: false)
+            coordinator.reportPage(in: view)
+            XCTAssertFalse(view.isPagingEnabled)
+            XCTAssertLessThanOrEqual(pages.last!.offset, view.contentSize.height - view.bounds.height + view.contentInset.bottom + 0.5)
+            XCTAssertEqual(view.contentOffset.y, pages[index].offset, accuracy: 0.5)
+            XCTAssertEqual(currentPage, index + 1)
+            let mask = try XCTUnwrap((view.layer.mask as? CAShapeLayer)?.path?.boundingBoxOfPath)
+            XCTAssertEqual(mask.minY - view.contentOffset.y, 16, accuracy: 0.5)
+            XCTAssertLessThanOrEqual(mask.maxY - view.contentOffset.y, view.bounds.height - 16 + 0.5)
+            if index + 1 < pages.count {
+                XCTAssertEqual(NSMaxRange(ranges[index]), ranges[index + 1].location)
+                coordinator.turnPage(1)
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+        coordinator.turnPage(-1)
+        try await Task.sleep(nanoseconds: 10_000_000)
+        XCTAssertEqual(currentPage, pages.count - 1)
+        XCTAssertEqual(view.contentOffset.y, pages[pages.count - 2].offset, accuracy: 0.5)
+    }
+}
+
 private final class BackgroundPhotoProvider: NSItemProvider, @unchecked Sendable {
     let photoData: Data?
     let photoError: (any Error)?
