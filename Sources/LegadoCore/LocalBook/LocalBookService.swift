@@ -179,7 +179,7 @@ public struct LocalBookService: Sendable {
     }
 
     private func textFileReport(data: Data, sourceURL: URL, destination: URL) throws -> LocalBookImportReport {
-        let decoded = try decode(Data(data.prefix(512_000)))
+        let decoded = try decode(Data(data.prefix(512_000)), allowTruncatedTail: data.count > 512_000)
 
         let name = sourceURL.deletingPathExtension().lastPathComponent
         var book = Book(bookUrl: destination.absoluteString, name: name, origin: "local")
@@ -278,10 +278,10 @@ public struct LocalBookService: Sendable {
         } else {
             try handle.seek(toOffset: 0)
             let probe = try handle.read(upToCount: 512_000) ?? Data()
-            encoding = try decode(probe).encoding
+            encoding = try decode(probe, allowTruncatedTail: fileSize > probe.count).encoding
         }
-        let content = (String(data: contentData, encoding: encoding) ?? "")
-            .replacingOccurrences(of: #"^[\n\s]+"#, with: "　　", options: .regularExpression)
+        guard let decodedContent = String(data: contentData, encoding: encoding) else { throw LocalBookError.unreadableEncoding }
+        let content = decodedContent.replacingOccurrences(of: #"^[\n\s]+"#, with: "　　", options: .regularExpression)
         return .init(title: chapter.title, content: content, pagesVisited: 1)
     }
 
@@ -292,47 +292,81 @@ public struct LocalBookService: Sendable {
         if let charset = book.charset, let encoding = encoding(named: charset) {
             return (charset, encoding, bomLength(in: data, encoding: encoding), data)
         }
-        let decoded = try decode(Data(data.prefix(512_000)))
+        let decoded = try decode(Data(data.prefix(512_000)), allowTruncatedTail: data.count > 512_000)
         return (decoded.charset, decoded.encoding, bomLength(in: data, encoding: decoded.encoding), data)
     }
 
-    private func decode(_ data: Data, preferredCharset: String? = nil) throws -> (text: String, charset: String, encoding: String.Encoding, bomLength: Int) {
-        if let preferredCharset, let encoding = encoding(named: preferredCharset),
-           let value = String(data: data, encoding: encoding) {
-            return (stripBOM(value), preferredCharset, encoding, bomLength(in: data, encoding: encoding))
-        }
-        if data.starts(with: [0xFF, 0xFE]),
-           let value = String(data: data, encoding: .utf16LittleEndian) {
-            return (stripBOM(value), "UTF-16LE", .utf16LittleEndian, 2)
-        }
-        if data.starts(with: [0xFE, 0xFF]),
-           let value = String(data: data, encoding: .utf16BigEndian) {
-            return (stripBOM(value), "UTF-16BE", .utf16BigEndian, 2)
-        }
-        let candidates: [(String, String.Encoding)] = [
-            ("UTF-8", .utf8),
-            ("UTF-16", .utf16),
-            ("GB18030", .gb18030),
-            ("Big5", .big5)
-        ]
-        for (name, encoding) in candidates {
-            if let value = String(data: data, encoding: encoding), isPlausible(value) {
-                return (stripBOM(value), name, encoding, bomLength(in: data, encoding: encoding))
+    private func decode(_ data: Data, allowTruncatedTail: Bool = false) throws -> (text: String, charset: String, encoding: String.Encoding, bomLength: Int) {
+        let marked: (String, String.Encoding)?
+        if data.starts(with: [0xEF, 0xBB, 0xBF]) { marked = ("UTF-8", .utf8) }
+        else if data.starts(with: [0xFF, 0xFE]) { marked = ("UTF-16LE", .utf16LittleEndian) }
+        else if data.starts(with: [0xFE, 0xFF]) { marked = ("UTF-16BE", .utf16BigEndian) }
+        else { marked = nil }
+        if let (name, encoding) = marked {
+            guard let value = probeString(data, encoding: encoding, allowTruncatedTail: allowTruncatedTail) else {
+                throw LocalBookError.unreadableEncoding
             }
-            // A bounded probe can end halfway through a UTF-8 scalar. Keep
-            // UTF-8 as the selected charset instead of misclassifying the
-            // truncated probe as UTF-16 and producing unreadable chapters.
-            if encoding == .utf8 {
-                let value = String(decoding: data, as: UTF8.self)
-                let replacementCount = value.reduce(into: 0) { count, character in
-                    if character == "\u{FFFD}" { count += 1 }
-                }
-                if replacementCount <= 2, isPlausible(value) {
-                    return (stripBOM(value), name, encoding, bomLength(in: data, encoding: encoding))
-                }
+            return (stripBOM(value), name, encoding, bomLength(in: data, encoding: encoding))
+        }
+        if let value = probeString(data, encoding: .utf8, allowTruncatedTail: allowTruncatedTail), isPlausible(value) {
+            return (value, "UTF-8", .utf8, 0)
+        }
+        // Foundation can return no converted string for BOM-less UTF-16.
+        // Require byte-order evidence from ASCII code units before trying it;
+        // merely decoding an even-length GB/Big5 buffer as UTF-16 is ambiguous.
+        if let encoding = unmarkedUTF16Encoding(in: data),
+           let value = probeString(data, encoding: encoding, allowTruncatedTail: allowTruncatedTail),
+           isPlausible(value) {
+            return (value, encoding == .utf16LittleEndian ? "UTF-16LE" : "UTF-16BE", encoding, 0)
+        }
+        // Successful UTF-16 decoding alone proves nothing: most even-length GB
+        // files also decode to unrelated UTF-16 characters. Use Foundation's
+        // charset detector, as Android uses ICU detection, without lossy output.
+        let candidates: [(String, String.Encoding)] = [
+            ("GB18030", .gb18030), ("Big5", .big5),
+            ("UTF-16LE", .utf16LittleEndian), ("UTF-16BE", .utf16BigEndian)
+        ]
+        for removed in 0...(allowTruncatedTail ? 3 : 0) where data.count > removed {
+            let sample = Data(data.dropLast(removed))
+            var converted: NSString?
+            var lossy: ObjCBool = false
+            let detected = NSString.stringEncoding(for: sample, encodingOptions: [
+                .suggestedEncodingsKey: candidates.map { NSNumber(value: $0.1.rawValue) },
+                .useOnlySuggestedEncodingsKey: true,
+                .allowLossyKey: false,
+                .likelyLanguageKey: "zh"
+            ], convertedString: &converted, usedLossyConversion: &lossy)
+            if let (name, encoding) = candidates.first(where: { $0.1.rawValue == detected }),
+               !lossy.boolValue, let value = converted as String?, isPlausible(value) {
+                return (stripBOM(value), name, encoding, 0)
             }
         }
         throw LocalBookError.unreadableEncoding
+    }
+
+    private func probeString(_ data: Data, encoding: String.Encoding, allowTruncatedTail: Bool) -> String? {
+        for removed in 0...(allowTruncatedTail ? 3 : 0) where data.count >= removed {
+            if let text = String(data: Data(data.dropLast(removed)), encoding: encoding) { return text }
+        }
+        return nil
+    }
+
+    private func unmarkedUTF16Encoding(in data: Data) -> String.Encoding? {
+        let counts = data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> (little: Int, big: Int) in
+            var little = 0
+            var big = 0
+            func isASCIIText(_ byte: UInt8) -> Bool {
+                byte == 9 || byte == 10 || byte == 13 || (32...126).contains(byte)
+            }
+            for index in stride(from: 0, to: max(bytes.count - 1, 0), by: 2) {
+                if bytes[index + 1] == 0, isASCIIText(bytes[index]) { little += 1 }
+                if bytes[index] == 0, isASCIIText(bytes[index + 1]) { big += 1 }
+            }
+            return (little, big)
+        }
+        if counts.little >= 4, counts.little > counts.big * 4 { return .utf16LittleEndian }
+        if counts.big >= 4, counts.big > counts.little * 4 { return .utf16BigEndian }
+        return nil
     }
 
     private func chapters(
