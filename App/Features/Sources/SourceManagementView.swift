@@ -16,6 +16,7 @@ struct SourceManagementView: View {
     @State private var searchText = ""
     @State private var isSelecting = false
     @State private var selectedSourceIDs = Set<String>()
+    @State private var confirmsBatchDelete = false
     @AppStorage("bookSourceSort") private var sortMode = "manual"
     @AppStorage("bookSourceSortDescending") private var sortDescending = false
 
@@ -188,11 +189,23 @@ struct SourceManagementView: View {
                         Task { await library.setEnabled(false, for: selectedSourceIDs) }
                     }
                     .disabled(selectedSourceIDs.isEmpty)
+                    Button("删除", systemImage: "trash", role: .destructive) { confirmsBatchDelete = true }
+                        .disabled(selectedSourceIDs.isEmpty)
                 }
                 .font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 18).padding(.vertical, 12)
                 .background(.ultraThinMaterial)
             }
+        }
+        .alert("删除所选书源？", isPresented: $confirmsBatchDelete) {
+            Button("删除 \(selectedSourceIDs.count) 个", role: .destructive) {
+                let ids = selectedSourceIDs
+                selectedSourceIDs.removeAll()
+                Task { await library.remove(sourceIDs: ids) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将删除已选的 \(selectedSourceIDs.count) 个书源，无法撤销。")
         }
         .sheet(isPresented: $showsNewSource) { SourceEditorView().environmentObject(library) }
         .sheet(isPresented: $showsQRImporter) {
