@@ -107,6 +107,7 @@ final class ExploreSourceViewModel: ObservableObject {
 
 struct ExploreView: View {
     @EnvironmentObject private var sourceLibrary: SourceLibraryModel
+    @Environment(\.colorScheme) private var colorScheme
 
     private var sources: [BookSource] {
         sourceLibrary.sources
@@ -120,115 +121,316 @@ struct ExploreView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                ReadingPageHeader(title: "发现", subtitle: "下一本好书，在这里遇见") {
-                    NavigationLink { SearchView() } label: {
-                        ReadingToolbarIcon(systemName: "magnifyingglass")
-                    }
-                    .accessibilityLabel("搜索")
-                }
-                VStack(alignment: .leading, spacing: 24) {
-                    HStack(spacing: 16) {
-                        Image(systemName: "safari")
-                            .font(.system(size: 30, weight: .ultraLight))
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("从喜欢的书源开始").font(.headline)
-                            Text("浏览分类与榜单，发现更多故事")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(22)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 20))
-
-                    HStack(alignment: .firstTextBaseline) {
-                        Text("分类与榜单").font(.title3.bold())
-                            .accessibilityAddTraits(.isHeader)
-                        Spacer()
-                        Text("\(sources.count)个书源").font(.caption).foregroundStyle(.secondary)
-                    }
+                header
+                VStack(spacing: 0) {
+                    introduction
+                    sectionHeading
+                        .padding(.top, 24)
+                        .padding(.bottom, sources.isEmpty ? 0 : 10)
                     if sources.isEmpty {
-                        ReadingUnavailableView {
-                            Label("暂无发现书源", systemImage: "books.vertical")
-                        } description: {
-                            Text("添加带有发现分类的书源，即可在这里浏览书籍。")
-                        } actions: {
-                            NavigationLink("管理书源") { SourceManagementView() }
-                                .readingProminentButtonStyle()
-                        }
+                        emptyState
                     } else {
-                        LazyVStack(spacing: 0) {
-                            ForEach(sources) { source in
+                        LazyVStack(spacing: 8) {
+                            ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
                                 NavigationLink { ExploreSourceView(source: source) } label: {
-                                    HStack(spacing: 12) {
-                                        ExploreSourceRow(source: source)
-                                        Spacer(minLength: 0)
-                                        Image(systemName: "chevron.right")
-                                            .font(.caption).foregroundStyle(.tertiary)
-                                    }
-                                    .padding(.vertical, 8)
-                                    .contentShape(Rectangle())
+                                    ExploreSourceRow(source: source, position: index)
                                 }
                                 .buttonStyle(.plain)
-                                if source.id != sources.last?.id {
-                                    Rectangle().fill(ReadingTheme.separator).frame(height: 0.5)
-                                        .padding(.leading, 58)
-                                }
                             }
                         }
                     }
-                    NavigationLink { SourceManagementView() } label: {
-                        HStack(spacing: 14) {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.system(size: 20))
-                                .frame(width: 40, height: 44)
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("管理书源").font(.subheadline.weight(.semibold))
-                                Text("添加与整理阅读来源").font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer(minLength: 0)
-                            Image(systemName: "arrow.up.right").font(.subheadline)
-                        }
-                        .foregroundStyle(ReadingTheme.ink)
-                        .padding(18)
-                        .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 18))
-                    }
-                    .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 32)
+                .padding(.horizontal, sources.isEmpty ? 24 : 20)
+                .padding(.bottom, 28)
             }
+            .frame(maxWidth: 620)
+            .frame(maxWidth: .infinity)
         }
-        .background(ReadingTheme.canvas)
+        .accessibilityIdentifier("explore.scroll")
+        .background {
+            ReadingTheme.canvas.ignoresSafeArea()
+                .overlay(alignment: .top) {
+                    if !sources.isEmpty {
+                        ExploreHeaderWave()
+                            .fill(ReadingTheme.groupedCanvas.opacity(0.6))
+                            .frame(height: 160)
+                            .padding(.top, 46)
+                            .accessibilityHidden(true)
+                    }
+                }
+        }
         .navigationBarHidden(true)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("发现")
+                    .font(.largeTitle.bold())
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                NavigationLink { SearchView() } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 22, weight: .regular))
+                        .frame(width: 44, height: 44)
+                        .background {
+                            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                .fill(ReadingTheme.groupedCanvas.opacity(0.75))
+                                .shadow(color: .black.opacity(0.06), radius: 4, y: 3)
+                        }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("搜索")
+                .accessibilityIdentifier("explore.search")
+            }
+            Text("下一本好书，在这里遇见")
+                .font(.subheadline)
+                .foregroundStyle(ReadingTheme.ink.opacity(0.55))
+        }
+        .padding(.horizontal, 26)
+        .padding(.top, 18)
+        .padding(.bottom, 26)
+    }
+
+    private var introduction: some View {
+        NavigationLink { SourceManagementView() } label: {
+            HStack(spacing: 11) {
+                Image(systemName: "safari")
+                    .font(.system(size: 27, weight: .light))
+                    .frame(width: 46, height: 46)
+                    .background(ReadingTheme.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                    .shadow(color: .black.opacity(0.07), radius: 8, y: 5)
+                    .accessibilityHidden(true)
+                Rectangle()
+                    .fill(ReadingTheme.ink.opacity(0.28))
+                    .frame(width: 0.5, height: 36)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("从喜欢的书源开始")
+                        .font(.headline)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    Text("浏览分类与榜单，发现更多故事")
+                        .font(.caption)
+                        .foregroundStyle(ReadingTheme.ink.opacity(0.55))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 28, height: 28)
+                    .background(ReadingTheme.surface.opacity(sources.isEmpty ? 0 : 0.9), in: Circle())
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, sources.isEmpty ? 20 : 23)
+            .background(alignment: .trailing) {
+                Image("ExploreBookStack")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 112, height: 86)
+                    .opacity(colorScheme == .dark ? 0.16 : 0.55)
+                    .padding(.trailing, 10)
+                    .accessibilityHidden(true)
+            }
+            .background {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(LinearGradient(
+                        colors: [ReadingTheme.groupedCanvas.opacity(0.8), ReadingTheme.groupedCanvas],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 20))
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("添加与管理书源")
+        .accessibilityIdentifier("explore.manageSources")
+    }
+
+    private var sectionHeading: some View {
+        HStack(spacing: 10) {
+            if !sources.isEmpty {
+                Capsule()
+                    .fill(ReadingTheme.ink)
+                    .frame(width: 4, height: 18)
+                    .accessibilityHidden(true)
+            }
+            Text("分类与榜单")
+                .font(.title3.bold())
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 8)
+            NavigationLink { SourceManagementView() } label: {
+                HStack(spacing: 5) {
+                    Text("\(sources.count)个书源")
+                        .font(.footnote)
+                    if !sources.isEmpty {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .foregroundStyle(ReadingTheme.ink.opacity(0.55))
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("explore.sourceCount")
+        }
+        .padding(.horizontal, sources.isEmpty ? 0 : 3)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 0) {
+            Image("ExploreEmptyBook")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 150, height: 100)
+                .opacity(colorScheme == .dark ? 0.75 : 1)
+                .accessibilityHidden(true)
+            Text("暂无发现书源")
+                .font(.title3.bold())
+                .padding(.top, 12)
+            Text("添加带有发现分类的书源，即可在这里浏览书籍")
+                .font(.subheadline)
+                .foregroundStyle(ReadingTheme.ink.opacity(0.55))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 14)
+            NavigationLink { SourceManagementView() } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 16, weight: .medium))
+                    Text("添加书源").font(.subheadline.weight(.semibold))
+                }
+                .foregroundStyle(ReadingTheme.onAccent)
+                .frame(width: 166, height: 40)
+                .background {
+                    Capsule().fill(LinearGradient(
+                        colors: [ReadingTheme.accentFill, ReadingTheme.emphasisSurface],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ))
+                }
+                .padding(.vertical, 2)
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("explore.addSource")
+            .padding(.top, 28)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 54)
     }
 }
 
 private struct ExploreSourceRow: View {
     let source: BookSource
+    let position: Int
+    @ScaledMetric(relativeTo: .body) private var nameSize: CGFloat = 16
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: source.bookSourceType == 1 ? "headphones" : "books.vertical")
-                .font(.system(size: 20))
-                .foregroundStyle(ReadingTheme.accent)
-                .frame(width: 44, height: 48)
-                .background(ReadingTheme.groupedCanvas, in: RoundedRectangle(cornerRadius: 12))
+        HStack(spacing: 16) {
+            ExploreSourceIcon(source: source, position: position)
+                .frame(width: 26, height: 26)
+                .frame(width: 44, height: 44)
+                .background {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(LinearGradient(colors: [ReadingTheme.groupedCanvas.opacity(0.65), ReadingTheme.groupedCanvas.opacity(0.9)],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing))
+                }
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
                 Text(source.bookSourceName)
-                    .font(.body.weight(.medium))
+                    .font(.system(size: nameSize, weight: .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(2)
                 Text(source.groups.isEmpty ? (URL(string: source.bookSourceUrl)?.host ?? source.bookSourceUrl) : source.groups.joined(separator: " · "))
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ReadingTheme.ink.opacity(0.55))
                     .lineLimit(1)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(ReadingTheme.ink.opacity(0.55))
+                .padding(.trailing, 4)
+                .accessibilityHidden(true)
         }
-        .padding(.vertical, 7)
-        .contentShape(Rectangle())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(ReadingTheme.surface)
+                .shadow(color: .black.opacity(0.035), radius: 12, y: 6)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 18))
+    }
+}
+
+private struct ExploreSourceIcon: View {
+    let source: BookSource
+    let position: Int
+
+    var body: some View {
+        Group {
+            if source.bookSourceType == 1 {
+                Image(systemName: "headphones")
+            } else {
+                switch position % 7 {
+                case 0: Image(systemName: "cloud")
+                case 1, 4: ExploreGem().stroke(style: StrokeStyle(lineWidth: 1.3, lineCap: .round, lineJoin: .round))
+                case 3: Image(systemName: UIImage(systemName: "party.popper") == nil ? "sparkles" : "party.popper")
+                case 6: ExploreStackIcon().stroke(style: StrokeStyle(lineWidth: 1.3, lineCap: .round, lineJoin: .round))
+                default: Image(systemName: "book")
+                }
+            }
+        }
+        .font(.system(size: 25, weight: .light))
+        .foregroundStyle(ReadingTheme.ink)
+    }
+}
+
+private struct ExploreGem: Shape {
+    func path(in rect: CGRect) -> Path {
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: rect.minX + rect.width * x, y: rect.minY + rect.height * y)
+        }
+        var path = Path()
+        path.move(to: point(0.04, 0.32))
+        [point(0.23, 0.08), point(0.77, 0.08), point(0.96, 0.32), point(0.5, 0.94)].forEach { path.addLine(to: $0) }
+        path.closeSubpath()
+        path.move(to: point(0.04, 0.32)); path.addLine(to: point(0.96, 0.32))
+        path.move(to: point(0.37, 0.08)); path.addLine(to: point(0.29, 0.32)); path.addLine(to: point(0.5, 0.94))
+        path.move(to: point(0.63, 0.08)); path.addLine(to: point(0.71, 0.32)); path.addLine(to: point(0.5, 0.94))
+        return path
+    }
+}
+
+private struct ExploreStackIcon: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        for row in 0..<3 {
+            let y = rect.minY + rect.height * (0.12 + CGFloat(row) * 0.25)
+            let spine = CGRect(x: rect.minX + rect.width * 0.1, y: y,
+                               width: rect.width * 0.78, height: rect.height * 0.23)
+            path.addRoundedRect(in: spine, cornerSize: CGSize(width: rect.width * 0.1, height: rect.height * 0.1))
+            path.move(to: CGPoint(x: spine.maxX - rect.width * 0.14, y: spine.minY))
+            path.addQuadCurve(to: CGPoint(x: spine.maxX - rect.width * 0.14, y: spine.maxY),
+                              control: CGPoint(x: spine.maxX, y: spine.midY))
+        }
+        return path
+    }
+}
+
+private struct ExploreHeaderWave: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.width * 0.23, y: rect.height))
+        path.addCurve(to: CGPoint(x: rect.width, y: rect.height * 0.65),
+                      control1: CGPoint(x: rect.width * 0.73, y: -rect.height * 0.35),
+                      control2: CGPoint(x: rect.width * 0.72, y: rect.height * 0.17))
+        path.addLine(to: CGPoint(x: rect.width, y: rect.height))
+        path.closeSubpath()
+        return path
     }
 }
 

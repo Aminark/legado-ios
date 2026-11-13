@@ -173,7 +173,7 @@ struct SourceManagementView: View {
         }
         .safeAreaInset(edge: .bottom) {
             if isSelecting {
-                HStack(spacing: 18) {
+                HStack(spacing: 12) {
                     Button(selectedSourceIDs.count == filteredSources.count ? "取消全选" : "全选") {
                         if selectedSourceIDs.count == filteredSources.count { selectedSourceIDs.removeAll() }
                         else { selectedSourceIDs = Set(filteredSources.map(\.id)) }
@@ -192,6 +192,7 @@ struct SourceManagementView: View {
                     Button("删除", systemImage: "trash", role: .destructive) { confirmsBatchDelete = true }
                         .disabled(selectedSourceIDs.isEmpty)
                 }
+                .labelStyle(.titleOnly)
                 .font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 18).padding(.vertical, 12)
                 .background(.ultraThinMaterial)
