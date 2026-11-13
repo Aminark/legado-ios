@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.1.14",
-          "buildVersion": "20",
-          "date": "2026-10-29T16:53:52Z",
-          "localizedDescription": "小浣熊阅读 **0.1.14**，构建号 **20**，支持 **iOS / iPadOS 15.0 及以上**。\n\n## 更新内容\n\n- 修复规则订阅自动更新期间删除订阅导致的崩溃，并忽略已删除或已修改订阅的过期结果。\n- 修复快速操作时书签、阅读记录、书源和净化规则保存互相覆盖的问题，完善书架分组保存失败后的恢复。\n- 修复 RSS 搜索混入旧结果、刷新失效、分页重试和更新订阅源后沿用旧配置的问题，完善重定向链接及文章变量解析。\n- 目录或正文分页失败时保留完整缓存和阅读进度，换源时排除不完整的候选结果。\n- 切换净化规则后使用当前设置并保留阅读位置；导入字体先验证文件，避免覆盖已有的可用字体。\n- 修复 HTTP TTS 更换声音配置后误用旧音频缓存的问题。\n\n## 下载安装\n\n下载附件 **`legado-ios-v0.1.14-build20-unsigned.ipa`**，使用自己的签名工具安装。支持 TrollStore 的设备可自行尝试安装。\n\n也可通过 [TestFlight 公测入口](https://testflight.apple.com/join/RSmhQ9Xn) 查看当前可用测试版本；TestFlight 与 GitHub Releases 的版本可能不同。\n\n`Source code (zip / tar.gz)` 是源码，不能直接安装。附件 `SHA256SUMS` 可用于核对 IPA 完整性。\n\n## 兼容与验证\n\n本次修复已通过 373 项核心及页面模型测试、25 项阅读器测试、8 项脚本测试，并复测 iOS 18 与 iOS 26 的关键界面流程。发布包重新完成 iPhoneOS Release 构建和安装包校验；iOS 15 真机及真实第三方书源尚未全面验证。\n\nEPUB 仅支持无 DRM 文件。若遇到问题，请在 [Issues](https://github.com/Aminark/legado-ios/issues) 附上设备、系统版本和复现步骤。\n\n**小浣熊阅读不提供、内置或分发网络书源，也不提供在线书库；书源需自行导入。**\n",
-          "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.14/legado-ios-v0.1.14-build20-unsigned.ipa",
-          "size": 15722798,
+          "version": "0.1.15",
+          "buildVersion": "21",
+          "date": "2026-11-13T08:27:53Z",
+          "localizedDescription": "小浣熊阅读 **0.1.15**，构建号 **21**，支持 **iOS / iPadOS 15.0 及以上**。\n\n## 更新内容\n\n- 更新发现页、书架空状态、书源管理、阅读记录和阅读统计的布局及插画，保留原生导航。\n- 书源多选支持批量删除和数量确认，改善小屏工具栏排版。感谢 [arno721](https://github.com/arno721) 的贡献（[#12](https://github.com/Aminark/legado-ios/pull/12)）。\n- 支持漫画图片按顺序阅读、失败重试、上下章和位置恢复，兼容常见懒加载图片及请求头规则。\n- 完善搜索与发现的分页、登录请求头、过期请求隔离和详情回退，支持 `yuedu` 导入链接。\n- 完善书架分组排序、追更过滤、自定义顺序及换源保存，修复目录和阅读进度在失败或并发操作时互相覆盖的问题。\n- 改善更新前脚本、目录、正文和嵌套规则兼容，保留图片地址和副文内容。\n- 支持 TXT 重新分章与单书段落重排，完善编码识别、目录规则和阅读位置恢复。\n- 完善 RSS 文章变量、规则桥接、分页和持久化处理。\n\n## 下载安装\n\n下载附件 **`legado-ios-v0.1.15-build21-unsigned.ipa`**，使用自己的签名工具安装。\n\nAltStore、SideStore 或 LiveContainer 用户可刷新[官方应用源](https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/altstore.json)。\n\n`Source code (zip / tar.gz)` 是源码，不能直接安装。附件 `SHA256SUMS` 可用于核对 IPA 完整性。\n\n## 兼容与验证\n\n本次代码通过 533 项核心及页面模型测试、32 项阅读器测试、8 项关键界面和业务流程测试、8 项脚本测试。界面流程在 iOS 18.3 独立模拟器完成，覆盖漫画图片重试、段落重排、搜索分页到正文、RSS 搜索与收藏等路径。发布包完成 iPhoneOS Release 归档、版本/架构校验和 SHA-256 完整性校验。\n\n测试使用自造响应和独立模拟器；iOS 15 真机及真实第三方书源尚未全面验证。漫画的自定义 `imageDecode` 脚本与离线图片下载尚不支持，EPUB 仅支持无 DRM 文件。\n\n若遇到问题，请在 [Issues](https://github.com/Aminark/legado-ios/issues) 附上设备、系统版本和复现步骤。\n\n**小浣熊阅读不提供、内置或分发网络书源，也不提供在线书库；书源需自行导入。**\n",
+          "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.15/legado-ios-v0.1.15-build21-unsigned.ipa",
+          "size": 16291029,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.1.14",
-      "versionDate": "2026-10-29T16:53:52Z",
-      "versionDescription": "小浣熊阅读 **0.1.14**，构建号 **20**，支持 **iOS / iPadOS 15.0 及以上**。\n\n## 更新内容\n\n- 修复规则订阅自动更新期间删除订阅导致的崩溃，并忽略已删除或已修改订阅的过期结果。\n- 修复快速操作时书签、阅读记录、书源和净化规则保存互相覆盖的问题，完善书架分组保存失败后的恢复。\n- 修复 RSS 搜索混入旧结果、刷新失效、分页重试和更新订阅源后沿用旧配置的问题，完善重定向链接及文章变量解析。\n- 目录或正文分页失败时保留完整缓存和阅读进度，换源时排除不完整的候选结果。\n- 切换净化规则后使用当前设置并保留阅读位置；导入字体先验证文件，避免覆盖已有的可用字体。\n- 修复 HTTP TTS 更换声音配置后误用旧音频缓存的问题。\n\n## 下载安装\n\n下载附件 **`legado-ios-v0.1.14-build20-unsigned.ipa`**，使用自己的签名工具安装。支持 TrollStore 的设备可自行尝试安装。\n\n也可通过 [TestFlight 公测入口](https://testflight.apple.com/join/RSmhQ9Xn) 查看当前可用测试版本；TestFlight 与 GitHub Releases 的版本可能不同。\n\n`Source code (zip / tar.gz)` 是源码，不能直接安装。附件 `SHA256SUMS` 可用于核对 IPA 完整性。\n\n## 兼容与验证\n\n本次修复已通过 373 项核心及页面模型测试、25 项阅读器测试、8 项脚本测试，并复测 iOS 18 与 iOS 26 的关键界面流程。发布包重新完成 iPhoneOS Release 构建和安装包校验；iOS 15 真机及真实第三方书源尚未全面验证。\n\nEPUB 仅支持无 DRM 文件。若遇到问题，请在 [Issues](https://github.com/Aminark/legado-ios/issues) 附上设备、系统版本和复现步骤。\n\n**小浣熊阅读不提供、内置或分发网络书源，也不提供在线书库；书源需自行导入。**\n",
-      "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.14/legado-ios-v0.1.14-build20-unsigned.ipa",
-      "size": 15722798,
+      "version": "0.1.15",
+      "versionDate": "2026-11-13T08:27:53Z",
+      "versionDescription": "小浣熊阅读 **0.1.15**，构建号 **21**，支持 **iOS / iPadOS 15.0 及以上**。\n\n## 更新内容\n\n- 更新发现页、书架空状态、书源管理、阅读记录和阅读统计的布局及插画，保留原生导航。\n- 书源多选支持批量删除和数量确认，改善小屏工具栏排版。感谢 [arno721](https://github.com/arno721) 的贡献（[#12](https://github.com/Aminark/legado-ios/pull/12)）。\n- 支持漫画图片按顺序阅读、失败重试、上下章和位置恢复，兼容常见懒加载图片及请求头规则。\n- 完善搜索与发现的分页、登录请求头、过期请求隔离和详情回退，支持 `yuedu` 导入链接。\n- 完善书架分组排序、追更过滤、自定义顺序及换源保存，修复目录和阅读进度在失败或并发操作时互相覆盖的问题。\n- 改善更新前脚本、目录、正文和嵌套规则兼容，保留图片地址和副文内容。\n- 支持 TXT 重新分章与单书段落重排，完善编码识别、目录规则和阅读位置恢复。\n- 完善 RSS 文章变量、规则桥接、分页和持久化处理。\n\n## 下载安装\n\n下载附件 **`legado-ios-v0.1.15-build21-unsigned.ipa`**，使用自己的签名工具安装。\n\nAltStore、SideStore 或 LiveContainer 用户可刷新[官方应用源](https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/altstore.json)。\n\n`Source code (zip / tar.gz)` 是源码，不能直接安装。附件 `SHA256SUMS` 可用于核对 IPA 完整性。\n\n## 兼容与验证\n\n本次代码通过 533 项核心及页面模型测试、32 项阅读器测试、8 项关键界面和业务流程测试、8 项脚本测试。界面流程在 iOS 18.3 独立模拟器完成，覆盖漫画图片重试、段落重排、搜索分页到正文、RSS 搜索与收藏等路径。发布包完成 iPhoneOS Release 归档、版本/架构校验和 SHA-256 完整性校验。\n\n测试使用自造响应和独立模拟器；iOS 15 真机及真实第三方书源尚未全面验证。漫画的自定义 `imageDecode` 脚本与离线图片下载尚不支持，EPUB 仅支持无 DRM 文件。\n\n若遇到问题，请在 [Issues](https://github.com/Aminark/legado-ios/issues) 附上设备、系统版本和复现步骤。\n\n**小浣熊阅读不提供、内置或分发网络书源，也不提供在线书库；书源需自行导入。**\n",
+      "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.15/legado-ios-v0.1.15-build21-unsigned.ipa",
+      "size": 16291029,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
