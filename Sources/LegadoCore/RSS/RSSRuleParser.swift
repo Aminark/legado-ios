@@ -36,6 +36,7 @@ public struct RSSRuleParser: Sendable {
         let baseContext = RuleExecutionContext(variables: variables, baseURL: baseURL, source: adapter)
         let list = await engine.evaluate(listRule, inText: body, baseURL: baseURL, listMode: true, context: baseContext)
         var diagnostics = list.diagnostics
+        var sharedVariables = list.variables
         var nextURL: String?
         if let nextRule = source.ruleNextPage, !nextRule.isEmpty {
             if nextRule.uppercased() == "PAGE" {
@@ -43,32 +44,50 @@ public struct RSSRuleParser: Sendable {
             } else {
                 let next = await engine.evaluate(nextRule, inText: body, baseURL: baseURL, context: .init(variables: list.variables, baseURL: baseURL, source: adapter))
                 diagnostics += next.diagnostics
+                sharedVariables = next.variables
                 if let value = next.joinedString, !value.isEmpty {
                     nextURL = URL(string: value, relativeTo: URL(string: baseURL))?.absoluteURL.absoluteString ?? value
                 }
             }
         }
         var articles: [RssArticle] = []
-        for item in flatten(list.values) {
-            var context = RuleExecutionContext(variables: list.variables, baseURL: baseURL, source: adapter)
-            let title = await evaluate(source.ruleTitle, item: item, context: context); context.variables = title.variables
-            let pubDate = await evaluate(source.rulePubDate, item: item, context: context); context.variables = pubDate.variables
-            let description = await evaluate(source.ruleDescription, item: item, context: context); context.variables = description.variables
-            let image = await evaluate(source.ruleImage, item: item, context: context); context.variables = image.variables
+        for item in flatten(list.values, rule: listRule) {
+            try Task.checkCancellation()
+            var context = RuleExecutionContext(variables: sharedVariables, baseURL: baseURL, source: adapter, rssArticle: RssArticle())
+            let title = await evaluate(source.ruleTitle, item: item, context: context)
+            apply(title, to: &context)
+            context.rssArticle?.title = title.joinedString ?? ""
+            let pubDate = await evaluate(source.rulePubDate, item: item, context: context)
+            apply(pubDate, to: &context)
+            context.rssArticle?.pubDate = pubDate.joinedString
+            let description = await evaluate(source.ruleDescription, item: item, context: context)
+            apply(description, to: &context)
+            context.rssArticle?.description = source.ruleDescription?.isEmpty == false ? description.joinedString : nil
+            let image = await evaluate(source.ruleImage, item: item, context: context)
+            apply(image, to: &context)
+            if let imageValue = image.joinedString, !imageValue.isEmpty {
+                context.rssArticle?.image = URL(string: imageValue, relativeTo: URL(string: baseURL))?.absoluteURL.absoluteString ?? imageValue
+            }
             let link = await evaluate(source.ruleLink, item: item, context: context)
+            apply(link, to: &context)
             diagnostics += [title, pubDate, description, image, link].flatMap(\.diagnostics)
-            guard let titleValue = title.joinedString?.trimmingCharacters(in: .whitespacesAndNewlines), !titleValue.isEmpty else { continue }
+            guard var article = context.rssArticle else { continue }
+            article.title = article.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !article.title.isEmpty else { continue }
             let rawLink = link.leadingString ?? ""
             let resolvedLink = URL(string: rawLink, relativeTo: URL(string: baseURL))?
                 .absoluteURL.absoluteString ?? rawLink
-            var article = RssArticle(origin: source.sourceUrl, sort: sortName, title: titleValue, link: resolvedLink)
-            article.pubDate = pubDate.joinedString
-            article.description = source.ruleDescription?.isEmpty == false ? description.joinedString : nil
-            if let imageValue = image.joinedString, !imageValue.isEmpty {
-                article.image = URL(string: imageValue, relativeTo: URL(string: baseURL))?.absoluteURL.absoluteString ?? imageValue
-            }
+            article.origin = source.sourceUrl
+            article.sort = sortName
+            article.link = resolvedLink
             article.variable = encodeVariables(link.variables)
             article.type = source.type
+            if var state = article.ruleVariableState {
+                try Task.checkCancellation()
+                state.identity = (origin: article.origin, link: article.link)
+                try state.commit()
+                article.ruleVariableState = state
+            }
             articles.append(article)
         }
         if reverse { articles.reverse() }
@@ -76,14 +95,21 @@ public struct RSSRuleParser: Sendable {
     }
 
     private func evaluate(_ rule: String?, item: JSONValue, context: RuleExecutionContext) async -> RuleEvaluation {
-        guard let rule, !rule.isEmpty else { return .init(variables: context.variables) }
+        guard let rule, !rule.isEmpty else { return .init(variables: context.variables, rssArticle: context.rssArticle) }
         if case .string(let text) = item {
             return await engine.evaluate(rule, inText: text, baseURL: context.baseURL, context: context)
         }
         return await engine.evaluate(rule, in: item, context: context)
     }
-    private func flatten(_ values: [JSONValue]) -> [JSONValue] {
-        values.flatMap { value in
+    private func apply(_ evaluation: RuleEvaluation, to context: inout RuleExecutionContext) {
+        context.variables = evaluation.variables
+        context.rssArticle = evaluation.rssArticle ?? context.rssArticle
+    }
+    private func flatten(_ values: [JSONValue], rule: String) -> [JSONValue] {
+        // Each regex result is an array containing $0, $1, ... for one
+        // article. Flattening it would turn capture groups into articles.
+        if rule.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(":") { return values }
+        return values.flatMap { value in
             if case .array(let items) = value { return items }
             // Text rules serialize selected JSON arrays. Expand them before
             // evaluating article fields, just as for an already parsed array.

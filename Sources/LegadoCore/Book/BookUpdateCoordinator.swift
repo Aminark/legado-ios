@@ -6,6 +6,12 @@ public protocol ChapterListLoading: Sendable {
 
 extension NetworkBookService: ChapterListLoading {}
 
+public protocol BookUpdatePreparing: Sendable {
+    func prepareUpdate(book: Book, source: BookSource, runPreUpdateScript: Bool, isFromBookInfo: Bool) async -> BookDetailReport
+}
+
+extension NetworkBookService: BookUpdatePreparing {}
+
 public struct BookUpdateReport: Sendable {
     public var book: Book
     public var chapters: [BookChapter]
@@ -31,14 +37,30 @@ public struct BookUpdateReport: Sendable {
 public struct BookUpdateMerger: Sendable {
     public init() {}
 
+    /// Apply prepared metadata only where the shelf has not been edited since
+    /// the request started. Reading progress is always taken from the shelf.
+    public func applyingPreparation(original: Book, current: Book, prepared: Book) -> Book {
+        var merged = current
+        func apply<Value: Equatable>(_ path: WritableKeyPath<Book, Value>) {
+            if current[keyPath: path] == original[keyPath: path] { merged[keyPath: path] = prepared[keyPath: path] }
+        }
+        apply(\.bookUrl); apply(\.tocUrl); apply(\.origin); apply(\.originName)
+        apply(\.name); apply(\.author); apply(\.kind); apply(\.customTag)
+        apply(\.coverUrl); apply(\.customCoverUrl); apply(\.intro); apply(\.customIntro)
+        apply(\.charset); apply(\.type); apply(\.group); apply(\.wordCount)
+        apply(\.canUpdate); apply(\.order); apply(\.originOrder); apply(\.variable)
+        apply(\.readConfig); apply(\.syncTime)
+        return merged
+    }
+
     public func merge(book: Book, oldChapters: [BookChapter], newChapters: [BookChapter], now: Int64) -> BookUpdateReport {
         guard !newChapters.isEmpty else {
             return .init(book: book, chapters: oldChapters, addedChapterCount: 0, refreshed: false)
         }
         var normalized = newChapters
-        let metadata = Dictionary(uniqueKeysWithValues: oldChapters.map {
+        let metadata = Dictionary(oldChapters.map {
             ("\($0.index)\u{0}\($0.title)", ($0.wordCount, $0.variable, $0.imageURL))
-        })
+        }, uniquingKeysWith: { _, latest in latest })
         for index in normalized.indices {
             normalized[index].index = index
             normalized[index].bookUrl = book.bookUrl
@@ -71,12 +93,17 @@ public struct BookUpdateMerger: Sendable {
     }
 
     private func resolveReadIndex(book: Book, chapters: [BookChapter]) -> Int {
+        let previousIndex = min(max(book.durChapterIndex, 0), max(chapters.count - 1, 0))
         if let title = book.durChapterTitle, !title.isEmpty {
-            if let exact = chapters.firstIndex(where: { $0.title == title }) { return exact }
+            // Repeated titles (for example “正文” or “番外”) must not move a
+            // reader back to the first occurrence on every shelf refresh.
+            let exact = chapters.indices.filter { chapters[$0].title == title }
+            if let nearest = exact.min(by: { abs($0 - previousIndex) < abs($1 - previousIndex) }) { return nearest }
             let normalizedTitle = normalize(title)
-            if let close = chapters.firstIndex(where: { normalize($0.title) == normalizedTitle }) { return close }
+            let close = chapters.indices.filter { normalize(chapters[$0].title) == normalizedTitle }
+            if let nearest = close.min(by: { abs($0 - previousIndex) < abs($1 - previousIndex) }) { return nearest }
         }
-        return min(max(book.durChapterIndex, 0), max(chapters.count - 1, 0))
+        return previousIndex
     }
 
     private func normalize(_ title: String) -> String {
@@ -105,26 +132,39 @@ public actor BookUpdateCoordinator {
         (try? await repository.load(bookURL: bookURL)) ?? []
     }
 
-    public func refresh(book: Book, source: BookSource, now: Int64? = nil, maxPages: Int = 20) async -> BookUpdateReport {
+    public func refresh(
+        book: Book, source: BookSource, now: Int64? = nil, maxPages: Int = 20,
+        persistDirectory: Bool = true, runPreUpdateScript: Bool = true, isFromBookInfo: Bool = false
+    ) async -> BookUpdateReport {
         let old = (try? await repository.load(bookURL: book.bookUrl)) ?? []
-        let loaded = await loader.loadChapters(book: book, source: source, maxPages: maxPages)
+        let prepared: BookDetailReport
+        if let preparer = loader as? any BookUpdatePreparing {
+            prepared = await preparer.prepareUpdate(book: book, source: source,
+                                                   runPreUpdateScript: runPreUpdateScript, isFromBookInfo: isFromBookInfo)
+        } else { prepared = .init(book: book) }
+        guard !Task.isCancelled, !prepared.diagnostics.contains(where: { $0.severity == .error }) else {
+            return .init(book: book, chapters: old, addedChapterCount: 0, diagnostics: prepared.diagnostics, refreshed: false)
+        }
+        let loaded = await loader.loadChapters(book: prepared.book, source: source, maxPages: maxPages)
+        let diagnostics = prepared.diagnostics + loaded.diagnostics
         guard !Task.isCancelled, !loaded.chapters.isEmpty,
               !loaded.diagnostics.contains(where: { $0.severity == .error }) else {
             return .init(
                 book: book,
                 chapters: old,
                 addedChapterCount: 0,
-                diagnostics: loaded.diagnostics,
+                diagnostics: diagnostics,
                 refreshed: false
             )
         }
         var result = merger.merge(
-            book: book,
+            book: prepared.book,
             oldChapters: old,
             newChapters: loaded.chapters,
             now: now ?? Int64(Date().timeIntervalSince1970 * 1_000)
         )
-        result.diagnostics = loaded.diagnostics
+        result.diagnostics = diagnostics
+        guard persistDirectory else { return result }
         do {
             try await repository.save(result.chapters, bookURL: result.book.bookUrl)
         } catch {
@@ -134,6 +174,13 @@ public actor BookUpdateCoordinator {
                 message: "目录保存失败：\(error.localizedDescription)",
                 rule: book.bookUrl
             ))
+            return .init(
+                book: book,
+                chapters: old,
+                addedChapterCount: 0,
+                diagnostics: result.diagnostics,
+                refreshed: false
+            )
         }
         return result
     }

@@ -16,8 +16,7 @@ final class TxtTocRuleManagementModel: ObservableObject {
     func load() async {
         guard let repository else { message = "无法打开目录规则数据库"; return }
         do {
-            rules = try await repository.loadTxtTocRules().sorted { $0.serialNumber < $1.serialNumber }
-            if rules.isEmpty { await importDefaults(report: false) }
+            rules = try await repository.loadTxtTocRules(initialDefaults: TxtTocRuleDefaults.load()).sorted { $0.serialNumber < $1.serialNumber }
         }
         catch { message = error.localizedDescription }
     }

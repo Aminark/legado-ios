@@ -36,6 +36,7 @@ struct ReaderView: View {
     @State private var showsContentEditor = false
     @State private var editedContent = ""
     @State private var contentEditError: String?
+    @State private var readerSettingSaveError: String?
     @State private var backgroundImage: UIImage?
     @State private var backgroundError: String?
     @State private var showsBackgroundPicker = false
@@ -229,6 +230,9 @@ struct ReaderView: View {
             }
         }
         .animation(.easeOut(duration: 0.22), value: showsReaderMenu)
+        .alert("阅读设置未保存", isPresented: readerSettingErrorPresented(inSettings: false)) {
+            Button("好", role: .cancel) { readerSettingSaveError = nil }
+        } message: { Text(readerSettingSaveError ?? "") }
         .onAppear {
             activity.beginReading(book)
             speech.onNextChapter = { moveSpeechToChapter(direction: 1) }
@@ -294,17 +298,18 @@ struct ReaderView: View {
         .sheet(item: $sourceSwitchBook) { currentBook in
             ReadingNavigationStack {
                 SourceSwitchView(book: currentBook, sources: sourceLibrary.sources) { report, source in
-                    Task {
-                        await progressSaveTask?.value
-                        await activity.endReading(book)
-                        await library.replace(oldBookURL: book.bookUrl, with: report.book)
-                        model.applySourceSwitch(report, source: source)
-                        readerPosition = report.book.durChapterPos
-                        readerJumpPosition = nil
-                        readerPageRanges = []
-                        readerRenderRevision &+= 1
-                        activity.beginReading(report.book)
+                    await progressSaveTask?.value
+                    if library.contains(book) {
+                        guard await library.commitSourceSwitch(oldBookURL: book.bookUrl, report: report) else { return false }
                     }
+                    await activity.endReading(book)
+                    model.applySourceSwitch(report, source: source)
+                    readerPosition = report.book.durChapterPos
+                    readerJumpPosition = nil
+                    readerPageRanges = []
+                    readerRenderRevision &+= 1
+                    activity.beginReading(report.book)
+                    return true
                 }
             }
         }
@@ -419,7 +424,7 @@ struct ReaderView: View {
             totalPages = 1
             UserDefaults.standard.set(value, forKey: "pageAnim")
             let updatedBook = model.useGlobalPageAnimation()
-            Task { await library.addOrUpdate(updatedBook) }
+            saveReaderSetting(updatedBook) { $0.pageAnim = -1 }
         }
     }
 
@@ -1596,10 +1601,9 @@ struct ReaderView: View {
             showsContentEditor = true
         case 9:
             showsReaderMenu = false
+            stopSpeechForContentChange()
             let updatedBook = model.toggleReplaceRules(position: readerPosition)
-            Task {
-                await library.addOrUpdate(updatedBook)
-            }
+            saveReaderSetting(updatedBook) { $0.useReplaceRule = updatedBook.readConfig?.useReplaceRule }
         case 10:
             showsReaderMenu = false
             showsTableOfContents = true
@@ -1624,6 +1628,16 @@ struct ReaderView: View {
             Form {
                 Section {
                     Toggle("两端对齐", isOn: $fullJustify)
+                    Toggle("重新分段", isOn: Binding(
+                        get: { model.usesParagraphResegmentation },
+                        set: { value in
+                            guard value != model.usesParagraphResegmentation else { return }
+                            stopSpeechForContentChange()
+                            let updatedBook = model.toggleParagraphResegmentation(position: readerPosition)
+                            saveReaderSetting(updatedBook) { $0.reSegment = value }
+                        }
+                    ))
+                    .accessibilityIdentifier("readerResegmentToggle")
                     Button("编辑本章正文", systemImage: "square.and.pencil") {
                         editedContent = model.content
                         contentEditError = nil
@@ -1721,6 +1735,9 @@ struct ReaderView: View {
             }
             .navigationTitle("阅读设置")
             .navigationBarTitleDisplayMode(.inline)
+            .alert("阅读设置未保存", isPresented: readerSettingErrorPresented(inSettings: true)) {
+                Button("好", role: .cancel) { readerSettingSaveError = nil }
+            } message: { Text(readerSettingSaveError ?? "") }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { showsReaderSettings = false }
@@ -2034,6 +2051,15 @@ struct ReaderView: View {
         if speech.isSpeaking || speech.isPaused { speech.toggle(text: "") }
     }
 
+    private func stopSpeechForContentChange() {
+        speechStartGeneration &+= 1
+        resumesSpeechAfterChapterLoad = false
+        speech.stop()
+        speechTimerTask?.cancel()
+        speechTimerRemaining = 0
+        isAutoReading = false
+    }
+
     private func restartSpeechAfterReaderLayoutChange() {
         readerPageRanges = []
         guard speech.isSpeaking || speech.isPaused else { return }
@@ -2138,10 +2164,17 @@ struct ReaderView: View {
     }
 
     private func prefetchNextChapterSpeech(engine: HttpTTS) {
+        let generation = model.chapterLoadGeneration
+        let speechGeneration = speechStartGeneration
+        let bookURL = model.book.bookUrl
+        let chapterIndex = model.currentIndex
         Task {
             guard let content = await model.nextSpeechContent(
                 rules: model.usesReplaceRules ? replaceRules.rules : []
-            ), selectedHTTPEngine?.id == engine.id else { return }
+            ), selectedHTTPEngine?.id == engine.id,
+               generation == model.chapterLoadGeneration,
+               speechGeneration == speechStartGeneration,
+               bookURL == model.book.bookUrl, chapterIndex == model.currentIndex else { return }
             speech.prefetchHTTP(engine: engine, text: content, limit: 10)
         }
     }
@@ -2234,9 +2267,23 @@ struct ReaderView: View {
             get: { model.book.readConfig?.ttsEngine ?? "__global__" },
             set: { value in
                 let updated = model.setTTSEngine(value == "__global__" ? nil : value)
-                Task { await library.addOrUpdate(updated) }
+                saveReaderSetting(updated) { $0.ttsEngine = updated.readConfig?.ttsEngine }
             }
         )
+    }
+
+    private func readerSettingErrorPresented(inSettings: Bool) -> Binding<Bool> {
+        Binding(get: { readerSettingSaveError != nil && showsReaderSettings == inSettings },
+                set: { if !$0 { readerSettingSaveError = nil } })
+    }
+
+    private func saveReaderSetting(_ updated: Book, change: @escaping (inout BookReadConfig) -> Void) {
+        guard library.contains(updated) else { return }
+        Task {
+            if !(await library.updateReadConfig(for: updated, change)) {
+                readerSettingSaveError = "本次设置仅在当前阅读中生效。" + (library.errorMessage ?? "书架记录已变化，请重新打开书籍后再试。")
+            }
+        }
     }
 
     private func loadHTTPEngines() async {

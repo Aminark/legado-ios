@@ -5,6 +5,60 @@ import XCTest
 
 @MainActor
 final class WebReaderBridgeTests: XCTestCase {
+    private func webPrepared(script: String?, resource: String? = nil) throws -> PreparedRequest {
+        let html = "<html><body><p>原始页面</p></body></html>"
+        let address = "data:text/html;base64," + Data(html.utf8).base64EncodedString()
+        var prepared = try LegadoURLBuilder().prepare(address)
+        prepared.useWebView = true
+        prepared.webJavaScript = script
+        prepared.sourceRegex = resource
+        return prepared
+    }
+
+    func testBackgroundWebViewUsesScriptReturnValueAndRetriesNull() async throws {
+        let source = BookSource(bookSourceUrl: "https://web-content.test", bookSourceName: "网页正文")
+        let executor = WKSourceWebViewExecutor()
+        let response = try await executor.execute(webPrepared(script: "window.attempt = (window.attempt || 0) + 1; window.attempt < 3 ? null : '脚本正文' + window.attempt"), source: source, timeout: 5)
+        XCTAssertEqual(response.decodedText, "脚本正文3")
+        let empty = try await executor.execute(webPrepared(script: "''"), source: source, timeout: 5)
+        XCTAssertEqual(empty.decodedText, "")
+        var userAgent = try webPrepared(script: "navigator.userAgent")
+        userAgent.headers["User-Agent"] = "Legado WK Regression/1.0"
+        let identity = try await executor.execute(userAgent, source: source, timeout: 5)
+        XCTAssertEqual(identity.decodedText, "Legado WK Regression/1.0")
+    }
+
+    func testBackgroundWebViewMatchesDispatchedResourceInsteadOfScriptOutput() async throws {
+        let source = BookSource(bookSourceUrl: "https://web-content.test", bookSourceName: "资源网页")
+        let prepared = try webPrepared(script: "fetch('data:text/plain,resource-match').catch(() => {}); 'ignored output'", resource: "data:text/plain,resource-match")
+        let response = try await WKSourceWebViewExecutor().execute(prepared, source: source, timeout: 5)
+        XCTAssertEqual(response.decodedText, "data:text/plain,resource-match")
+    }
+
+    func testBackgroundWebViewLoadsPOSTResponseHTMLAndReportsMissingResource() async throws {
+        let source = BookSource(bookSourceUrl: "https://web-content.test", bookSourceName: "资源网页")
+        var prepared = try webPrepared(script: "document.querySelector('p').textContent")
+        prepared.webViewHTML = "<p>POST 返回的正文</p>"
+        prepared.url = try XCTUnwrap(URL(string: source.id + "/posted"))
+        let response = try await WKSourceWebViewExecutor().execute(prepared, source: source, timeout: 5)
+        XCTAssertEqual(response.decodedText, "POST 返回的正文")
+        do {
+            let missing = try webPrepared(script: nil, resource: "https://never-matches.test/.*")
+            _ = try await WKSourceWebViewExecutor().execute(missing, source: source, timeout: 1)
+            XCTFail("Unmatched resource must not become a successful HTML result")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("未找到匹配")) }
+    }
+
+    func testBackgroundWebViewCancellationStopsNullPolling() async throws {
+        let prepared = try webPrepared(script: "null")
+        let source = BookSource(bookSourceUrl: "https://web-content.test", bookSourceName: "取消测试")
+        let request = Task { try await WKSourceWebViewExecutor().execute(prepared, source: source, timeout: 5) }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        request.cancel()
+        do { _ = try await request.value; XCTFail("Cancelled request must fail") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+
     func testGeneratedRSSContentFollowsAppearanceWithoutReloading() async throws {
         let source = RssSource(sourceUrl: "https://appearance-regression.test", sourceName: "测试")
         let loaded = expectation(description: "HTML loaded")

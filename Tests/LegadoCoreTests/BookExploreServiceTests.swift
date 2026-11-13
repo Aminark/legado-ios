@@ -4,8 +4,12 @@ import Testing
 
 private struct ExploreMockTransport: HTTPTransport {
     let pages: [String: String]
+    var expectedHeaders: [String: String] = [:]
 
     func data(for request: URLRequest) async throws -> HTTPResponse {
+        for (name, value) in expectedHeaders {
+            #expect(request.value(forHTTPHeaderField: name) == value)
+        }
         let url = try #require(request.url)
         let body = try #require(pages[url.absoluteString])
         return .init(data: Data(body.utf8), statusCode: 200, headers: [:], finalURL: url)
@@ -13,6 +17,49 @@ private struct ExploreMockTransport: HTTPTransport {
 }
 
 struct BookExploreServiceTests {
+    @Test func resolvesDynamicAndLoginHeadersBeforeExploreRequest() async throws {
+        var source = BookSource(bookSourceUrl: "https://explore-headers.example", bookSourceName: "登录发现")
+        source.header = #"@js:JSON.stringify({'X-Static':'base','X-Dynamic':'script'})"#
+        source.ruleExplore = .init(bookList: "$.books", name: "$.name", bookUrl: "$.url")
+        BookSourceRuntimeStore.shared.put(sourceID: source.id, key: "loginHeader", value: #"{"X-Static":"login","X-Session":"authenticated"}"#)
+        defer { BookSourceRuntimeStore.shared.put(sourceID: source.id, key: "loginHeader", value: "") }
+        let transport = ExploreMockTransport(
+            pages: ["https://explore-headers.example/hot?page=2": #"{"books":[{"name":"登录后的榜单","url":"/1"}]}"#],
+            expectedHeaders: ["X-Static": "login", "X-Dynamic": "script", "X-Session": "authenticated", "X-Option": "request"]
+        )
+        let kind = ExploreKind(title: "热门", url: #"/hot?page={{page}},{"headers":{"X-Option":"request"}}"#)
+
+        let outcome = await BookExploreService(transport: transport).explore(source: source, kind: kind, page: 2)
+
+        #expect(outcome.diagnostics.isEmpty)
+        #expect(outcome.books.first?.name == "登录后的榜单")
+    }
+
+    @Test func exposesEarlierBookFieldsAndVariablesToLaterExploreRules() async throws {
+        var source = BookSource(bookSourceUrl: "https://explore-context.example", bookSourceName: "上下文发现")
+        source.ruleExplore = .init(
+            bookList: "$.books", name: "$.name", author: "@js:book.name + '-author'",
+            intro: "@js:book.author + ':' + book.latestChapterTitle",
+            kind: "$.kind", lastChapter: "@js:book.wordCount + '-words'",
+            bookUrl: "@js:'/book/' + book.name + '?cover=' + book.coverUrl + '&token=' + java.get('token')",
+            coverUrl: "@js:java.put('token', book.kind + '-' + book.wordCount); '/cover/' + book.name + '-' + page",
+            wordCount: "@js:book.kind == 'fiction' ? '120' : '60'"
+        )
+        let transport = ExploreMockTransport(pages: [
+            "https://explore-context.example/hot": #"{"books":[{"name":"first","kind":"fiction"},{"name":"second","kind":"history"}]}"#
+        ])
+
+        let outcome = await BookExploreService(transport: transport).explore(source: source, kind: .init(title: "热门", url: "/hot"), page: 2)
+
+        #expect(outcome.diagnostics.isEmpty)
+        #expect(outcome.books.map(\.intro) == ["first-author:120-words", "second-author:60-words"])
+        #expect(outcome.books.map(\.variables) == [["token": "fiction-120"], ["token": "history-60"]])
+        #expect(outcome.books.map(\.bookURL) == [
+            "https://explore-context.example/book/first?cover=https://explore-context.example/cover/first-2&token=fiction-120",
+            "https://explore-context.example/book/second?cover=https://explore-context.example/cover/second-2&token=history-60"
+        ])
+    }
+
     @Test func parsesLegacyAndJavaScriptExploreKinds() async {
         var legacy = BookSource(bookSourceUrl: "https://example.test", bookSourceName: "传统发现")
         legacy.exploreUrl = "热门::/hot?page={{page}}&&完结::/finished?page={{page}}\n新书::/new"

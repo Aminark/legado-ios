@@ -61,6 +61,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>legado</string>
+				<string>yuedu</string>
 			</array>
 		</dict>
 	</array>

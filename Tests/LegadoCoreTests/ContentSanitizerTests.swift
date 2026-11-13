@@ -1,7 +1,97 @@
+import Foundation
 import Testing
 @testable import LegadoCore
 
 struct ContentSanitizerTests {
+    @Test(arguments: [false, true]) func paragraphResegmentationPreservesImageMarkupAndSignedURL(enabled: Bool) {
+        var book = Book(bookUrl: "book", name: "书")
+        book.readConfig = BookReadConfig()
+        book.readConfig?.reSegment = enabled
+        let chapter = BookChapter(url: "chapter", title: "第一章", bookUrl: book.bookUrl, index: 0)
+        let image = #"<img src="https://images.example.test/formula~large.png?token=one&amp;size=2">"#
+        let input = "图片前正文。\n" + image + "\n图片后正文。"
+
+        let report = ContentSanitizer().process(book: book, chapter: chapter, content: input, rules: [])
+
+        #expect(report.content.contains(image))
+        #expect(report.content.contains("图片前正文。"))
+        #expect(report.content.contains("图片后正文。"))
+        #expect(!report.content.contains("formula-large"))
+        #expect(report.diagnostics.isEmpty)
+    }
+
+    @Test func imageBoundariesKeepMarkupOrderAndFollowingTitleLikeText() {
+        var book = Book(bookUrl: "book", name: "书")
+        book.readConfig = BookReadConfig()
+        book.readConfig?.reSegment = true
+        let chapter = BookChapter(url: "chapter", title: "第一章", bookUrl: book.bookUrl, index: 0)
+        let first = #"<img src="https://images.test/a~small.png">"#
+        let second = "<IMG\n src='https://images.test/b?x=1&amp;y=2' alt='x > y'/>"
+        let input = first + "\n第一章\n她说：\"来了。\"\n" + second
+
+        let report = ContentSanitizer().process(book: book, chapter: chapter, content: input, rules: [])
+        let repeated = ContentSanitizer().process(book: book, chapter: chapter, content: input, rules: [])
+
+        #expect(report.content.hasPrefix(first + "\n第一章"))
+        #expect(report.content.hasSuffix(second))
+        #expect(report.content.contains("来了。"))
+        #expect(report.content == repeated.content)
+    }
+
+    @Test func explicitContentReplacementStillAppliesAfterImageProtection() {
+        var book = Book(bookUrl: "book", name: "书")
+        book.readConfig = BookReadConfig()
+        book.readConfig?.reSegment = true
+        let chapter = BookChapter(url: "chapter", title: "第一章", bookUrl: book.bookUrl, index: 0)
+        var replace = ReplaceRule(id: 999, name: "用户地址修正", pattern: "~", replacement: "-")
+        replace.isRegex = false
+        replace.scopeContent = true
+        let report = ContentSanitizer().process(book: book, chapter: chapter,
+            content: #"<img src="https://images.test/a~small.png">"#, rules: [replace])
+
+        #expect(report.content == #"<img src="https://images.test/a-small.png">"#)
+        #expect(report.effectiveRuleIDs == [999])
+    }
+
+    @Test func missingImageSourceDoesNotConsumeAdjacentBodyOrCreatePlaceholderURL() throws {
+        let base = try #require(URL(string: "https://images.test/chapter"))
+        let html = #"<p>前文。</p><img alt='a > b'><p>中间。</p><img src=""><p>后文。</p>"#
+        let result = ChapterHTMLFormatter().format(html, baseURL: base)
+
+        #expect(!result.contains("<img"))
+        #expect(!result.contains("LEGADO_IMAGE_"))
+        #expect(result.components(separatedBy: .newlines).filter { !$0.isEmpty } == ["前文。", "中间。", "后文。"])
+    }
+
+    @Test func removesDuplicateTitlePrefixWithoutDroppingFollowingBodyOnSameLine() {
+        let book = Book(bookUrl: "book", name: "测试书")
+        let chapter = BookChapter(url: "1", title: "第一章 开始", bookUrl: book.bookUrl, index: 0)
+        let report = ContentSanitizer().process(book: book, chapter: chapter,
+            content: "《测试书》第一章  开始 正文第一句。\n后续正文。", rules: [])
+        #expect(report.content == "正文第一句。\n后续正文。")
+        #expect(report.removedDuplicateTitle)
+    }
+
+    @Test func removesReplacedTitlePrefixAndEscapesTitleMetacharacters() {
+        let book = Book(bookUrl: "book", name: "测试书")
+        let chapter = BookChapter(url: "1", title: "[1] 起点+", bookUrl: book.bookUrl, index: 0)
+        var rule = ReplaceRule(id: 1, name: "标题", pattern: "起点", replacement: "出发")
+        rule.isRegex = false
+        rule.scopeTitle = true
+        rule.scopeContent = false
+        let report = ContentSanitizer().process(book: book, chapter: chapter,
+            content: "[1] 出发+正文仍在。", rules: [rule])
+        #expect(report.content == "正文仍在。")
+        #expect(report.removedDuplicateTitle)
+    }
+
+    @Test func emptyTitlesDoNotRemovePunctuationOnlyParagraphs() {
+        let book = Book(bookUrl: "book", name: "书")
+        let chapter = BookChapter(url: "1", title: "", bookUrl: book.bookUrl, index: 0)
+        let report = ContentSanitizer().process(book: book, chapter: chapter, content: "……\n正文。", rules: [])
+        #expect(report.content == "……\n正文。")
+        #expect(!report.removedDuplicateTitle)
+    }
     @Test func metadataCleanerRemovesHTMLDecodesEntitiesAndKeepsParagraphs() {
         let input = "<p>第一段&nbsp;文字</p><div>第二段<br>换行</div><script>bad()</script>"
 

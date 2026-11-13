@@ -239,14 +239,27 @@ final class RSSLibraryModel: ObservableObject {
             return policy.mode(article: article, source: source)
         }
         do {
-            let content = try await service.content(article: article, rule: rule, source: source)
-            var updated = article
+            let fetched = try await service.contentDetailed(article: article, rule: rule, source: source)
+            let content = fetched.content
+            var updated = fetched.article
             if article.type == 0 {
                 updated.description = content
-                try await articleRepository.put([updated])
+                // Scripts can adjust their working URL and source context, but
+                // a content refresh updates the entry the user opened. It must
+                // not move primary keys or overwrite another cached article.
+                var persisted = updated
+                persisted.origin = article.origin
+                persisted.sort = article.sort
+                persisted.link = article.link
+                try await articleRepository.put([persisted])
                 if var star = try await starRepository.star(origin: article.origin, link: article.link) {
-                    star.description = content; try await starRepository.save(star); stars = try await starRepository.all()
+                    star.description = content
+                    star.variable = updated.variable
+                    try await starRepository.save(star)
+                    stars = try await starRepository.all()
                 }
+                if let index = articles.firstIndex(where: { $0.id == article.id }) { articles[index] = persisted }
+                return .html(content: content, baseURL: source.loadWithBaseUrl ? fetched.finalURL : nil)
             }
             return policy.mode(article: updated, source: source, resolvedContent: content)
         } catch {

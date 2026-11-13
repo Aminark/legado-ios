@@ -5,6 +5,126 @@ import LegadoCore
 
 @MainActor
 struct LocalFileManagementTests {
+    @Test func localImportUsesLatestManagedTocRulesAndPersistsTheSelection() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("自定义标题.txt")
+        let body = String(repeating: "a", count: 1_100)
+        try Data("段1\n\(body)\n段2\n\(body)\n段3\n\(body)".utf8).write(to: source)
+        let database = try LegadoDatabase(url: root.appendingPathComponent("rules.sqlite3"))
+        let rules = SQLiteConfigurationRepository(database: database)
+        let rule = TxtTocRule(id: 1, name: "自定义段落", rule: #"(?m)^段\d$"#, replacement: "result + ' 自定义'")
+        try await rules.saveTxtTocRules([rule])
+        let shelf = InMemoryBookRepository()
+        let model = BookLibraryModel(repository: shelf, localDirectory: root.appendingPathComponent("library"),
+                                     chapterRepository: InMemoryBookChapterRepository(), txtTocRuleRepository: rules)
+        await model.load()
+        await model.importLocalFiles([source])
+        let imported = try #require(model.books.first)
+        #expect(imported.tocUrl == rule.rule + TxtTocRuleSelector.separator + rule.replacement)
+        #expect(imported.totalChapterNum == 3)
+        #expect(try LocalBookService().loadChapters(book: imported).chapters.map(\.title) == ["段1 自定义", "段2 自定义", "段3 自定义"])
+        var disabled = rule
+        disabled.enable = false
+        try await rules.saveTxtTocRules([disabled])
+        await model.importLocalFiles([source])
+        #expect(model.books.last?.totalChapterNum == 1)
+        #expect(await shelf.load() == model.books)
+        #expect(model.errorMessage == nil)
+    }
+
+    @Test func rebuildingCommitsSQLiteDirectoryAndKeepsFileIdentityAndUnrelatedCache() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("目录重建.txt")
+        let data = Data("第一章\n正文甲\n第二章\n正文乙".utf8)
+        try data.write(to: file)
+        let original = try LocalBookService().openTextFile(at: file)
+        var reading = original.book
+        reading.durChapterIndex = 1
+        reading.durChapterTitle = original.chapters[1].title
+        reading.durChapterPos = 4
+        reading.group = 8
+        let database = try LegadoDatabase(url: root.appendingPathComponent("shelf.sqlite3"))
+        let books = SQLiteBookRepository(database: database)
+        let chapters = SQLiteBookChapterRepository(database: database)
+        try await books.save([reading])
+        try await chapters.save(original.chapters, bookURL: reading.bookUrl)
+        let cache = ChapterContentCache(directory: root.appendingPathComponent("cache"))
+        try await cache.save(.init(bookURL: reading.bookUrl, chapterURL: "old", content: "旧正文"))
+        try await cache.save(.init(bookURL: "unrelated", chapterURL: "kept", content: "别本书正文"))
+        let model = BookLibraryModel(repository: books, localDirectory: root, chapterRepository: chapters, chapterCache: cache)
+        await model.load()
+        #expect(await model.rebuildLocalBook(bookURL: reading.bookUrl, rule: .init(name: "无标题", rule: ""), splitLongChapter: false))
+        let rebuilt = try #require(model.books.first)
+        #expect(model.books.count == 1 && rebuilt.bookUrl == reading.bookUrl && rebuilt.group == 8)
+        #expect(rebuilt.totalChapterNum == 1 && rebuilt.durChapterIndex == 0)
+        #expect(try await books.load() == model.books)
+        #expect(try await chapters.load(bookURL: rebuilt.bookUrl) == LocalBookService().loadChapters(book: rebuilt).chapters)
+        #expect(try await cache.load(bookURL: reading.bookUrl, chapterURL: "old") == nil)
+        #expect(try await cache.load(bookURL: "unrelated", chapterURL: "kept")?.content == "别本书正文")
+        #expect(try Data(contentsOf: file) == data)
+        #expect(try await model.localFiles.list().filter { $0.url.pathExtension == "txt" }.count == 1)
+    }
+
+    @Test func failedRebuildRestoresOriginalDirectoryProgressAndCache() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("目录失败.txt")
+        let data = Data("第一章\n正文甲\n第二章\n正文乙".utf8)
+        try data.write(to: file)
+        let original = try LocalBookService().openTextFile(at: file)
+        var reading = original.book
+        reading.durChapterIndex = 1
+        reading.durChapterPos = 4
+        let books = FileOperationFailingRepository(books: [reading])
+        let chapters = InMemoryBookChapterRepository(values: [reading.bookUrl: original.chapters])
+        let cache = ChapterContentCache(directory: root.appendingPathComponent("cache"))
+        try await cache.save(.init(bookURL: reading.bookUrl, chapterURL: "old", content: "旧正文"))
+        let model = BookLibraryModel(repository: books, localDirectory: root, chapterRepository: chapters, chapterCache: cache)
+        await model.load()
+        #expect(!(await model.rebuildLocalBook(bookURL: reading.bookUrl, rule: .init(name: "无标题", rule: ""), splitLongChapter: false)))
+        #expect(model.books == [reading])
+        #expect(await chapters.load(bookURL: reading.bookUrl) == original.chapters)
+        #expect(try await cache.load(bookURL: reading.bookUrl, chapterURL: "old")?.content == "旧正文")
+        #expect(try Data(contentsOf: file) == data)
+        #expect(model.errorMessage != nil)
+    }
+
+    @Test func invalidRebuildRuleAndMissingBookDoNotPersistChanges() async throws {
+        let (root, book, model) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(!(await model.rebuildLocalBook(bookURL: book.bookUrl, rule: .init(name: "错误规则", rule: "["), splitLongChapter: true)))
+        #expect(model.books == [book])
+        #expect(model.errorMessage != nil)
+        #expect(!(await model.rebuildLocalBook(bookURL: "missing", rule: nil, splitLongChapter: true)))
+        #expect(model.books == [book])
+    }
+
+    @Test func cancelledRebuildDoesNotSaveDirectoryOrReadingProgress() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("取消重建.txt")
+        try Data("第一章\n正文甲\n第二章\n正文乙".utf8).write(to: file)
+        let original = try LocalBookService().openTextFile(at: file)
+        let chapters = RebuildGateChapterRepository(chapters: original.chapters)
+        let books = InMemoryBookRepository(books: [original.book])
+        let model = BookLibraryModel(repository: books, localDirectory: root, chapterRepository: chapters)
+        await model.load()
+        let rebuild = Task { await model.rebuildLocalBook(bookURL: original.book.bookUrl, rule: .init(name: "无标题", rule: ""), splitLongChapter: false) }
+        await chapters.waitForLoad()
+        rebuild.cancel()
+        await chapters.resumeLoad()
+        #expect(!(await rebuild.value))
+        #expect(model.books == [original.book])
+        #expect(await books.load() == [original.book])
+        #expect(await chapters.saveCount == 0)
+    }
+
     @Test func pickedTXTImportsButJSONFilesCannotBecomeLocalBooks() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -139,4 +259,27 @@ private actor FileOperationFailingRepository: BookRepository {
     init(books: [Book]) { self.books = books }
     func load() -> [Book] { books }
     func save(_ books: [Book]) throws { throw CocoaError(.fileWriteOutOfSpace) }
+}
+
+
+private actor RebuildGateChapterRepository: BookChapterRepository {
+    let chapters: [BookChapter]
+    var saveCount = 0
+    private var loadStarted = false
+    private var signal: CheckedContinuation<Void, Never>?
+    private var continuation: CheckedContinuation<Void, Never>?
+    init(chapters: [BookChapter]) { self.chapters = chapters }
+    func load(bookURL: String) async -> [BookChapter] {
+        loadStarted = true
+        signal?.resume()
+        signal = nil
+        await withCheckedContinuation { continuation = $0 }
+        return chapters
+    }
+    func waitForLoad() async {
+        if !loadStarted { await withCheckedContinuation { signal = $0 } }
+    }
+    func resumeLoad() { continuation?.resume(); continuation = nil }
+    func save(_ chapters: [BookChapter], bookURL: String) { saveCount += 1 }
+    func remove(bookURL: String) {}
 }

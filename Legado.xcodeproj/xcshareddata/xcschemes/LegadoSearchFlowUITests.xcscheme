@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="2610" version="1.7">
+  <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES"><BuildActionEntries><BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="B50000000000000000000050" BuildableName="LegadoReaderUITests.xctest" BlueprintName="LegadoReaderUITests" ReferencedContainer="container:Legado.xcodeproj"/></BuildActionEntry></BuildActionEntries></BuildAction>
+  <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="NO">
+    <Testables><TestableReference skipped="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="B50000000000000000000050" BuildableName="LegadoReaderUITests.xctest" BlueprintName="LegadoReaderUITests" ReferencedContainer="container:Legado.xcodeproj"/><SelectedTests><Test Identifier="RuleEditorUITests/testOnlineSourceImportAndSearchPaginationReachReader()"/></SelectedTests></TestableReference></Testables>
+    <EnvironmentVariables><EnvironmentVariable key="LEGADO_SEARCH_FLOW_FIXTURE_URL" value="http://127.0.0.1:18764/source.json" isEnabled="YES"/></EnvironmentVariables>
+  </TestAction>
+</Scheme>

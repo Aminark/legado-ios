@@ -159,6 +159,35 @@ struct SourceNetworkPolicyTests {
         #expect(response.requestVariables["bodyChanged"] == "yes")
     }
 
+    @Test(arguments: [false, true]) func webScriptAloneDoesNotEnableWebViewAndBodyScriptStillRuns(explicitlyDisabled: Bool) async throws {
+        let url = try #require(URL(string: "https://plain-http.test/content"))
+        let options = explicitlyDisabled ? #"{"webView":false,"webJs":"throw new Error('must not run')","bodyJs":"result + '-body'"}"#
+            : #"{"webJs":"throw new Error('must not run')","bodyJs":"result + '-body'"}"#
+        let prepared = try LegadoURLBuilder().prepare(url.absoluteString + "," + options)
+        let transport = RecordingPolicyTransport(results: [.success(.init(data: Data("HTTP".utf8), statusCode: 200, headers: [:], finalURL: url))])
+        let executor = await RecordingWebViewExecutor(response: .init(data: Data("wrong".utf8), statusCode: 200, headers: [:], finalURL: url))
+        let result = try await SourceNetworkPolicy().execute(prepared, source: .init(bookSourceUrl: "source", bookSourceName: "源"),
+            transport: transport, timeout: 1, webViewExecutor: executor)
+        #expect(result.decodedText == "HTTP-body")
+        #expect(await transport.requests().count == 1)
+        #expect(await executor.callCount == 0)
+    }
+
+    @Test func inactiveWebScriptDoesNotBlockDataURIOrStreamingHTTP() async throws {
+        let source = BookSource(bookSourceUrl: "source", bookSourceName: "源")
+        let data = try LegadoURLBuilder().prepare(#"data:text/plain,fixture,{"webJs":"throw new Error('ignored')","bodyJs":"result + '-body'"}"#)
+        let policy = SourceNetworkPolicy()
+        let result = try await policy.execute(data, source: source, transport: RecordingPolicyTransport(results: []), timeout: 1)
+        #expect(result.decodedText == "fixture-body")
+        let url = try #require(URL(string: "https://plain-http.test/stream"))
+        let stream = try LegadoURLBuilder().prepare(url.absoluteString + #",{"webJs":"throw new Error('ignored')"}"#)
+        let transport = RecordingStreamingTransport(url: url, chunks: [Data("a".utf8), Data("b".utf8)])
+        let streamed = try await policy.executeStream(stream, source: source, transport: transport, timeout: 1)
+        var received = Data()
+        for try await chunk in streamed.chunks { received.append(chunk) }
+        #expect(received == Data("ab".utf8))
+    }
+
     @Test func routesWebViewRequestsThroughExecutorAndStillAppliesBodyJS() async throws {
         let url = try #require(URL(string: "https://web.example/rendered"))
         let prepared = try LegadoURLBuilder().prepare(

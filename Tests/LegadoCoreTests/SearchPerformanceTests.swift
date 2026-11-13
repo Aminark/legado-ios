@@ -3,6 +3,28 @@ import Testing
 @testable import LegadoCore
 
 struct SearchPerformanceTests {
+    @Test func measuredSourceResponseTimeDoesNotBecomeARequestTimeout() async throws {
+        let transport = PerformanceSearchTransport()
+        let service = BookSearchService(transport: transport, networkPolicy: .init(), history: .init())
+        var measuredFast = source("measured-fast")
+        measuredFast.respondTime = 200
+        let untested = source("untested")
+        // Keep the user's explicit global timeout authoritative; do not mutate
+        // the shared settings just to make this regression deterministic.
+        let configuredTimeout = ApplicationSettingsStore.shared.settings.timeoutSeconds
+        let singleAllowance = configuredTimeout > 0 ? Double(configuredTimeout) : 30
+        let multiAllowance = configuredTimeout > 0 ? Double(configuredTimeout) : 8
+
+        _ = await service.search(keyword: "书", page: 1, source: measuredFast)
+        let single = try #require(await transport.requests().first)
+        #expect(single.timeoutInterval == singleAllowance)
+
+        _ = await service.search(keyword: "书", sources: [measuredFast, untested])
+        let multi = await transport.requests().dropFirst()
+        #expect(multi.count == 2)
+        #expect(multi.allSatisfy { $0.timeoutInterval == multiAllowance })
+    }
+
     @Test @MainActor func complexSourcesCannotOccupyEverySearchSlot() async throws {
         let webView = DelayedPerformanceWebView()
         var sources = (0..<8).map { source("web\($0)") }

@@ -7,12 +7,15 @@ public enum HTTPMethod: String, Codable, Sendable {
 }
 
 public struct URLTemplateContext: Sendable {
+    var cancellation: RuleExecutionCancellation?
+    var nestedRuleDepth = 0
     public var key: String?
     public var page: Int?
     public var variables: [String: String]
     public var source: BookSource?
     public var book: Book?
     public var chapter: BookChapter?
+    public var rssArticle: RssArticle?
 
     public init(
         key: String? = nil,
@@ -20,14 +23,16 @@ public struct URLTemplateContext: Sendable {
         variables: [String: String] = [:],
         source: BookSource? = nil,
         book: Book? = nil,
-        chapter: BookChapter? = nil
+        chapter: BookChapter? = nil,
+        rssArticle: RssArticle? = nil
     ) {
         self.key = key
         self.page = page
-        self.variables = variables
+        self.variables = rssArticle?.variableMap.merging(variables) { _, current in current } ?? variables
         self.source = source
         self.book = book
         self.chapter = chapter
+        self.rssArticle = rssArticle
     }
 
     fileprivate func value(for expression: String) -> String? {
@@ -42,6 +47,9 @@ public struct URLTemplateContext: Sendable {
 public struct PreparedRequest: Sendable {
     public var suppressesUserAgent: Bool
     public var ruleURL: String
+    /// Expanded URL rule including options, for replaying a detail page that
+    /// arrived through search without re-running key/page template scripts.
+    public var resolvedRuleURL: String
     public var url: URL
     public var method: HTTPMethod
     public var headers: [String: String]
@@ -50,6 +58,10 @@ public struct PreparedRequest: Sendable {
     public var retry: Int
     public var useWebView: Bool
     public var webJavaScript: String?
+    /// Content-rule resource URL matcher, used only for a WebView request.
+    public var sourceRegex: String?
+    /// A POST response fetched by the configured transport for WebView parsing.
+    public var webViewHTML: String?
     public var bodyJavaScript: String?
     public var webViewDelayMilliseconds: Int
     public var responseType: String?
@@ -61,6 +73,7 @@ public struct PreparedRequest: Sendable {
     public var page: Int?
     public var book: Book?
     public var chapter: BookChapter?
+    public var rssArticle: RssArticle?
 
     public init(
         ruleURL: String,
@@ -83,10 +96,15 @@ public struct PreparedRequest: Sendable {
         page: Int? = nil,
         book: Book? = nil,
         chapter: BookChapter? = nil,
-        suppressesUserAgent: Bool = false
+        rssArticle: RssArticle? = nil,
+        suppressesUserAgent: Bool = false,
+        resolvedRuleURL: String? = nil,
+        sourceRegex: String? = nil,
+        webViewHTML: String? = nil
     ) {
         self.suppressesUserAgent = suppressesUserAgent
         self.ruleURL = ruleURL
+        self.resolvedRuleURL = resolvedRuleURL ?? ruleURL
         self.url = url
         self.method = method
         self.headers = headers
@@ -95,6 +113,8 @@ public struct PreparedRequest: Sendable {
         self.retry = retry
         self.useWebView = useWebView
         self.webJavaScript = webJavaScript
+        self.sourceRegex = sourceRegex
+        self.webViewHTML = webViewHTML
         self.bodyJavaScript = bodyJavaScript
         self.webViewDelayMilliseconds = webViewDelayMilliseconds
         self.responseType = responseType
@@ -106,6 +126,7 @@ public struct PreparedRequest: Sendable {
         self.page = page
         self.book = book
         self.chapter = chapter
+        self.rssArticle = rssArticle
     }
 
     public func urlRequest(timeout: TimeInterval = 30, handleCookies: Bool = true) -> URLRequest {
@@ -127,7 +148,9 @@ public struct PreparedRequest: Sendable {
 public struct LegadoURLBuilder: Sendable {
     public static let defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
-    public init() {}
+    var rssVariableStore: RSSVariableStore
+
+    public init(rssVariableStore: RSSVariableStore = .shared) { self.rssVariableStore = rssVariableStore }
 
     public static func resolve(_ value: String, against baseURL: URL) -> String {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -152,7 +175,9 @@ public struct LegadoURLBuilder: Sendable {
         baseURL: URL? = nil,
         defaultHeaders: [String: String] = [:]
     ) throws -> PreparedRequest {
+        var context = context
         let renderedResult = try renderResult(template, context: context, baseURL: baseURL)
+        context.rssArticle = renderedResult.rssArticle
         let rendered = renderedResult.text
         let parsed = try parseOptions(rendered, rule: template)
         let options = parsed.options
@@ -168,6 +193,7 @@ public struct LegadoURLBuilder: Sendable {
             )
             urlText = evaluated.value.stringValue
             variables = evaluated.variables
+            context.rssArticle = evaluated.rssArticle ?? context.rssArticle
         }
         let charsetEncoding = options.charset.flatMap(HTTPTextDecoder.encoding(named:))
         let requestURLText = encodeQueryIfNeeded(urlText, encoding: charsetEncoding)
@@ -236,7 +262,9 @@ public struct LegadoURLBuilder: Sendable {
             page: context.page,
             book: context.book,
             chapter: context.chapter,
-            suppressesUserAgent: suppressesUserAgent
+            rssArticle: context.rssArticle,
+            suppressesUserAgent: suppressesUserAgent,
+            resolvedRuleURL: Self.resolve(rendered, against: baseURL ?? url)
         )
     }
 
@@ -289,7 +317,8 @@ public struct LegadoURLBuilder: Sendable {
         _ template: String,
         context: URLTemplateContext,
         baseURL: URL?
-    ) throws -> (text: String, variables: [String: String]) {
+    ) throws -> (text: String, variables: [String: String], rssArticle: RssArticle?) {
+        var context = context
         var variables = context.variables
         let segments = try evaluateJavaScriptSegments(
             template,
@@ -299,6 +328,7 @@ public struct LegadoURLBuilder: Sendable {
         )
         var result = segments.text
         variables = segments.variables
+        context.rssArticle = segments.rssArticle
         let inline = try NSRegularExpression(pattern: #"\{\{([\s\S]*?)\}\}"#)
         let matches = inline.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
         for match in matches {
@@ -318,6 +348,7 @@ public struct LegadoURLBuilder: Sendable {
                 )
                 value = evaluated.value.stringValue
                 variables = evaluated.variables
+                context.rssArticle = evaluated.rssArticle ?? context.rssArticle
             }
             result.replaceSubrange(fullRange, with: value)
         }
@@ -343,7 +374,7 @@ public struct LegadoURLBuilder: Sendable {
                 result.replaceSubrange(fullRange, with: selected)
             }
         }
-        return (result, variables)
+        return (result, variables, context.rssArticle)
     }
 
     private func evaluateJavaScriptSegments(
@@ -351,13 +382,14 @@ public struct LegadoURLBuilder: Sendable {
         context: URLTemplateContext,
         variables: [String: String],
         baseURL: URL?
-    ) throws -> (text: String, variables: [String: String]) {
+    ) throws -> (text: String, variables: [String: String], rssArticle: RssArticle?) {
+        var context = context
         let expression = try NSRegularExpression(
             pattern: #"<js>([\s\S]*?)</js>|@js:([\s\S]*)"#,
             options: .caseInsensitive
         )
         let matches = expression.matches(in: template, range: NSRange(template.startIndex..., in: template))
-        guard !matches.isEmpty else { return (template, variables) }
+        guard !matches.isEmpty else { return (template, variables, context.rssArticle) }
         var output = template
         var currentVariables = variables
         var cursor = template.startIndex
@@ -376,11 +408,12 @@ public struct LegadoURLBuilder: Sendable {
             )
             output = evaluated.value.stringValue
             currentVariables = evaluated.variables
+            context.rssArticle = evaluated.rssArticle ?? context.rssArticle
             cursor = matchRange.upperBound
         }
         let suffix = String(template[cursor...]).trimmingCharacters(in: .whitespacesAndNewlines)
         if !suffix.isEmpty { output = suffix.replacingOccurrences(of: "@result", with: output) }
-        return (output, currentVariables)
+        return (output, currentVariables, context.rssArticle)
     }
 
     private func evaluateJavaScript(
@@ -390,18 +423,20 @@ public struct LegadoURLBuilder: Sendable {
         variables: [String: String],
         baseURL: URL?
     ) throws -> JavaScriptRuleResult {
-        try JavaScriptRuleEvaluator().evaluate(
-            script: script,
-            result: result,
-            executionContext: .init(
+        var execution = RuleExecutionContext(
                 variables: variables,
                 baseURL: baseURL?.absoluteString ?? context.source?.bookSourceUrl ?? "",
                 key: context.key,
                 page: context.page,
                 source: context.source,
                 book: context.book,
-                chapter: context.chapter
+                chapter: context.chapter,
+                rssArticle: context.rssArticle
             )
+        execution.cancellation = context.cancellation
+        execution.nestedRuleDepth = context.nestedRuleDepth
+        return try JavaScriptRuleEvaluator(rssVariableStore: rssVariableStore).evaluate(
+            script: script, result: result, executionContext: execution
         )
     }
 

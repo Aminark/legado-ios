@@ -5,6 +5,29 @@ import LegadoCore
 
 @MainActor
 struct SearchRegressionTests {
+    @Test(arguments: ["@js:'/search?q=' + key + '&page=' + page", "<js>'/search?q=' + key + '&page=' + page</js>"])
+    func javaScriptURLWithoutTemplateMarkersCanLoadTheSecondPage(_ rule: String) async throws {
+        let transport = GatedModelSearchTransport()
+        await transport.release()
+        let model = model(transport: transport, repository: InMemorySearchBookRepository())
+        defer { model.cancel(reset: true) }
+        var source = source("scripted")
+        source.searchUrl = rule
+        model.search(keyword: "book", sources: [source])
+        try await waitUntil { model.state == .finished }
+        #expect(model.hasMore)
+
+        model.loadMore()
+        try await waitUntil { !model.isLoadingMore }
+
+        let requests = await transport.requests()
+        #expect(requests.compactMap(\.url).map(\.absoluteString) == [
+            "https://scripted.example/search?q=book&page=1",
+            "https://scripted.example/search?q=book&page=2"
+        ])
+        #expect(!model.hasMore)
+    }
+
     @Test func arithmeticPageExpressionCanLoadTheSecondPage() async throws {
         let transport = GatedModelSearchTransport()
         await transport.release()

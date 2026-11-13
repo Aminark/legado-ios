@@ -3,6 +3,44 @@ import Testing
 @testable import LegadoCore
 
 struct LegadoDatabaseTests {
+    @Test(arguments: [false, true]) func sourceSwitchTransactionRollsBackBothTablesWhenDirectoryFails(sameURL: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try LegadoDatabase(url: directory.appendingPathComponent("legado.sqlite3"))
+        let repository = SQLiteBookRepository(database: database)
+        let old = Book(bookUrl: "old", name: "书", origin: "old-source")
+        let oldChapters = [BookChapter(url: "old/1", title: "原目录", bookUrl: old.bookUrl, index: 0)]
+        try await repository.save([old])
+        try await database.replaceChapters(oldChapters, bookURL: old.bookUrl)
+        let replacement = Book(bookUrl: sameURL ? old.bookUrl : "new", name: old.name, origin: "new-source")
+        let duplicate = BookChapter(url: "new/1", title: "冲突目录", bookUrl: replacement.bookUrl, index: 0)
+        do {
+            // The second row violates the real chapter primary key, after the
+            // shelf replacement and first directory row have already executed.
+            try await repository.saveSourceSwitch([replacement], chapters: [duplicate, duplicate], bookURL: replacement.bookUrl)
+            Issue.record("Expected the duplicate chapter key to reject the transaction")
+        } catch {}
+        #expect(try await repository.load() == [old])
+        #expect(try await database.loadChapters(bookURL: old.bookUrl) == oldChapters)
+        if !sameURL { #expect(try await database.loadChapters(bookURL: replacement.bookUrl).isEmpty) }
+    }
+
+    @Test(arguments: [false, true]) func sourceSwitchTransactionStoresShelfAndDirectoryTogether(sameURL: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try LegadoDatabase(url: directory.appendingPathComponent("legado.sqlite3"))
+        let repository = SQLiteBookRepository(database: database)
+        let old = Book(bookUrl: "old", name: "书", origin: "old-source")
+        try await repository.save([old])
+        try await database.replaceChapters([.init(url: "old/1", title: "原目录", bookUrl: old.bookUrl, index: 0)], bookURL: old.bookUrl)
+        let replacement = Book(bookUrl: sameURL ? old.bookUrl : "new", name: old.name, origin: "new-source")
+        let chapters = [BookChapter(url: "new/1", title: "新目录", bookUrl: replacement.bookUrl, index: 0)]
+        try await repository.saveSourceSwitch([replacement], chapters: chapters, bookURL: replacement.bookUrl)
+        #expect(try await repository.load() == [replacement])
+        #expect(try await database.loadChapters(bookURL: replacement.bookUrl) == chapters)
+        if !sameURL { #expect(try await database.loadChapters(bookURL: old.bookUrl).isEmpty) }
+    }
+
     @Test func decodesBookAndChapterFieldsWithoutBreakingLegacyPayloads() throws {
         let payload = Data(#"""
         {

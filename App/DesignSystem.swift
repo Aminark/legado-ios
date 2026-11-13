@@ -414,3 +414,91 @@ struct StatusPill: View {
         .foregroundStyle(color)
     }
 }
+
+/// A persistent search field for management pages, including their empty states.
+struct ReadingPillSearchField: View {
+    let placeholder: String
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 20, weight: .regular))
+                .accessibilityHidden(true)
+            TextField(placeholder, text: $text)
+                .font(.system(size: 16))
+                .textInputAutocapitalization(.never)
+                .disableAutocorrection(true)
+                .submitLabel(.search)
+            if !text.isEmpty {
+                Button { text = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityLabel("清除搜索")
+                .frame(minWidth: 28, minHeight: 28)
+            }
+        }
+        .foregroundStyle(ReadingTheme.ink)
+        .padding(.horizontal, 18)
+        .frame(minHeight: 44)
+        .background(ReadingTheme.accentSoft, in: Capsule())
+        .padding(.horizontal, 20)
+        .padding(.top, 14)
+        .padding(.bottom, 8)
+    }
+}
+
+struct ReadingIllustratedEmptyState<Actions: View>: View {
+    let artwork: String
+    let title: String
+    let message: String
+    var bottomBalance: CGFloat = 88
+    @ViewBuilder var actions: Actions
+
+    var body: some View {
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 0) {
+                    Image(artwork)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 164, height: 128)
+                        .accessibilityHidden(true)
+                    Text(title)
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(ReadingTheme.ink)
+                        .padding(.top, 16)
+                        .accessibilityAddTraits(.isHeader)
+                    Text(message)
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 10)
+                    actions
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 24)
+                .padding(.bottom, bottomBalance + 24)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: geometry.size.height)
+            }
+            .readingScrollDismissesKeyboard()
+        }
+    }
+}
+
+struct ReadingSoftCard<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .background(ReadingTheme.surface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(ReadingTheme.separator.opacity(0.18), lineWidth: 0.5)
+            }
+            .shadow(color: .black.opacity(0.045), radius: 12, x: 0, y: 5)
+    }
+}

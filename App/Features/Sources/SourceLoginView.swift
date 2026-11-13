@@ -184,7 +184,7 @@ final class WKSourceWebViewExecutor: NSObject, SourceWebViewRequestExecuting, @u
 }
 
 @MainActor
-private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate {
+private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     private let prepared: PreparedRequest
     private let source: BookSource
     private let timeout: TimeInterval
@@ -194,6 +194,9 @@ private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate {
     private var responseHeaders: [String: String] = [:]
     private var completed = false
     private var timeoutTask: Task<Void, Never>?
+    private var evaluationTask: Task<Void, Never>?
+    private var sourcePattern: NSRegularExpression?
+    private var collectingResponse = false
 
     init(prepared: PreparedRequest, source: BookSource, timeout: TimeInterval) {
         self.prepared = prepared
@@ -202,12 +205,20 @@ private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.customUserAgent = prepared.headers.first { $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame }?.value
         super.init()
         webView.navigationDelegate = self
+        if prepared.sourceRegex != nil {
+            configuration.userContentController.addUserScript(.init(source: Self.resourceObserver,
+                injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        }
     }
 
     func run() async throws -> HTTPResponse {
-        try await withTaskCancellationHandler {
+        try Task.checkCancellation()
+        if let pattern = prepared.sourceRegex { sourcePattern = try NSRegularExpression(pattern: pattern) }
+        if sourcePattern != nil { webView.configuration.userContentController.add(self, name: "legadoResource") }
+        return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
                 installRequestCookies { [weak self] in self?.startLoading() }
@@ -218,13 +229,23 @@ private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate {
     }
 
     private func startLoading() {
+        guard !completed else { return }
         timeoutTask = Task { [weak self] in
             let seconds = min(max(self?.timeout ?? 30, 1), 300)
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            await MainActor.run { self?.finish(.failure(URLError(.timedOut))) }
+            guard let self else { return }
+            let error: Error
+            if let pattern = prepared.sourceRegex {
+                error = RuleEngineError.invalidInput(rule: pattern, expected: "WebView 在超时前未找到匹配的可观察资源地址")
+            } else { error = URLError(.timedOut) }
+            finish(.failure(error))
         }
-        webView.load(prepared.urlRequest(timeout: timeout, handleCookies: true))
+        if let html = prepared.webViewHTML {
+            webView.loadHTMLString(html, baseURL: prepared.url)
+        } else {
+            webView.load(prepared.urlRequest(timeout: timeout, handleCookies: true))
+        }
     }
 
     private func installRequestCookies(completion: @escaping () -> Void) {
@@ -268,38 +289,106 @@ private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-        Task { [weak self] in
+        evaluationTask?.cancel()
+        evaluationTask = Task { [weak self] in
             guard let self else { return }
-            if prepared.webViewDelayMilliseconds > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(max(0, prepared.webViewDelayMilliseconds)) * 1_000_000)
-            }
-            guard !Task.isCancelled, !completed else { return }
-            if let script = prepared.webJavaScript, !script.isEmpty {
-                do { _ = try await webView.evaluateJavaScript(script) }
-                catch { finish(.failure(error)); return }
-            }
             do {
-                let html = try await webView.evaluateJavaScript("document.documentElement.outerHTML") as? String ?? ""
-                let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
-                cookies.forEach(HTTPCookieStorage.shared.setCookie)
-                let cookieHeader = HTTPCookie.requestHeaderFields(with: cookies)["Cookie"] ?? ""
-                if !cookieHeader.isEmpty {
-                    await SourceNetworkPolicy.shared.setCookieHeader(cookieHeader, sourceID: source.id, url: prepared.url)
+                let defaultDelay = prepared.webJavaScript == nil ? 900 : 0
+                let delay = 100 + min(max(prepared.webViewDelayMilliseconds, defaultDelay), 300_000)
+                try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
+                guard !completed else { return }
+                if sourcePattern != nil {
+                    // Resource sniffing has priority over script output; the
+                    // script may start a media/fetch request after load.
+                    if let script = prepared.webJavaScript, !script.isEmpty {
+                        _ = try await webView.evaluateJavaScript(script)
+                    }
+                    return
                 }
-                var headers = responseHeaders
-                if !cookieHeader.isEmpty { headers["Set-Cookie"] = cookieHeader }
-                finish(.success(.init(
-                    data: Data(html.utf8),
-                    statusCode: responseStatus,
-                    headers: headers,
-                    finalURL: webView.url ?? prepared.url,
-                    requestedCharset: "utf-8"
-                )))
+                let script = prepared.webJavaScript.flatMap { $0.isEmpty ? nil : $0 }
+                    ?? "document.documentElement.outerHTML"
+                for attempt in 0...31 {
+                    try Task.checkCancellation()
+                    guard !completed else { return }
+                    let value = try await webView.evaluateJavaScript(script)
+                    if let value, !(value is NSNull) {
+                        let body: String
+                        if let string = value as? String { body = string }
+                        else {
+                            body = String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]), as: UTF8.self)
+                        }
+                        await deliver(body)
+                        return
+                    }
+                    guard attempt < 31 else { throw URLError(.timedOut) }
+                    try await Task.sleep(nanoseconds: UInt64(min(attempt + 1, 5) * 200) * 1_000_000)
+                }
             } catch {
+                guard !Task.isCancelled else { return }
                 finish(.failure(error))
             }
         }
     }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let address = message.body as? String else { return }
+        observeResource(address)
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
+        if prepared.webViewHTML == nil, let address = webView.url?.absoluteString { observeResource(address) }
+    }
+
+    private func observeResource(_ address: String) {
+        guard !completed, !collectingResponse, let pattern = sourcePattern else { return }
+        let range = NSRange(address.startIndex..., in: address)
+        guard pattern.firstMatch(in: address, range: range)?.range == range else { return }
+        collectingResponse = true
+        Task { [weak self] in await self?.deliver(address) }
+    }
+
+    private func deliver(_ body: String) async {
+        guard !completed else { return }
+        let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
+        guard !completed else { return }
+        let cookieHeader = HTTPCookie.requestHeaderFields(with: cookies)["Cookie"] ?? ""
+        var headers = responseHeaders
+        if source.enabledCookieJar == true, !cookieHeader.isEmpty {
+            await SourceNetworkPolicy.shared.setCookieHeader(cookieHeader, sourceID: source.id, url: prepared.url)
+            headers["Set-Cookie"] = cookieHeader
+        }
+        finish(.success(.init(data: Data(body.utf8), statusCode: responseStatus, headers: headers,
+                              finalURL: webView.url ?? prepared.url, requestedCharset: "utf-8")))
+    }
+
+    // Public WK APIs do not expose every network request. Observe browser
+    // resource timing, dispatched fetch/XHR, and media load events, including
+    // frames. Native HLS segments, service-worker internals and DRM traffic
+    // cannot be promised; a missing match fails explicitly at the deadline.
+    private static let resourceObserver = #"""
+    (() => {
+        const send = value => {
+            try { if (value) window.webkit.messageHandlers.legadoResource.postMessage(new URL(String(value), document.baseURI).href); } catch (_) {}
+        };
+        try {
+            new PerformanceObserver(list => list.getEntries().forEach(entry => send(entry.name))).observe({type:'resource', buffered:true});
+        } catch (_) {}
+        const originalFetch = window.fetch;
+        if (originalFetch) window.fetch = function(input, init) {
+            const result = originalFetch.apply(this, arguments);
+            send(typeof input === 'string' || input instanceof URL ? input : input.url);
+            return result;
+        };
+        const open = XMLHttpRequest.prototype.open, transmit = XMLHttpRequest.prototype.send;
+        const addresses = new WeakMap();
+        XMLHttpRequest.prototype.open = function(method, url) { const result = open.apply(this, arguments); addresses.set(this, url); return result; };
+        XMLHttpRequest.prototype.send = function() { const result = transmit.apply(this, arguments); send(addresses.get(this)); return result; };
+        document.addEventListener('loadstart', event => {
+            if (event.target instanceof HTMLMediaElement) send(event.target.currentSrc || event.target.src);
+        }, true);
+        window.addEventListener('load', () => performance.getEntriesByType('resource').forEach(entry => send(entry.name)));
+    })();
+    """#
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
         finish(.failure(error))
@@ -313,6 +402,9 @@ private final class BackgroundWebViewRequest: NSObject, WKNavigationDelegate {
         guard !completed else { return }
         completed = true
         timeoutTask?.cancel()
+        evaluationTask?.cancel()
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "legadoResource")
+        webView.navigationDelegate = nil
         webView.stopLoading()
         continuation?.resume(with: result)
         continuation = nil

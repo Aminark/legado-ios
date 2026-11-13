@@ -123,6 +123,12 @@ public struct RssSource: Codable, Hashable, Identifiable, Sendable {
 }
 
 public struct RssArticle: Codable, Hashable, Identifiable, Sendable {
+    // Evaluation-only storage identity and pending large values. Never encoded
+    // into imported/exported article data or used for article equality.
+    var ruleVariableState: RSSVariableState?
+    private enum CodingKeys: String, CodingKey {
+        case origin, sort, title, order, link, pubDate, description, content, image, group, read, variable, type, durPos
+    }
     public var origin = ""
     public var sort = ""
     public var title = ""

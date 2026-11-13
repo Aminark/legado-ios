@@ -53,13 +53,18 @@ struct BookDetailView: View {
                     }
                     Button("刷新", systemImage: "arrow.clockwise") {
                         Task {
+                            let requestedBook = model.book
                             let oldURL = model.book.bookUrl
                             let wasInLibrary = library.contains(model.book)
-                            await model.refresh(sources: sourceLibrary.sources)
-                            if wasInLibrary, oldURL != model.book.bookUrl {
-                                await library.replace(oldBookURL: oldURL, with: model.book)
-                            } else if wasInLibrary {
-                                await saveCurrentBook()
+                            await model.refresh(sources: sourceLibrary.sources, persistDirectory: false, commitSourceSwitch: { report in
+                                guard wasInLibrary else { return true }
+                                return await library.commitSourceSwitch(oldBookURL: oldURL, report: report)
+                            }, commitPreparedUpdate: { report in
+                                guard wasInLibrary else { return true }
+                                return await library.commitPreparedUpdate(requestedBook: requestedBook, report: report)
+                            })
+                            if wasInLibrary, oldURL == model.book.bookUrl, model.state == .ready {
+                                await saveLoadedDirectory()
                             }
                         }
                     }
@@ -94,16 +99,21 @@ struct BookDetailView: View {
             if let stored = library.books.first(where: { $0.bookUrl == oldURL }) {
                 model.restoreLibraryBook(from: stored, sources: sourceLibrary.sources)
             }
-            await model.load(sources: sourceLibrary.sources)
+            let requestedBook = model.book
+            await model.load(sources: sourceLibrary.sources, persistDirectory: false, runPreUpdateScript: shouldPersistUpdate, commitSourceSwitch: { report in
+                guard shouldPersistUpdate else { return true }
+                return await library.commitSourceSwitch(oldBookURL: oldURL, report: report)
+            }, commitPreparedUpdate: { report in
+                guard shouldPersistUpdate else { return true }
+                return await library.commitPreparedUpdate(requestedBook: requestedBook, report: report)
+            })
             if shouldPersistUpdate {
                 if let stored = library.books.first(where: { $0.bookUrl == model.book.bookUrl }) {
                     model.restoreUserSettings(from: stored)
                     model.restoreReadingProgress(from: stored)
                 }
-                if oldURL != model.book.bookUrl {
-                    await library.replace(oldBookURL: oldURL, with: model.book)
-                } else {
-                    await saveCurrentBook()
+                if oldURL == model.book.bookUrl, model.state == .ready {
+                    await saveLoadedDirectory()
                 }
             }
         }
@@ -111,8 +121,11 @@ struct BookDetailView: View {
             ReadingNavigationStack {
                 SourceSwitchView(book: model.book, sources: sourceLibrary.sources) { report, source in
                     let oldURL = model.book.bookUrl
+                    if library.contains(model.book) {
+                        guard await library.commitSourceSwitch(oldBookURL: oldURL, report: report) else { return false }
+                    }
                     model.applySourceSwitch(report, source: source)
-                    Task { await library.replace(oldBookURL: oldURL, with: report.book) }
+                    return true
                 }
             }
         }
@@ -227,6 +240,13 @@ struct BookDetailView: View {
         await library.addOrUpdate(model.book)
         if let stored = library.books.first(where: { $0.bookUrl == model.book.bookUrl }) {
             model.restoreReadingProgress(from: stored)
+        }
+    }
+
+    private func saveLoadedDirectory() async {
+        let report = BookSourceSwitchReport(book: model.book, chapters: model.chapters, exactChapterMatch: true)
+        if !(await library.commitSourceSwitch(oldBookURL: model.book.bookUrl, report: report)) {
+            model.reportDirectorySaveFailure(library.errorMessage)
         }
     }
 

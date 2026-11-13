@@ -3,6 +3,62 @@ import Testing
 @testable import LegadoCore
 
 struct RSSRegressionTests {
+    @Test func contentRulesReceiveVariablesProducedByTheArticleRequest() async throws {
+        let source = RssSource(sourceUrl: "https://request-variables.test", sourceName: "请求变量")
+        var article = RssArticle(
+            origin: source.sourceUrl, sort: "全部", title: "文章",
+            link: "@js:java.put('token', 'fresh'); '/article'"
+        )
+        article.variable = #"{"token":"old","shared":"kept"}"#
+        let service = RSSService(transport: RSSFixtureTransport(body: "<p>正文</p>"), networkPolicy: .init())
+
+        let result = try await service.contentDetailed(
+            article: article,
+            rule: "@js:java.get('token') + ':' + java.get('shared')",
+            source: source
+        )
+
+        #expect(result.content == "fresh:kept")
+        #expect(result.requestURL == "https://request-variables.test/article")
+        #expect(result.diagnostics.isEmpty)
+        #expect(article.variableMap["token"] == "old")
+    }
+
+    @Test func nextPageVariablesReachEachArticleWithoutLeakingBetweenArticles() async throws {
+        var source = RssSource(sourceUrl: "https://next-variables.test", sourceName: "下一页变量")
+        source.ruleArticles = "$.items"
+        source.ruleNextPage = "@js:java.put('token', 'page-token'); '/page/2'"
+        source.ruleTitle = "$.title"
+        source.ruleLink = "@js:var previous = java.get('article'); java.put('article', 'private'); '/article/' + java.get('token') + (previous || '-clean')"
+
+        let report = try await RSSRuleParser().parse(
+            sortName: "全部", sortURL: "/page/1", redirectURL: source.sourceUrl + "/page/1",
+            body: #"{"items":[{"title":"甲"},{"title":"乙"}]}"#, source: source,
+            variables: ["shared": "kept"]
+        )
+
+        #expect(report.diagnostics.isEmpty)
+        #expect(report.result.articles.count == 2)
+        #expect(report.result.articles.allSatisfy { $0.link == source.sourceUrl + "/article/page-token-clean" })
+        #expect(report.result.articles.allSatisfy { $0.variableMap == ["token": "page-token", "shared": "kept", "article": "private"] })
+    }
+
+    @Test func regexArticleListsKeepCaptureGroupsAndReverseWholeArticles() async throws {
+        var source = RssSource(sourceUrl: "https://regex-feed.test", sourceName: "正则文章")
+        source.ruleArticles = #"-:title=([^;]+);url=([^\n]+)"#
+        source.ruleTitle = "$1"
+        source.ruleLink = "$2"
+
+        let report = try await RSSRuleParser().parse(
+            sortName: "全部", sortURL: source.sourceUrl, redirectURL: source.sourceUrl,
+            body: "title=第一篇;url=/one\ntitle=第二篇;url=/two", source: source
+        )
+
+        #expect(report.diagnostics.isEmpty)
+        #expect(report.result.articles.map(\.title) == ["第二篇", "第一篇"])
+        #expect(report.result.articles.map(\.link) == [source.sourceUrl + "/two", source.sourceUrl + "/one"])
+    }
+
     @Test func concurrentSourceTogglesDoNotOverwriteOneAnother() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

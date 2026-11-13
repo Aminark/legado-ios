@@ -78,7 +78,11 @@ final class DarkModeUITests: XCTestCase {
         let visibleKeyboard = app.keyboards.firstMatch.frame.intersection(app.frame)
         if !visibleKeyboard.isNull && visibleKeyboard.width > 20 && visibleKeyboard.height > 20 {
             let keyboard = try luminances(app.keyboards.firstMatch, in: app)
-            XCTAssertLessThan(keyboard[keyboard.count / 2], 0.15)
+                // System keycaps vary by iOS version and input language. The
+                // lower quartile samples the background, while the median can
+                // land on the lighter keycaps of a correctly dark keyboard.
+                XCTAssertLessThan(keyboard[keyboard.count / 4], 0.15,
+                                  "System keyboard background should follow dark appearance")
         }
         let accessory = app.buttons["syntaxCodeEditor.done"]
         XCTAssertTrue(accessory.exists && accessory.isHittable)

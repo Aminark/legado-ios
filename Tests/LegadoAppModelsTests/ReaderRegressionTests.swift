@@ -5,6 +5,66 @@ import LegadoCore
 
 @MainActor
 struct ReaderRegressionTests {
+    @Test func resegmentationKeepsCachedImagesAcrossCurrentAdjacentAndContinuousContent() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var book = Book(bookUrl: "book", name: "书", origin: "source")
+        book.readConfig = BookReadConfig()
+        book.readConfig?.reSegment = true
+        let image = #"<img src="https://images.test/formula~large.png?key=one&amp;size=2">"#
+        let input = "图片前正文。\n" + image + "\n图片后正文。"
+        let chapters = (0..<3).map { BookChapter(url: "chapter\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        let cache = ChapterContentCache(directory: directory)
+        for chapter in chapters {
+            try await cache.save(.init(bookURL: book.bookUrl, chapterURL: chapter.url, content: input, sourceID: book.origin))
+        }
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 1,
+            source: .init(bookSourceUrl: book.origin, bookSourceName: "源"), service: SourceAwareReaderLoader(), cache: cache)
+
+        await model.load(rules: [], prefetchNextChapter: false)
+        #expect(model.content.contains(image))
+        await model.loadAdjacentChapters(rules: [])
+        #expect(model.previousContent.contains(image))
+        #expect(model.continuationContent.contains(image))
+        await model.prepareContinuousReading(rules: [])
+        #expect(model.scrollChapters.allSatisfy { $0.content.contains(image) })
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapters[1].url)?.content == input)
+    }
+
+    @Test func resegmentationUsesOriginalCacheAcrossReaderWindowsAndSpeechAndCanBeDisabled() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapters = (0..<3).map { BookChapter(url: "chapter\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        let cache = ChapterContentCache(directory: directory)
+        let loader = ResegmentationReaderLoader()
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 1,
+                                    source: .init(bookSourceUrl: "source", bookSourceName: "源"), service: loader, cache: cache)
+        await model.load(rules: [], prefetchNextChapter: false)
+        #expect(model.content == ResegmentationReaderLoader.original)
+        let generation = model.chapterLoadGeneration
+        let updated = model.toggleParagraphResegmentation(position: 5)
+        #expect(updated.readConfig?.reSegment == true)
+        #expect(try JSONDecoder().decode(Book.self, from: JSONEncoder().encode(updated)).readConfig?.reSegment == true)
+        #expect(model.chapterLoadGeneration > generation)
+        #expect(model.requestedPosition == 5)
+        await model.load(rules: [], prefetchNextChapter: false)
+        #expect(model.loadedFromCache)
+        #expect(model.content == ResegmentationReaderLoader.processed)
+        await model.loadAdjacentChapters(rules: [])
+        #expect(model.previousContent == ResegmentationReaderLoader.processed)
+        #expect(model.continuationContent == ResegmentationReaderLoader.processed)
+        #expect(await model.nextSpeechContent(rules: []) == ResegmentationReaderLoader.processed)
+        await model.prepareContinuousReading(rules: [])
+        #expect(model.scrollChapters.allSatisfy { $0.content == ResegmentationReaderLoader.processed })
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapters[1].url)?.content == ResegmentationReaderLoader.original)
+        model.toggleParagraphResegmentation()
+        #expect(model.scrollChapters.isEmpty)
+        await model.load(rules: [], prefetchNextChapter: false)
+        #expect(model.content == ResegmentationReaderLoader.original)
+        #expect(await loader.calls == 3)
+    }
+
     @Test func partialContentKeepsFailureVisibleAcrossContinuousChapters() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -394,6 +454,16 @@ struct ReaderRegressionTests {
         #expect(model.content == "正文4")
         #expect(model.scrollChapters.isEmpty)
         #expect(!model.isLoadingScrollAhead)
+    }
+}
+
+private actor ResegmentationReaderLoader: ChapterContentLoading {
+    static let original = "这是错\n误断开的正文。\n下一段。"
+    static let processed = "这是错误断开的正文。\n下一段。"
+    var calls = 0
+    func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
+        calls += 1
+        return .init(content: Self.original)
     }
 }
 

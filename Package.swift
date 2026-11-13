@@ -39,7 +39,7 @@ let package = Package(
             dependencies: ["LegadoCore"],
             path: "App/Features",
             exclude: [
-                "Explore", "TTS", "Settings",
+                "Explore/ExploreView.swift", "TTS", "Settings",
                 "Activity/CacheManagementView.swift", "Activity/FileManagementView.swift", "Activity/ReadingHistoryView.swift", "Activity/ReadingStatisticsView.swift",
                 "RSS/RSSAddBookView.swift", "RSS/RSSSourceDebugView.swift", "RSS/RSSSourceEditorView.swift", "RSS/RSSViews.swift", "RSS/RSSWebReaderView.swift",
                 "Sources/SourceManagementView.swift", "Sources/SourceDebugView.swift", "Sources/SourceLoginView.swift", "Sources/SourceEditorView.swift",
@@ -50,6 +50,7 @@ let package = Package(
             ],
             sources: [
                 "Activity/ReadingActivityModel.swift", "RSS/RSSLibraryModel.swift",
+                "Explore/ExploreSourceViewModel.swift",
                 "Rules/RuleSubscriptionModel.swift",
                 "Sources/SourceLibraryModel.swift", "Rules/ReplaceRuleLibraryModel.swift", "Search/SearchViewModel.swift",
                 "Books/BookLibraryModel.swift", "Books/BookDetailViewModel.swift",

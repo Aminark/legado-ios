@@ -115,6 +115,16 @@ public struct BookSearchAccumulator: Sendable {
             else { rank = 3 }
             buckets[rank].append(book)
         }
+        // Android ranks matching books by the number of available sources,
+        // retaining arrival order for ties and for unrelated results.
+        for index in 0..<3 {
+            buckets[index] = buckets[index].enumerated().sorted {
+                if $0.element.origins.count != $1.element.origins.count {
+                    return $0.element.origins.count > $1.element.origins.count
+                }
+                return $0.offset < $1.offset
+            }.map(\.element)
+        }
         return buckets.flatMap { $0 }
     }
 }
@@ -238,9 +248,10 @@ public struct BookSearchService: Sendable {
     }
 
     private func search(keyword: String, page: Int, source: BookSource, timeoutLimit: TimeInterval) async -> SourceSearchOutcome {
-        guard let template = source.searchUrl, let rules = source.ruleSearch else {
+        guard let template = source.searchUrl else {
             return failure(source, code: "search.configuration", message: "书源缺少搜索地址或规则")
         }
+        let rules = source.ruleSearch ?? .init()
         do {
             var prepared = try await RuleExecutionWorker.run {
                 let headers = try BookSourceHeaderResolver().resolve(source)
@@ -248,7 +259,9 @@ public struct BookSearchService: Sendable {
                                               baseURL: URL(string: source.bookSourceUrl), defaultHeaders: headers)
             }
             if timeoutLimit < 30 { prepared.retry = min(prepared.retry, 1) }
-            let timeout = min(max(Double(source.respondTime) / 1_000, 5), timeoutLimit)
+            // respondTime is the last measured source-check duration used for
+            // sorting. A previously fast response is not a request deadline.
+            let timeout = timeoutLimit
             let response = try await networkPolicy.execute(
                 prepared,
                 source: source,
@@ -258,12 +271,26 @@ public struct BookSearchService: Sendable {
                 snapshotRecorder: snapshotRecorder,
                 snapshotStage: .search
             )
-            guard let listRule = rules.bookList, !listRule.isEmpty else {
-                return failure(source, code: "search.book_list_rule", message: "搜索列表规则为空")
+            let detailService = NetworkBookService(engine: engine)
+            let detailURL = response.finalURL == prepared.url ? prepared.resolvedRuleURL : response.finalURL.absoluteString
+            func detailOutcome(variables: [String: String]) async -> SourceSearchOutcome {
+                await detailService.analyzeSearchDetail(
+                    response: response, bookURL: detailURL, source: source,
+                    context: .init(variables: variables, key: keyword, page: page)
+                )
             }
+            if let pattern = source.bookUrlPattern, !pattern.isEmpty {
+                let matches = try await RuleExecutionWorker.run {
+                    try RegexEvaluator().captureGroups(pattern: "\\A(?:" + pattern + ")\\z", input: response.finalURL.absoluteString)
+                }
+                if !matches.isEmpty { return await detailOutcome(variables: response.requestVariables) }
+            }
+            let listRule = rules.bookList ?? ""
             let root = response.decodedJSON
             let body = response.decodedText
-            let listEvaluation = if let root {
+            let listEvaluation = if listRule.isEmpty {
+                RuleEvaluation(variables: response.requestVariables)
+            } else if let root {
                 await engine.evaluate(
                     listRule.trimmingListPrefix,
                     in: root,
@@ -280,8 +307,15 @@ public struct BookSearchService: Sendable {
                 )
             }
             var diagnostics = listEvaluation.diagnostics
+            let items = listEvaluation.listItems(rule: listRule.trimmingListPrefix)
+            if items.isEmpty, source.bookUrlPattern?.isEmpty != false,
+               !diagnostics.contains(where: { $0.severity == .error }) {
+                var outcome = await detailOutcome(variables: listEvaluation.variables)
+                outcome.diagnostics = diagnostics + outcome.diagnostics
+                return outcome
+            }
             var books: [SearchBook] = []
-            for item in listEvaluation.listItems(rule: listRule.trimmingListPrefix) {
+            for item in items {
                 try Task.checkCancellation()
                 let fields = await evaluateFields(
                     rules,
@@ -338,7 +372,10 @@ public struct BookSearchService: Sendable {
         page: Int
     ) async -> FieldEvaluation {
         var result = FieldEvaluation()
-        let currentBook = Book(bookUrl: baseURL, name: "", origin: source.bookSourceUrl)
+        var currentBook = Book(bookUrl: baseURL, name: "", origin: source.bookSourceUrl)
+        currentBook.originName = source.bookSourceName
+        currentBook.originOrder = source.customOrder
+        currentBook.type = source.bookSourceType
         var context = RuleExecutionContext(variables: variables, baseURL: baseURL, key: keyword, page: page, source: source, book: currentBook, isHTMLFragment: true)
         let name = await evaluate(rules.name, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
         context.variables = name.variables
@@ -348,17 +385,25 @@ public struct BookSearchService: Sendable {
         context.book?.author = author.joinedString ?? ""
         let kind = await evaluate(rules.kind, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
         context.variables = kind.variables
-        let bookURL = await evaluate(rules.bookUrl, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
-        context.variables = bookURL.variables
-        context.book?.bookUrl = bookURL.leadingString ?? baseURL
-        let coverURL = await evaluate(rules.coverUrl, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
-        context.variables = coverURL.variables
-        let intro = await evaluate(rules.intro, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
-        context.variables = intro.variables
+        context.book?.kind = kind.strings.filter { !$0.isEmpty }.joined(separator: ",").nilIfEmpty
+        // Match BookList.getSearchItem: metadata and variables produced by an
+        // earlier field are visible to the rules evaluated after it.
         let wordCount = await evaluate(rules.wordCount, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
         context.variables = wordCount.variables
+        context.book?.wordCount = wordCount.joinedString
         let lastChapter = await evaluate(rules.lastChapter, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
         context.variables = lastChapter.variables
+        context.book?.latestChapterTitle = lastChapter.joinedString
+        let intro = await evaluate(rules.intro, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        context.variables = intro.variables
+        context.book?.intro = MetadataTextSanitizer().clean(intro.joinedString)
+        let coverURL = await evaluate(rules.coverUrl, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        context.variables = coverURL.variables
+        context.book?.coverUrl = coverURL.joinedString.flatMap { value in
+            URL(string: baseURL).map { resolve(value, against: $0) }
+        }
+        let bookURL = await evaluate(rules.bookUrl, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        context.variables = bookURL.variables
         let values = (name, author, kind, bookURL, coverURL, intro, wordCount, lastChapter)
         result.name = values.0.joinedString
         result.author = values.1.joinedString
@@ -415,11 +460,25 @@ public struct BookSearchService: Sendable {
     }
 
     private static func normalizedIdentityText(_ value: String) -> String {
-        String(value.unicodeScalars.filter {
+        var normalized = String(value.unicodeScalars.filter {
             !CharacterSet.whitespacesAndNewlines.contains($0)
-                && !CharacterSet.punctuationCharacters.contains($0)
-                && !CharacterSet.symbols.contains($0)
         }).lowercased()
+        // Preserve punctuation and symbols inside names: they can distinguish
+        // different books/authors. Only remove sentence-edge decoration and
+        // balanced title quotation marks, retaining the existing source cleanup.
+        let decoration = CharacterSet(charactersIn: "！!？?。．.，,；;：:、…")
+        let wrappers: [(Character, Character)] = [
+            ("《", "》"), ("〈", "〉"), ("「", "」"), ("『", "』"),
+            ("“", "”"), ("‘", "’"), ("\"", "\""), ("'", "'")
+        ]
+        while true {
+            let trimmed = normalized.trimmingCharacters(in: decoration)
+            if !trimmed.isEmpty { normalized = trimmed }
+            guard normalized.count > 2,
+                  wrappers.contains(where: { normalized.first == $0.0 && normalized.last == $0.1 }) else { break }
+            normalized = String(normalized.dropFirst().dropLast())
+        }
+        return normalized
     }
 
     private static func normalizedAuthor(_ value: String) -> String {
@@ -430,7 +489,7 @@ public struct BookSearchService: Sendable {
         for suffix in ["著", "撰"] where value.hasSuffix(suffix) {
             value.removeLast(suffix.count)
         }
-        return value
+        return normalizedIdentityText(value)
     }
 
     private struct FieldEvaluation {

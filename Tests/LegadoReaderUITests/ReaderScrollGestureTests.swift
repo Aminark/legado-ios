@@ -36,6 +36,44 @@ final class ReaderScrollGestureTests: XCTestCase {
         app.terminate()
     }
 
+    func testResegmentationCanBeToggledInPagedAndContinuousReaders() throws {
+        continueAfterFailure = false
+        for mode in ["0", "3"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-uiDemo", "-uiDemoReader", "-pageAnim", mode, "-themeMode", "1"]
+            app.launch()
+            let reader = mode == "3" ? app.collectionViews["reader.continuous"] : app.textViews["reader.text"]
+            XCTAssertTrue(reader.waitForExistence(timeout: 20))
+            reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+            XCTAssertTrue(app.buttons["设置"].waitForExistence(timeout: 5))
+            app.buttons["设置"].tap()
+            let toggle = app.switches["readerResegmentToggle"]
+            XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+            let original = toggle.value as? String
+            print("[ResegmentToggle] \(toggle.debugDescription)")
+            attachScreenshot(app)
+            // SwiftUI exposes the complete Form row as a switch. Its center
+            // can be empty row space; target the visible switch control.
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+            let changed = expectation(for: NSPredicate { _, _ in toggle.value as? String != original }, evaluatedWith: nil)
+            wait(for: [changed], timeout: 5)
+            XCTAssertNotEqual(toggle.value as? String, original)
+            app.buttons["完成"].tap()
+            XCTAssertTrue(reader.waitForExistence(timeout: 10))
+            reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+            XCTAssertTrue(app.buttons["设置"].waitForExistence(timeout: 5))
+            app.buttons["设置"].tap()
+            XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+            XCTAssertNotEqual(toggle.value as? String, original)
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+            let restored = expectation(for: NSPredicate { _, _ in toggle.value as? String == original }, evaluatedWith: nil)
+            wait(for: [restored], timeout: 5)
+            XCTAssertEqual(toggle.value as? String, original)
+            app.buttons["完成"].tap()
+            app.terminate()
+        }
+    }
+
     func testBackgroundSwitchRestoresPresetWithoutDeletingPhoto() throws {
         try exerciseBackgroundSwitch(readingMode: "0")
     }

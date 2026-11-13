@@ -183,6 +183,7 @@ struct SourceCompatibilityTests {
         )
         var info = BookInfoRule()
         info.name = "tag.h1@text"
+        info.canReName = "true"
         info.tocUrl = "class.toc@href"
         source.ruleBookInfo = info
         var toc = TocRule()
@@ -304,7 +305,7 @@ struct SourceCompatibilityTests {
             current.durChapterIndex = 1
             current.durChapterTitle = toc.chapters[1].title
             current.durChapterPos = 120
-            let switcher = BookSourceSwitchService(chapterRepository: InMemoryBookChapterRepository())
+            let switcher = BookSourceSwitchService()
             let candidates = await switcher.candidates(for: current, sources: [source, replacementSource])
             let candidate = try #require(candidates.first { $0.book.author == "滚开" })
             let switched = try #require(await switcher.prepareSwitch(current: current, candidate: candidate.book, source: replacementSource))

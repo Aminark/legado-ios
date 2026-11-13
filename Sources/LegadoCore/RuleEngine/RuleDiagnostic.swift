@@ -66,15 +66,21 @@ public struct RuleEvaluation: Sendable {
     public var values: [JSONValue]
     public var diagnostics: [RuleDiagnostic]
     public var variables: [String: String]
+    public var rssArticle: RssArticle?
 
     public init(
         values: [JSONValue] = [],
         diagnostics: [RuleDiagnostic] = [],
-        variables: [String: String] = [:]
+        variables: [String: String] = [:],
+        rssArticle: RssArticle? = nil
     ) {
         self.values = values
         self.diagnostics = diagnostics
         self.variables = variables
+        self.rssArticle = rssArticle
+        if self.rssArticle != nil {
+            self.rssArticle?.variable = String(decoding: (try? JSONEncoder().encode(variables)) ?? Data("{}".utf8), as: UTF8.self)
+        }
     }
 
     public var strings: [String] {

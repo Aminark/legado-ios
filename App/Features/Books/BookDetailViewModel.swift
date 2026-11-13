@@ -6,6 +6,8 @@ import LegadoCore
 @MainActor
 final class BookDetailViewModel: ObservableObject {
     enum State: Equatable { case idle, loading, findingSource, ready, failed }
+    typealias SourceSwitchCommit = @MainActor (BookSourceSwitchReport) async -> Bool
+    typealias PreparedUpdateCommit = @MainActor (BookUpdateReport) async -> Bool
 
     @Published private(set) var state: State = .idle
     @Published private(set) var book: Book
@@ -22,12 +24,14 @@ final class BookDetailViewModel: ObservableObject {
     private let contentCoordinator: ChapterContentCoordinator
     private let sourceSwitchService: BookSourceSwitchService
     private var cacheTask: Task<Void, Never>?
+    private var loadGeneration = 0
 
     init(
         searchBook: SearchBook,
         source: BookSource,
         service: NetworkBookService = .init(),
-        chapterRepository: any BookChapterRepository = AppBookChapterRepository.live()
+        chapterRepository: any BookChapterRepository = AppBookChapterRepository.live(),
+        sourceSwitchService: BookSourceSwitchService? = nil
     ) {
         self.searchBook = searchBook
         self.source = source
@@ -35,11 +39,10 @@ final class BookDetailViewModel: ObservableObject {
         let chapters = chapterRepository
         updateCoordinator = BookUpdateCoordinator(repository: chapters, loader: service)
         contentCoordinator = ChapterContentCoordinator(loader: service)
-        sourceSwitchService = BookSourceSwitchService(
+        self.sourceSwitchService = sourceSwitchService ?? BookSourceSwitchService(
             detailLoader: service,
             chapterLoader: service,
-            contentLoader: service,
-            chapterRepository: chapters
+            contentLoader: service
         )
         var book = Book(
             bookUrl: searchBook.bookURL,
@@ -65,8 +68,7 @@ final class BookDetailViewModel: ObservableObject {
         sourceSwitchService = BookSourceSwitchService(
             detailLoader: service,
             chapterLoader: service,
-            contentLoader: service,
-            chapterRepository: chapters
+            contentLoader: service
         )
     }
 
@@ -85,11 +87,15 @@ final class BookDetailViewModel: ObservableObject {
         cacheTotal = chapters.filter { !$0.isVolume }.count
     }
 
-    func load(sources: [BookSource] = []) async {
+    func load(sources: [BookSource] = [], persistDirectory: Bool = true, runPreUpdateScript: Bool? = nil,
+              commitSourceSwitch: SourceSwitchCommit? = nil, commitPreparedUpdate: PreparedUpdateCommit? = nil) async {
         guard state == .idle else { return }
+        loadGeneration &+= 1
+        let generation = loadGeneration
         state = .loading
         if searchBook == nil {
             let stored = await updateCoordinator.storedChapters(bookURL: book.bookUrl)
+            guard acceptsLoad(generation) else { return }
             if !stored.isEmpty {
                 chapters = stored
                 state = .ready
@@ -97,6 +103,7 @@ final class BookDetailViewModel: ObservableObject {
         }
         if let searchBook {
             let detail = await service.loadDetail(searchBook: searchBook, source: source)
+            guard acceptsLoad(generation) else { return }
             let details = detail.book
             book.name = details.name
             book.author = details.author
@@ -113,10 +120,23 @@ final class BookDetailViewModel: ObservableObject {
             book.variable = details.variable ?? book.variable
             diagnostics += detail.diagnostics
         }
-        let toc = await updateCoordinator.refresh(book: book, source: source)
+        let oldBookURL = book.bookUrl
+        let toc = await updateCoordinator.refresh(book: book, source: source, persistDirectory: persistDirectory,
+                                                  runPreUpdateScript: runPreUpdateScript ?? (searchBook == nil), isFromBookInfo: searchBook != nil)
+        guard acceptsLoad(generation) else { return }
+        if toc.refreshed, toc.book.bookUrl != oldBookURL, let commitPreparedUpdate,
+           !(await commitPreparedUpdate(toc)) {
+            diagnostics += toc.diagnostics
+            diagnostics.append(.init(severity: .error, code: "toc.persistence",
+                message: "更新后的书籍地址保存失败，已保留原书籍和阅读位置。", rule: oldBookURL))
+            state = chapters.isEmpty ? .failed : .ready
+            return
+        }
+        guard acceptsLoad(generation) else { return }
         if !toc.chapters.isEmpty { chapters = toc.chapters }
         diagnostics += toc.diagnostics
         book = toc.book
+        if book.bookUrl != oldBookURL { searchBook = nil }
         if !chapters.isEmpty {
             state = .ready
             return
@@ -124,10 +144,24 @@ final class BookDetailViewModel: ObservableObject {
 
         state = .findingSource
         if let available = await sourceSwitchService.firstAvailableSource(for: book, sources: sources) {
+            guard acceptsLoad(generation) else { return }
+            if let commitSourceSwitch, !(await commitSourceSwitch(available.report)) {
+                diagnostics.append(.init(severity: .error, code: "source_switch.persistence",
+                    message: "自动换源保存失败，已保留当前书源和阅读位置。", rule: book.bookUrl))
+                state = .failed
+                return
+            }
             applySourceSwitch(available.report, source: available.source)
         } else {
+            guard acceptsLoad(generation) else { return }
             state = .failed
         }
+    }
+
+    private func acceptsLoad(_ generation: Int) -> Bool {
+        guard generation == loadGeneration else { return false }
+        guard !Task.isCancelled else { state = .idle; return false }
+        return true
     }
 
     func cacheNextTen() { startCaching(limit: 10) }
@@ -141,6 +175,7 @@ final class BookDetailViewModel: ObservableObject {
     }
 
     func applySourceSwitch(_ report: BookSourceSwitchReport, source: BookSource) {
+        loadGeneration &+= 1
         cancelCaching()
         searchBook = nil
         book = report.book
@@ -151,6 +186,11 @@ final class BookDetailViewModel: ObservableObject {
     }
 
     func toggleCanUpdate() { book.canUpdate.toggle() }
+
+    func reportDirectorySaveFailure(_ message: String?) {
+        diagnostics.append(.init(severity: .error, code: "toc.persistence",
+            message: message ?? "目录保存失败，已保留原有缓存。", rule: book.bookUrl))
+    }
 
     func restoreLibraryBook(from stored: Book, sources: [BookSource] = []) {
         guard state == .idle, stored.bookUrl == book.bookUrl else { return }
@@ -193,7 +233,9 @@ final class BookDetailViewModel: ObservableObject {
     func restoreReadingProgress(from stored: Book) {
         guard stored.bookUrl == book.bookUrl, stored.durChapterTime > book.durChapterTime else { return }
         let chapterIndex = stored.durChapterTitle.flatMap { title in
-            chapters.firstIndex { !$0.isVolume && $0.title == title }
+            let position = min(max(stored.durChapterIndex, 0), max(chapters.count - 1, 0))
+            return chapters.indices.filter { !chapters[$0].isVolume && chapters[$0].title == title }
+                .min { abs($0 - position) < abs($1 - position) }
         } ?? stored.durChapterIndex
         guard chapters.indices.contains(chapterIndex), !chapters[chapterIndex].isVolume else { return }
         book.durChapterIndex = chapterIndex
@@ -202,12 +244,14 @@ final class BookDetailViewModel: ObservableObject {
         book.durChapterTime = stored.durChapterTime
     }
 
-    func refresh(sources: [BookSource] = []) async {
+    func refresh(sources: [BookSource] = [], persistDirectory: Bool = true,
+                 commitSourceSwitch: SourceSwitchCommit? = nil, commitPreparedUpdate: PreparedUpdateCommit? = nil) async {
         cancelCaching()
         chapters = []
         diagnostics = []
         state = .idle
-        await load(sources: sources)
+        await load(sources: sources, persistDirectory: persistDirectory, runPreUpdateScript: true,
+                   commitSourceSwitch: commitSourceSwitch, commitPreparedUpdate: commitPreparedUpdate)
     }
 
     private func startCaching(limit: Int?) {

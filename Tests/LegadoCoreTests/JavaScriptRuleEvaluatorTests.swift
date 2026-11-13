@@ -94,6 +94,13 @@ private final class JavaScriptDirectRequestMock: JavaScriptRedirectNetworkLoadin
 }
 
 struct JavaScriptRuleEvaluatorTests {
+    @Test func nestedAJAXIgnoresWebScriptUntilWebViewIsEnabled() throws {
+        let evaluator = JavaScriptRuleEvaluator(networkLoader: InactiveWebScriptNetworkMock())
+        let result = try evaluator.evaluate(script: "java.ajax(result)", result: .string(
+            #"https://plain-http.test/ajax,{"webJs":"throw new Error('must not run')","bodyJs":"result + '-body'"}"#), executionContext: .init())
+        #expect(result.value.stringValue == "HTTP-body")
+    }
+
     @Test func decryptsSourceContentUsingRhinoPackageImportsAndAESByteArrays() throws {
         // OpenSSL AES-128-CBC/PKCS7 fixture, with a 16-byte IV prepended.
         let script = #"""
@@ -496,5 +503,13 @@ struct JavaScriptRuleEvaluatorTests {
 
         #expect(result.values.isEmpty)
         #expect(result.diagnostics.contains { $0.code == "rule.resource_limit" })
+    }
+}
+
+private struct InactiveWebScriptNetworkMock: JavaScriptNetworkLoading {
+    func load(_ request: URLRequest) throws -> HTTPResponse {
+        let url = try #require(request.url)
+        #expect(url.absoluteString == "https://plain-http.test/ajax")
+        return .init(data: Data("HTTP".utf8), statusCode: 200, headers: [:], finalURL: url)
     }
 }

@@ -79,6 +79,11 @@ public actor ChapterContentCache {
     }
 
     public func save(_ entry: CachedChapterContent) throws {
+        try write(entry)
+        try pruneIfNeeded()
+    }
+
+    private func write(_ entry: CachedChapterContent) throws {
         guard !entry.bookURL.isEmpty, !entry.chapterURL.isEmpty, !entry.content.isEmpty else {
             throw ChapterContentCacheError.invalidEntry
         }
@@ -89,7 +94,6 @@ public actor ChapterContentCache {
         }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try data.write(to: fileURL(bookURL: entry.bookURL, chapterURL: entry.chapterURL), options: .atomic)
-        try pruneIfNeeded()
     }
 
     public func remove(bookURL: String) throws {
@@ -99,6 +103,39 @@ public actor ChapterContentCache {
             where url.lastPathComponent.hasPrefix(prefix) {
             try FileManager.default.removeItem(at: url)
         }
+    }
+
+    /// Copy before removing an obsolete book identity. URL matches are exact;
+    /// title matches are allowed only when unique in both chapter lists.
+    @discardableResult
+    public func copyContents(
+        from oldBook: Book, chapters oldChapters: [BookChapter],
+        to newBook: Book, chapters newChapters: [BookChapter]
+    ) throws -> Int {
+        guard oldBook.bookUrl != newBook.bookUrl else { return 0 }
+        let oldByURL = Dictionary(oldChapters.map { ($0.url, $0) }, uniquingKeysWith: { first, _ in first })
+        let oldByTitle = Dictionary(grouping: oldChapters.filter { !$0.isVolume }, by: \.title)
+        let newByTitle = Dictionary(grouping: newChapters.filter { !$0.isVolume }, by: \.title)
+        var copied = 0
+        for chapter in newChapters where !chapter.isVolume {
+            try Task.checkCancellation()
+            let sameTitle = oldByTitle[chapter.title]
+            let old = oldByURL[chapter.url] ?? (
+                !chapter.title.isEmpty && sameTitle?.count == 1 && newByTitle[chapter.title]?.count == 1
+                    ? sameTitle?.first : nil
+            )
+            guard let old, let cached = try load(bookURL: oldBook.bookUrl, chapterURL: old.url) else { continue }
+            guard cached.sourceID == nil || cached.sourceID == oldBook.origin else { continue }
+            var updated = cached
+            updated.bookURL = newBook.bookUrl
+            updated.chapterURL = chapter.url
+            updated.sourceID = newBook.origin
+            // Copying must not evict the old identity before the caller has
+            // committed its book/directory transaction successfully.
+            try write(updated)
+            copied += 1
+        }
+        return copied
     }
 
     public func remove(bookURL: String, chapterURL: String) throws {
@@ -215,10 +252,14 @@ public actor ChapterContentCoordinator {
     ) async -> CoordinatedChapterContent {
         if !forceRefresh, let cached = try? await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url),
                   cached.sourceID == nil || cached.sourceID == source.id {
+            // Older versions stored text subContent separately, while the
+            // reader only consumed content. Preserve those offline caches.
+            let textSupplement = source.bookSourceType == 0 ? cached.supplementalContent : nil
+            let content = [cached.content, textSupplement].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
             return .init(report: .init(
                 title: cached.title,
-                content: cached.content,
-                supplementalContent: cached.supplementalContent
+                content: content,
+                supplementalContent: source.bookSourceType == 0 ? nil : cached.supplementalContent
             ), loadedFromCache: true)
         }
         let report = await loader.loadContent(

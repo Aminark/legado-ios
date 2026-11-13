@@ -42,27 +42,29 @@ final class SourceSwitchViewModel: ObservableObject {
         let report = await service.prepareSwitch(current: book, candidate: candidate.book, source: source)
         guard generation == selectionGeneration, !Task.isCancelled else { return nil }
         guard let report else {
-            errorMessage = "候选书源无法读取目录或当前章节正文，请选择其他书源。已保留当前书源和阅读位置。"
+            errorMessage = "候选书源的目录、正文加载或保存失败，请重试或选择其他书源。已保留当前书源和阅读位置。"
             return nil
         }
         return (report, source)
     }
 
     func clearError() { errorMessage = nil }
+    func reportSaveFailure() { errorMessage = "换源未能保存到书架，请重试。已保留当前书源和阅读位置。" }
     func cancelSelection() { selectionGeneration &+= 1 }
 }
 
 struct SourceSwitchView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model: SourceSwitchViewModel
+    @State private var isSaving = false
     let sources: [BookSource]
-    let onSwitched: @MainActor (BookSourceSwitchReport, BookSource) -> Void
+    let onSwitched: @MainActor (BookSourceSwitchReport, BookSource) async -> Bool
 
     init(
         book: Book,
         sources: [BookSource],
         demoCandidates: [BookSourceCandidate] = [],
-        onSwitched: @escaping @MainActor (BookSourceSwitchReport, BookSource) -> Void
+        onSwitched: @escaping @MainActor (BookSourceSwitchReport, BookSource) async -> Bool
     ) {
         self.sources = sources
         self.onSwitched = onSwitched
@@ -103,8 +105,9 @@ struct SourceSwitchView: View {
         .navigationTitle("为《\(model.bookName)》换源")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(isSaving) }
         }
+        .interactiveDismissDisabled(isSaving)
         .task { await model.load(sources: sources) }
         .onDisappear { model.cancelSelection() }
         .alert("换源失败", isPresented: Binding(
@@ -121,8 +124,13 @@ struct SourceSwitchView: View {
         Button {
             Task {
                 if let (report, source) = await model.select(candidate, sources: sources) {
-                    onSwitched(report, source)
-                    dismiss()
+                    isSaving = true
+                    defer { isSaving = false }
+                    if await onSwitched(report, source) {
+                        dismiss()
+                    } else {
+                        model.reportSaveFailure()
+                    }
                 }
             }
         } label: {
@@ -150,7 +158,7 @@ struct SourceSwitchView: View {
             }
             .padding(.vertical, 5)
         }
-        .disabled(model.switchingID != nil)
+        .disabled(model.switchingID != nil || isSaving)
         .accessibilityIdentifier("sourceSwitch.candidate.\(candidate.id)")
     }
 }

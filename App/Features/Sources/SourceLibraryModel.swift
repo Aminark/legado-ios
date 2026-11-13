@@ -264,7 +264,8 @@ final class SourceLibraryModel: ObservableObject {
             data = response.data
         }
         let normalized = try importer.normalizedData(data)
-        if case .array(let urls) = (try JSONValue.decode(data: normalized))["sourceUrls"] {
+        let document = try JSONValue.decode(data: normalized)
+        if case .array(let urls) = document["sourceUrls"] {
             guard !urls.isEmpty, urls.count <= 100 else { throw BookSourceImportError.invalidDocument("订阅清单需包含 1–100 个链接") }
             var sources: [BookSource] = []
             var invalid: [PendingImport.InvalidItem] = []
@@ -276,7 +277,34 @@ final class SourceLibraryModel: ObservableObject {
             }
             return (sources, invalid)
         }
+        try validateBookSourceDocumentKind(document)
         return try validatedSources(from: normalized)
+    }
+
+    /// An automatic link may point to RSS, purification rules, or other Legado
+    /// exports. Inspect every entry so a mixed collection is not partially
+    /// misrepresented as broken book sources in the import review.
+    private nonisolated func validateBookSourceDocumentKind(_ document: JSONValue) throws {
+        let entries: [JSONValue]
+        if case .array(let values) = document { entries = values }
+        else { entries = [document] }
+        var kinds: Set<String> = []
+        for entry in entries {
+            guard case .object = entry else { continue }
+            if entry["bookSourceUrl"] != nil || entry["bookSourceName"] != nil { kinds.insert("书源") }
+            else if entry["sourceUrl"] != nil { kinds.insert("RSS 订阅") }
+            else if entry["pattern"] != nil { kinds.insert("净化规则") }
+            else if entry["themeName"] != nil { kinds.insert("阅读主题") }
+            else if entry["showRule"] != nil { kinds.insert("字典规则") }
+            else if entry["name"] != nil, entry["rule"] != nil { kinds.insert("TXT 目录规则") }
+            else if entry["name"] != nil, entry["url"] != nil { kinds.insert("朗读引擎") }
+        }
+        if kinds.count > 1 {
+            throw BookSourceImportError.invalidDocument("导入内容混合了 \(kinds.sorted().joined(separator: "、"))，请分别从对应入口导入。")
+        }
+        if let kind = kinds.first, kind != "书源" {
+            throw BookSourceImportError.invalidDocument("检测到\(kind)，当前入口仅支持书源，请从对应的规则管理入口导入。")
+        }
     }
 
     func cancelPendingImport() { pendingImport = nil }

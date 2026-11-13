@@ -1,7 +1,52 @@
+import Foundation
 import Testing
 @testable import LegadoCore
 
 struct BookUpdateCoordinatorTests {
+    @Test func failedDirectorySaveKeepsPersistedProgressAndReportsFailure() async throws {
+        let old = [BookChapter(url: "1", title: "第一章", bookUrl: "book", index: 0)]
+        let incoming = old + [BookChapter(url: "2", title: "第二章", bookUrl: "book", index: 1)]
+        var book = Book(bookUrl: "book", name: "书", origin: "source")
+        book.totalChapterNum = 1
+        book.durChapterPos = 42
+        let repository = FailingUpdateChapterRepository(chapters: old)
+        let coordinator = BookUpdateCoordinator(repository: repository, loader: StubChapterListLoader(report: .init(chapters: incoming)))
+
+        let report = await coordinator.refresh(book: book, source: .init(bookSourceUrl: "source", bookSourceName: "源"), now: 99)
+
+        #expect(!report.refreshed)
+        #expect(report.book == book)
+        #expect(report.chapters == old)
+        #expect(report.addedChapterCount == 0)
+        #expect(report.diagnostics.contains { $0.code == "toc.persistence" && $0.severity == .error })
+        #expect(await repository.load(bookURL: "book") == old)
+    }
+
+    @Test func repeatedTitlesPreserveNearestReadingPosition() {
+        let chapters = (0..<6).map { BookChapter(url: "\($0)", title: $0.isMultiple(of: 2) ? "番外" : "正文", bookUrl: "book", index: $0) }
+        var book = Book(bookUrl: "book", name: "书")
+        book.durChapterIndex = 4
+        book.durChapterTitle = "番外"
+        book.durChapterPos = 28
+        let same = BookUpdateMerger().merge(book: book, oldChapters: chapters, newChapters: chapters, now: 1)
+        #expect(same.book.durChapterIndex == 4)
+        #expect(same.book.durChapterPos == 28)
+
+        book.durChapterIndex = 5
+        book.durChapterTitle = " 番 外！"
+        let normalized = BookUpdateMerger().merge(book: book, oldChapters: chapters, newChapters: chapters, now: 2)
+        #expect(normalized.book.durChapterIndex == 4)
+        #expect(normalized.book.durChapterPos == 28)
+    }
+
+    @Test func duplicatedStoredChapterMetadataDoesNotCrashRefresh() {
+        let chapter = BookChapter(url: "1", title: "第一章", bookUrl: "book", index: 0)
+        var newer = chapter
+        newer.wordCount = "1200"
+        let report = BookUpdateMerger().merge(book: .init(bookUrl: "book", name: "书"), oldChapters: [chapter, newer], newChapters: [chapter], now: 1)
+        #expect(report.chapters.first?.wordCount == "1200")
+    }
+
     @Test func partialDirectoryFailureKeepsCompleteDirectoryAndProgress() async throws {
         let chapters = (0..<3).map { BookChapter(url: "chapter\($0)", title: "第\($0)章", bookUrl: "book", index: $0) }
         let repository = InMemoryBookChapterRepository(values: ["book": chapters])
@@ -118,4 +163,12 @@ struct BookUpdateCoordinatorTests {
 private struct StubChapterListLoader: ChapterListLoading {
     let report: ChapterListReport
     func loadChapters(book: Book, source: BookSource, maxPages: Int) async -> ChapterListReport { report }
+}
+
+private actor FailingUpdateChapterRepository: BookChapterRepository {
+    let chapters: [BookChapter]
+    init(chapters: [BookChapter]) { self.chapters = chapters }
+    func load(bookURL: String) -> [BookChapter] { chapters }
+    func save(_ chapters: [BookChapter], bookURL: String) throws { throw CocoaError(.fileWriteOutOfSpace) }
+    func remove(bookURL: String) {}
 }

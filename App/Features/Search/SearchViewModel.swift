@@ -63,7 +63,10 @@ final class SearchViewModel: ObservableObject {
         pendingSources = eligible(sources)
         pendingSourceIDs = Set(pendingSources.map(\.id))
         pagedSources = pendingSources.filter {
-            let url = $0.searchUrl ?? ""
+            let url = ($0.searchUrl ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            // A script may use page directly or delegate pagination to jsLib;
+            // its pagination support cannot be inferred from {{...}} alone.
+            if url.lowercased().hasPrefix("@js:") || url.lowercased().hasPrefix("<js>") { return true }
             return url.range(of: #"\{\{[^}]*\bpage\b[^}]*\}\}"#, options: .regularExpression) != nil
                 || url.contains("searchPage") || url.contains("<")
         }

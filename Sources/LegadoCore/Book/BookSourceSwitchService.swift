@@ -89,34 +89,122 @@ public struct BookSourceProgressMapper: Sendable {
         migrated.totalChapterNum = chapters.count
         migrated.latestChapterTitle = chapters.last(where: { !$0.isVolume })?.title ?? chapters.last?.title
 
-        let oldTitle = current.durChapterTitle ?? ""
-        let normalizedOldTitle = normalize(oldTitle)
-        let exactIndex = chapters.firstIndex { chapter in
-            chapter.title == oldTitle || (!normalizedOldTitle.isEmpty && normalize(chapter.title) == normalizedOldTitle)
-        }
-        let resolvedIndex: Int
-        if let exactIndex {
-            resolvedIndex = exactIndex
-            migrated.durChapterPos = current.durChapterPos
-        } else if !chapters.isEmpty {
-            let denominator = max(current.totalChapterNum - 1, 1)
-            let progress = min(max(Double(current.durChapterIndex) / Double(denominator), 0), 1)
-            resolvedIndex = min(Int((progress * Double(max(chapters.count - 1, 0))).rounded()), chapters.count - 1)
-            migrated.durChapterPos = 0
-        } else {
-            resolvedIndex = 0
-            migrated.durChapterPos = 0
-        }
+        let match = ChapterProgressMatcher.match(current: current, chapters: chapters)
+        let resolvedIndex = match.index
+        migrated.durChapterPos = match.matched ? max(current.durChapterPos, 0) : 0
         migrated.durChapterIndex = resolvedIndex
         migrated.durChapterTitle = chapters.indices.contains(resolvedIndex) ? chapters[resolvedIndex].title : nil
         migrated.durChapterTime = current.durChapterTime
-        return .init(book: migrated, chapters: chapters, exactChapterMatch: exactIndex != nil)
+        return .init(book: migrated, chapters: chapters, exactChapterMatch: match.matched)
+    }
+}
+
+/// Android BookHelp.getDurChapter: compare names and chapter numbers near the old
+/// position, then keep the old index. A ratio alone can skip unread chapters when
+/// one source has more recent updates than another.
+private enum ChapterProgressMatcher {
+    private static let numerals = #"\d零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟"#
+    private static let numbered = try! NSRegularExpression(pattern: ".*?第([\(numerals)]+)[章节篇回集话]")
+    private static let prefixed = try! NSRegularExpression(pattern: "^(?:[\(numerals)]+[,:、])*([\(numerals)]+)(?:[,:、]|\\.[^\\d])")
+
+    static func match(current: Book, chapters: [BookChapter]) -> (index: Int, matched: Bool) {
+        guard !chapters.isEmpty else { return (0, false) }
+        let oldIndex = max(current.durChapterIndex, 0)
+        let fallback = min(oldIndex, chapters.count - 1)
+        let oldTitle = normalized(current.durChapterTitle ?? "")
+        let readable = chapters.indices.filter { !chapters[$0].isVolume }
+        // Retain the iOS exact-title match, choosing the closest occurrence for
+        // repeated names such as 番外 instead of silently jumping to the first.
+        let exact = readable.filter { !oldTitle.isEmpty && normalized(chapters[$0].title) == oldTitle }
+        if let index = nearest(exact, to: fallback) { return (index, true) }
+        guard oldIndex > 0 else { return (fallback, false) }
+
+        // Use the original search window, with bounded arithmetic for imported
+        // metadata; malformed chapter counts must not overflow or trap.
+        let scaled = current.totalChapterNum > 0
+            ? Double(oldIndex) * Double(current.totalChapterNum) / Double(chapters.count)
+            : Double(oldIndex)
+        let lower = Int(min(Double(chapters.count - 1), max(0, min(Double(oldIndex), scaled) - 10)))
+        let upper = Int(min(Double(chapters.count - 1), max(Double(oldIndex), scaled) + 10))
+        let candidates = readable.filter { $0 >= lower && $0 <= upper }
+        let oldName = pureName(current.durChapterTitle ?? "")
+        if !oldName.isEmpty {
+            let matches = candidates.filter { similarity(oldName, pureName(chapters[$0].title)) > 0.96 }
+            if let index = nearest(matches, to: fallback) { return (index, true) }
+        }
+        if let number = chapterNumber(current.durChapterTitle ?? ""), number > 0 {
+            let matches = candidates.filter { chapterNumber(chapters[$0].title) == number }
+            if let index = nearest(matches, to: fallback) { return (index, true) }
+        }
+        return (fallback, false)
     }
 
-    private func normalize(_ value: String) -> String {
-        String(value.unicodeScalars.filter {
-            !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.punctuationCharacters.contains($0)
-        }).lowercased()
+    private static func nearest(_ indices: [Int], to index: Int) -> Int? {
+        indices.min { abs($0 - index) < abs($1 - index) }
+    }
+
+    private static func folded(_ value: String) -> String {
+        value.folding(options: .widthInsensitive, locale: Locale(identifier: "zh_CN"))
+            .replacingOccurrences(of: #"\s"#, with: "", options: .regularExpression)
+    }
+
+    private static func normalized(_ value: String) -> String {
+        String(folded(value).unicodeScalars.filter { !CharacterSet.punctuationCharacters.contains($0) }).lowercased()
+    }
+
+    private static func pureName(_ value: String) -> String {
+        folded(value)
+            .replacingOccurrences(of: "^.*?第[\(numerals)]+[章节篇回集话](?!$)|^(?:[\(numerals)]+[,:、])*[\(numerals)]+(?:[,:、](?!$)|\\.(?=[^\\d]))", with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?!^)(?:[〖【《〔\[{(][^〖【《〔\[{()〕》】〗\]}]+)?[)〕》】〗\]}]$|^[〖【《〔\[{(](?:[^〖【《〔\[{()〕》】〗\]}]+[〕》】〗\]})])?(?!$)"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"[^A-Za-z0-9_\p{Han}]"#, with: "", options: .regularExpression)
+    }
+
+    private static func similarity(_ lhs: String, _ rhs: String) -> Double {
+        let a = Set(lhs.utf16), b = Set(rhs.utf16)
+        let total = a.union(b).count
+        return total == 0 ? 0 : Double(a.intersection(b).count) / Double(total)
+    }
+
+    private static func chapterNumber(_ title: String) -> Int? {
+        let title = folded(title)
+        let range = NSRange(title.startIndex..., in: title)
+        guard let match = numbered.firstMatch(in: title, range: range) ?? prefixed.firstMatch(in: title, range: range),
+              let captured = Range(match.range(at: 1), in: title) else { return nil }
+        let value = String(title[captured])
+        if let number = Int(value) { return number }
+        let digits: [Character: Int] = ["零": 0, "〇": 0, "一": 1, "壹": 1, "二": 2, "两": 2, "贰": 2,
+                                      "三": 3, "叁": 3, "四": 4, "肆": 4, "五": 5, "伍": 5, "六": 6,
+                                      "陆": 6, "七": 7, "柒": 7, "八": 8, "捌": 8, "九": 9, "玖": 9]
+        let units: [Character: Int] = ["十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000, "万": 10_000]
+        var total = 0, pending = 0
+        let characters = Array(value)
+        for (index, character) in characters.enumerated() {
+            if let digit = digits[character] ?? (units[character] == nil ? character.wholeNumberValue : nil) {
+                if index >= 2, index == characters.count - 1, let previous = units[characters[index - 1]], previous > 10 {
+                    pending = digit * (previous / 10)
+                } else {
+                    let (multiplied, overflow) = pending.multipliedReportingOverflow(by: 10)
+                    let (sum, sumOverflow) = multiplied.addingReportingOverflow(digit)
+                    guard !overflow, !sumOverflow else { return nil }
+                    pending = sum
+                }
+            } else if let unit = units[character] {
+                if unit == 10_000 {
+                    let (sum, overflow) = total.addingReportingOverflow(pending)
+                    let (product, productOverflow) = sum.multipliedReportingOverflow(by: unit)
+                    guard !overflow, !productOverflow else { return nil }
+                    total = product
+                } else {
+                    let (product, overflow) = max(pending, 1).multipliedReportingOverflow(by: unit)
+                    let (sum, sumOverflow) = total.addingReportingOverflow(product)
+                    guard !overflow, !sumOverflow else { return nil }
+                    total = sum
+                }
+                pending = 0
+            } else { return nil }
+        }
+        let (result, overflow) = total.addingReportingOverflow(pending)
+        return overflow ? nil : result
     }
 }
 
@@ -125,7 +213,6 @@ public actor BookSourceSwitchService {
     private let detailLoader: any BookDetailLoading
     private let chapterLoader: any ChapterListLoading
     private let contentLoader: any ChapterContentLoading
-    private let chapterRepository: any BookChapterRepository
     private let mapper: BookSourceProgressMapper
 
     public init(
@@ -133,14 +220,12 @@ public actor BookSourceSwitchService {
         detailLoader: any BookDetailLoading = NetworkBookService(),
         chapterLoader: any ChapterListLoading = NetworkBookService(),
         contentLoader: any ChapterContentLoading = NetworkBookService(),
-        chapterRepository: any BookChapterRepository = FileBookChapterRepository.live(),
         mapper: BookSourceProgressMapper = .init()
     ) {
         self.searcher = searcher
         self.detailLoader = detailLoader
         self.chapterLoader = chapterLoader
         self.contentLoader = contentLoader
-        self.chapterRepository = chapterRepository
         self.mapper = mapper
     }
 
@@ -207,12 +292,14 @@ public actor BookSourceSwitchService {
         guard !Task.isCancelled else { return nil }
         let detail = await detailLoader.loadDetail(searchBook: candidate, source: source)
         guard !Task.isCancelled else { return nil }
-        let toc = await chapterLoader.loadChapters(book: detail.book, source: source, maxPages: 20)
+        var replacement = detail.book
+        replacement.readConfig = current.readConfig
+        let toc = await chapterLoader.loadChapters(book: replacement, source: source, maxPages: 20)
         guard !Task.isCancelled, toc.chapters.contains(where: { !$0.isVolume }),
               !toc.diagnostics.contains(where: { $0.severity == .error }) else { return nil }
         var result = mapper.migrate(
             current: current,
-            replacement: detail.book,
+            replacement: replacement,
             chapters: toc.chapters,
             now: now ?? Int64(Date().timeIntervalSince1970 * 1_000)
         )
@@ -237,16 +324,8 @@ public actor BookSourceSwitchService {
               !content.diagnostics.contains(where: { $0.severity == .error }) else { return nil }
         result.verifiedContent = content
         result.diagnostics += content.diagnostics
-        do {
-            try await chapterRepository.save(result.chapters, bookURL: result.book.bookUrl)
-        } catch {
-            result.diagnostics.append(.init(
-                severity: .error,
-                code: "source_switch.persistence",
-                message: "换源目录保存失败：\(error.localizedDescription)",
-                rule: result.book.bookUrl
-            ))
-        }
+        // Preparation is read-only. The caller commits chapters and shelf state
+        // together after selection, including when both sources share a URL.
         return result
     }
 

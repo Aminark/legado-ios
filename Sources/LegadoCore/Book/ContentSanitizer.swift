@@ -86,6 +86,22 @@ enum ChapterImageMarkup {
         }
         return ranges
     }
+
+    static func mapText(in content: String, transform: (String, Bool) -> String) -> String {
+        let ranges = ranges(in: content)
+        guard !ranges.isEmpty else { return transform(content, true) }
+        var parts: [String] = []
+        var start = content.startIndex
+        for range in ranges {
+            let text = transform(String(content[start..<range.lowerBound]), start == content.startIndex)
+            if !text.isEmpty { parts.append(text) }
+            parts.append(String(content[range]))
+            start = range.upperBound
+        }
+        let text = transform(String(content[start...]), start == content.startIndex)
+        if !text.isEmpty { parts.append(text) }
+        return parts.joined(separator: "\n")
+    }
 }
 
 struct ChapterHTMLFormatter {
@@ -163,7 +179,7 @@ public struct ContentSanitizer: Sendable {
             let lines = body.components(separatedBy: .newlines)
             if let firstIndex = lines.firstIndex(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
                 let normalizedLine = normalize(lines[firstIndex])
-                let normalizedTitles = [chapter.title, title, book.name + chapter.title].map(normalize)
+                let normalizedTitles = [chapter.title, title, book.name + chapter.title].map(normalize).filter { !$0.isEmpty }
                 if normalizedTitles.contains(normalizedLine) {
                     var updated = lines
                     updated.remove(at: firstIndex)
@@ -171,13 +187,24 @@ public struct ContentSanitizer: Sendable {
                     removed = true
                 }
             }
+            if !removed, let end = duplicateTitlePrefixEnd(in: body, bookName: book.name, titles: [chapter.title, title]) {
+                body = String(body[end...])
+                removed = true
+            }
         }
 
         if resegment {
-            body = body.components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "　"))) }
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n")
+            body = ChapterImageMarkup.mapText(in: body) { text, isFirstText in
+                // Images are paragraph boundaries, not dialogue. Processing
+                // only text also keeps the stable split seed free of random
+                // protection tokens and preserves signed URLs byte-for-byte.
+                let processed = book.readConfig?.reSegment == true
+                    ? ChapterResegmenter().process(text, chapterName: isFirstText ? chapter.title : "") : text
+                return processed.components(separatedBy: .newlines)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "　"))) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+            }
         }
 
         for rule in ordered where rule.scopeContent && applies(rule, to: book) {
@@ -236,5 +263,18 @@ public struct ContentSanitizer: Sendable {
         value.unicodeScalars.filter {
             !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.punctuationCharacters.contains($0)
         }.map(String.init).joined().lowercased()
+    }
+
+    private func duplicateTitlePrefixEnd(in content: String, bookName: String, titles: [String]) -> String.Index? {
+        let bookPattern = bookName.isEmpty ? "" : "|" + NSRegularExpression.escapedPattern(for: bookName)
+        for title in titles where !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let titlePattern = title.components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }.map(NSRegularExpression.escapedPattern(for:)).joined(separator: #"\s*"#)
+            guard let expression = try? NSRegularExpression(pattern: "^(?:\\s|\\p{P}\(bookPattern))*\(titlePattern)\\s*"),
+                  let match = expression.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+                  let range = Range(match.range, in: content) else { continue }
+            return range.upperBound
+        }
+        return nil
     }
 }

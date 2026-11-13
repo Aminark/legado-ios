@@ -61,17 +61,17 @@ public struct BookExploreService: Sendable {
         guard let template = kind.navigableURL else {
             return failure(source, code: "explore.url", message: "发现分类缺少 URL", rule: kind.title)
         }
-        let rules = resolvedRules(source)
-        guard let rules, let listRule = rules.bookList, !listRule.isEmpty else {
-            return failure(source, code: "explore.configuration", message: "书源缺少发现列表规则", rule: template)
-        }
+        let rules = resolvedRules(source) ?? .init()
+        let listRule = rules.bookList ?? ""
         do {
-            let prepared = try urlBuilder.prepare(
-                template,
-                context: .init(page: page, source: source),
-                baseURL: URL(string: source.bookSourceUrl),
-                defaultHeaders: parseHeaders(source.header)
-            )
+            let prepared = try await RuleExecutionWorker.run {
+                try urlBuilder.prepare(
+                    template,
+                    context: .init(page: page, source: source),
+                    baseURL: URL(string: source.bookSourceUrl),
+                    defaultHeaders: BookSourceHeaderResolver().resolve(source)
+                )
+            }
             let timeout = min(max(Double(source.respondTime) / 1_000, 5), 180)
             let response = try await networkPolicy.execute(
                 prepared,
@@ -85,9 +85,12 @@ public struct BookExploreService: Sendable {
             var context = RuleExecutionContext(
                 variables: response.requestVariables,
                 baseURL: response.finalURL.absoluteString,
+                page: page,
                 source: source
             )
-            let list = if let root {
+            let list = if listRule.isEmpty {
+                RuleEvaluation(variables: context.variables)
+            } else if let root {
                 await engine.evaluate(listRule.trimmingListPrefix, in: root, listMode: true, context: context)
             } else {
                 await engine.evaluate(
@@ -100,8 +103,17 @@ public struct BookExploreService: Sendable {
             }
             context.variables = list.variables
             var diagnostics = list.diagnostics
+            let items = list.listItems(rule: listRule.trimmingListPrefix)
+            if items.isEmpty, source.bookUrlPattern?.isEmpty != false,
+               !diagnostics.contains(where: { $0.severity == .error }) {
+                var outcome = await NetworkBookService(engine: engine).analyzeSearchDetail(
+                    response: response, bookURL: prepared.resolvedRuleURL, source: source, context: context
+                )
+                outcome.diagnostics = diagnostics + outcome.diagnostics
+                return outcome
+            }
             var books: [SearchBook] = []
-            for item in list.listItems(rule: listRule.trimmingListPrefix) {
+            for item in items {
                 try Task.checkCancellation()
                 let fields = await evaluateFields(
                     rules,
@@ -109,11 +121,12 @@ public struct BookExploreService: Sendable {
                     isHTML: root == nil,
                     baseURL: response.finalURL.absoluteString,
                     source: source,
-                    variables: context.variables
+                    variables: context.variables,
+                    page: page
                 )
                 diagnostics += fields.diagnostics
-                guard let name = fields.name, !name.isEmpty else { continue }
-                let bookURL = resolve(fields.bookURL ?? response.finalURL.absoluteString, against: response.finalURL)
+                guard let name = fields.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { continue }
+                let bookURL = resolve(fields.bookURL?.nilIfEmpty ?? response.finalURL.absoluteString, against: response.finalURL)
                 var book = SearchBook(
                     bookURL: bookURL,
                     origin: source.bookSourceUrl,
@@ -203,26 +216,42 @@ public struct BookExploreService: Sendable {
         isHTML: Bool,
         baseURL: String,
         source: BookSource,
-        variables: [String: String]
+        variables: [String: String],
+        page: Int
     ) async -> Fields {
-        var context = RuleExecutionContext(variables: variables, baseURL: baseURL, source: source, isHTMLFragment: true)
+        var book = Book(bookUrl: baseURL, name: "", origin: source.bookSourceUrl)
+        book.originName = source.bookSourceName
+        book.originOrder = source.customOrder
+        book.type = source.bookSourceType
+        var context = RuleExecutionContext(variables: variables, baseURL: baseURL, page: page, source: source, book: book, isHTMLFragment: true)
         var result = Fields()
         let name = await evaluate(rules.name, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
         context.variables = name.variables
+        context.book?.name = name.joinedString?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let author = await evaluate(rules.author, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
         context.variables = author.variables
+        context.book?.author = author.joinedString ?? ""
         let kind = await evaluate(rules.kind, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
         context.variables = kind.variables
-        let bookURL = await evaluate(rules.bookUrl, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
-        context.variables = bookURL.variables
-        let cover = await evaluate(rules.coverUrl, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
-        context.variables = cover.variables
-        let intro = await evaluate(rules.intro, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
-        context.variables = intro.variables
+        context.book?.kind = kind.strings.filter { !$0.isEmpty }.joined(separator: ",").nilIfEmpty
+        // Keep Android's field order: later rules can read earlier metadata
+        // and java.put values through the current book's rule context.
         let wordCount = await evaluate(rules.wordCount, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
         context.variables = wordCount.variables
+        context.book?.wordCount = wordCount.joinedString
         let lastChapter = await evaluate(rules.lastChapter, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
         context.variables = lastChapter.variables
+        context.book?.latestChapterTitle = lastChapter.joinedString
+        let intro = await evaluate(rules.intro, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        context.variables = intro.variables
+        context.book?.intro = MetadataTextSanitizer().clean(intro.joinedString)
+        let cover = await evaluate(rules.coverUrl, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        context.variables = cover.variables
+        context.book?.coverUrl = cover.joinedString.flatMap { value in
+            URL(string: baseURL).map { resolve(value, against: $0) }
+        }
+        let bookURL = await evaluate(rules.bookUrl, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        context.variables = bookURL.variables
         result.name = name.joinedString
         result.author = author.joinedString
         result.kind = kind.strings.filter { !$0.isEmpty }.joined(separator: ",").nilIfEmpty
@@ -252,12 +281,6 @@ public struct BookExploreService: Sendable {
 
     private func resolve(_ value: String, against base: URL) -> String {
         LegadoURLBuilder.resolve(value, against: base)
-    }
-
-    private func parseHeaders(_ source: String?) -> [String: String] {
-        guard let source, let value = try? JSONValue.decode(data: Data(source.utf8)),
-              case .object(let object) = value else { return [:] }
-        return object.mapValues(\.stringValue)
     }
 
     private func failure(_ source: BookSource, code: String, message: String, rule: String) -> SourceSearchOutcome {

@@ -2,8 +2,17 @@ import CryptoKit
 import CommonCrypto
 import Foundation
 import JavaScriptCore
+import SwiftSoup
 
 public struct RuleExecutionContext: Sendable {
+    var nestedRuleDepth = 0
+    var replacesEachListItem = false
+    var cancellation: RuleExecutionCancellation?
+
+    func checkCancellation() throws {
+        try cancellation?.check()
+        try Task.checkCancellation()
+    }
     public var variables: [String: String]
     public var baseURL: String
     public var key: String?
@@ -11,6 +20,7 @@ public struct RuleExecutionContext: Sendable {
     public var source: BookSource?
     public var book: Book?
     public var chapter: BookChapter?
+    public var rssArticle: RssArticle?
     public var isHTMLFragment: Bool
     public var content: JSONValue?
 
@@ -22,29 +32,45 @@ public struct RuleExecutionContext: Sendable {
         source: BookSource? = nil,
         book: Book? = nil,
         chapter: BookChapter? = nil,
+        rssArticle: RssArticle? = nil,
         isHTMLFragment: Bool = false,
         content: JSONValue? = nil
     ) {
-        self.variables = variables
+        self.variables = rssArticle?.variableMap.merging(variables) { _, current in current } ?? variables
         self.baseURL = baseURL
         self.key = key
         self.page = page
         self.source = source
         self.book = book
         self.chapter = chapter
+        self.rssArticle = rssArticle
         self.isHTMLFragment = isHTMLFragment
         self.content = content
+    }
+}
+
+/// Carries cancellation across the synchronous worker and all nested rules.
+/// It checks cooperative boundaries; it cannot interrupt a running JS opcode.
+final class RuleExecutionCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    func cancel() { lock.withLock { cancelled = true } }
+    func check() throws {
+        if lock.withLock({ cancelled }) { throw CancellationError() }
     }
 }
 
 public struct JavaScriptRuleResult: Sendable {
     public var value: JSONValue
     public var variables: [String: String]
+    public var rssArticle: RssArticle? = nil
 }
 
 /// JavaScript's synchronous network bridges can block. Keep those calls off
 /// Swift's cooperative executor and off shared actors such as the cookie policy.
 enum RuleExecutionWorker {
+    private static let rulePool = RuleExecutionThreadPool()
+
     static func run<Value: Sendable>(_ operation: @escaping @Sendable () throws -> Value) async throws -> Value {
         try Task.checkCancellation()
         let result = try await withCheckedThrowingContinuation { continuation in
@@ -54,6 +80,66 @@ enum RuleExecutionWorker {
         }
         try Task.checkCancellation()
         return result
+    }
+
+    static func runRule<Value: Sendable>(_ operation: @escaping @Sendable () throws -> Value) async throws -> Value {
+        try Task.checkCancellation()
+        let result = try await withCheckedThrowingContinuation { continuation in
+            rulePool.submit { continuation.resume(with: Result { try operation() }) }
+        }
+        try Task.checkCancellation()
+        return result
+    }
+
+    static func nestedRule<Value: Sendable>(_ operation: @escaping @Sendable () throws -> Value) throws -> Value {
+        if RuleExecutionThreadPool.isCurrentWorker { return try operation() }
+        let ready = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        nonisolated(unsafe) var output: Result<Value, Error>?
+        rulePool.submit {
+            let result = Result { try operation() }
+            lock.withLock { output = result }
+            ready.signal()
+        }
+        ready.wait()
+        return try lock.withLock { try output!.get() }
+    }
+}
+
+/// SwiftSoup and nested JSC calls need more stack than GCD's small default.
+/// A fixed pool bounds memory/thread growth; nested calls reuse their worker.
+private final class RuleExecutionThreadPool: @unchecked Sendable {
+    private static let marker = "Legado.RuleExecutionWorker"
+    static var isCurrentWorker: Bool { Thread.current.threadDictionary[marker] as? Bool == true }
+    private let condition = NSCondition()
+    private var jobs: [@Sendable () -> Void] = []
+    private var threads: [Thread] = []
+
+    init() {
+        for index in 0..<min(max(ProcessInfo.processInfo.activeProcessorCount, 2), 8) {
+            let thread = Thread { [self] in
+                Thread.current.threadDictionary[Self.marker] = true
+                while true {
+                    condition.lock()
+                    while jobs.isEmpty { condition.wait() }
+                    let job = jobs.removeFirst()
+                    condition.unlock()
+                    autoreleasepool { job() }
+                }
+            }
+            thread.name = "Legado.RuleWorker.\(index)"
+            thread.qualityOfService = .userInitiated
+            thread.stackSize = 8 * 1_024 * 1_024
+            threads.append(thread)
+            thread.start()
+        }
+    }
+
+    func submit(_ job: @escaping @Sendable () -> Void) {
+        condition.lock()
+        jobs.append(job)
+        condition.signal()
+        condition.unlock()
     }
 }
 
@@ -185,6 +271,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
     public var maximumResultLength: Int
     private let networkLoader: any JavaScriptNetworkLoading
     private let urlBuilder: LegadoURLBuilder
+    private let rssVariableStore: RSSVariableStore
 
     public func evaluateAsync(script: String, result: JSONValue, executionContext: RuleExecutionContext) async throws -> JavaScriptRuleResult {
         try await RuleExecutionWorker.run {
@@ -196,12 +283,14 @@ public struct JavaScriptRuleEvaluator: Sendable {
         maximumScriptLength: Int = 64 * 1_024,
         maximumResultLength: Int = 2 * 1_024 * 1_024,
         networkLoader: any JavaScriptNetworkLoading = SynchronousJavaScriptNetworkLoader(),
-        urlBuilder: LegadoURLBuilder = .init()
+        urlBuilder: LegadoURLBuilder = .init(),
+        rssVariableStore: RSSVariableStore = .shared
     ) {
         self.maximumScriptLength = maximumScriptLength
         self.maximumResultLength = maximumResultLength
         self.networkLoader = networkLoader
         self.urlBuilder = urlBuilder
+        self.rssVariableStore = rssVariableStore
     }
 
     public func evaluate(
@@ -211,6 +300,104 @@ public struct JavaScriptRuleEvaluator: Sendable {
     ) throws -> JavaScriptRuleResult {
         try evaluate(script: script, result: result, executionContext: executionContext,
                      virtualMachine: JSVirtualMachine(), stringifyResult: false)
+    }
+
+    func settingVariable(_ key: String, value: String, context: RuleExecutionContext) throws -> RuleExecutionContext {
+        try context.checkCancellation()
+        var context = context
+        guard var article = context.rssArticle else {
+            context.variables[key] = value
+            return context
+        }
+        let box = JSVariableBox(context.variables)
+        box.rssState = article.ruleVariableState ?? RSSVariableState(store: rssVariableStore, article: article)
+        box.putVariable(key, value)
+        try box.rssState?.commit()
+        article.variable = String(decoding: try JSONEncoder().encode(box.values), as: UTF8.self)
+        article.ruleVariableState = box.rssState
+        context.variables = box.values
+        context.rssArticle = article
+        return context
+    }
+
+    func variable(_ key: String, context: RuleExecutionContext) throws -> String {
+        try context.checkCancellation()
+        if let value = context.variables[key] { return value }
+        guard let article = context.rssArticle else { return "" }
+        let state = article.ruleVariableState ?? RSSVariableState(store: rssVariableStore, article: article)
+        return try state.get(key) ?? ""
+    }
+
+    func evaluateBookUpdateAsync(
+        script: String, book: Book, source: BookSource, refresher: any BookUpdateJavaScriptRefreshing
+    ) async throws -> Book {
+        try await RuleExecutionWorker.run {
+            let variables = book.variable.flatMap { try? JSONDecoder().decode([String: String].self, from: Data($0.utf8)) } ?? [:]
+            let result = try evaluate(
+                script: script + "\n;JSON.stringify(book)", result: .null,
+                executionContext: .init(variables: variables, baseURL: book.bookUrl, source: source, book: book),
+                virtualMachine: JSVirtualMachine(), stringifyResult: false, bookRefresher: refresher
+            )
+            var updated: Book
+            do { updated = try JSONDecoder().decode(Book.self, from: Data(result.value.stringValue.utf8)) }
+            catch { throw RuleEngineError.invalidInput(rule: script, expected: "更新前脚本产生了无效书籍字段：\(error.localizedDescription)") }
+            updated.variable = result.variables.isEmpty ? nil : String(decoding: try JSONEncoder().encode(result.variables), as: UTF8.self)
+            return updated
+        }
+    }
+
+    /// TOC formatJs runs after deduplication in reading order. Android reuses
+    /// its script bindings so gInt and other script globals survive each title.
+    func formatChapterTitles(
+        script: String,
+        chapters: [BookChapter]
+    ) async throws -> (chapters: [BookChapter], diagnostics: [RuleDiagnostic]) {
+        try await RuleExecutionWorker.run {
+            guard script.utf8.count <= maximumScriptLength else {
+                throw RuleEngineError.resourceLimit(rule: script, detail: "JavaScript 规则超过长度上限")
+            }
+            try rejectUnboundedExecution(script)
+            guard let context = JSContext() else {
+                throw RuleEngineError.invalidInput(rule: script, expected: "无法创建 JavaScriptCore 上下文")
+            }
+            var exceptionMessage: String?
+            var handlingException = false
+            context.exceptionHandler = { _, exception in
+                guard !handlingException else {
+                    exceptionMessage = exceptionMessage ?? "JavaScript 异常（异常对象无法转换为文本）"
+                    return
+                }
+                handlingException = true
+                defer { handlingException = false }
+                exceptionMessage = exception?.toString() ?? exceptionMessage ?? "未知 JavaScript 异常"
+            }
+            context.setObject(0, forKeyedSubscript: "gInt" as NSString)
+            var formatted = chapters
+            var diagnostics: [RuleDiagnostic] = []
+            for index in formatted.indices {
+                autoreleasepool {
+                    exceptionMessage = nil
+                    context.exception = nil
+                    installChapter(in: context, chapter: formatted[index])
+                    context.setObject(index + 1, forKeyedSubscript: "index" as NSString)
+                    let value = context.evaluateScript(script)
+                    // Rhino unwraps null/undefined to null: keep the old title.
+                    let title = value.flatMap { $0.isNull || $0.isUndefined ? nil : $0.toString() }
+                    if let exceptionMessage {
+                        diagnostics.append(.init(severity: .warning, code: "toc.format",
+                            message: "第\(index + 1)项标题处理失败：\(exceptionMessage)", rule: script))
+                    } else if let title {
+                        if title.utf8.count <= maximumResultLength {
+                            formatted[index].title = title
+                        } else {
+                            diagnostics.append(.init(severity: .warning, code: "toc.format",
+                                message: "第\(index + 1)项标题处理结果超过长度上限", rule: script))
+                        }
+                    }
+                }
+            }
+            return (formatted, diagnostics)
+        }
     }
 
     /// A rule shares java.get/put storage, but each match gets fresh JS globals.
@@ -234,21 +421,37 @@ public struct JavaScriptRuleEvaluator: Sendable {
         result: JSONValue,
         executionContext: RuleExecutionContext,
         virtualMachine: JSVirtualMachine,
-        stringifyResult: Bool
+        stringifyResult: Bool,
+        bookRefresher: (any BookUpdateJavaScriptRefreshing)? = nil
     ) throws -> JavaScriptRuleResult {
+        try executionContext.checkCancellation()
         guard script.utf8.count <= maximumScriptLength else {
             throw RuleEngineError.resourceLimit(rule: script, detail: "JavaScript 规则超过长度上限")
         }
         try rejectUnboundedExecution(script)
 
-        let box = JSVariableBox(executionContext.variables)
+        let box = JSVariableBox(executionContext.rssArticle?.variableMap.merging(executionContext.variables) { _, current in current }
+            ?? executionContext.variables)
+        if let article = executionContext.rssArticle {
+            box.rssState = article.ruleVariableState ?? RSSVariableState(store: rssVariableStore, article: article)
+        }
         guard let context = JSContext(virtualMachine: virtualMachine) else {
             throw RuleEngineError.invalidInput(rule: script, expected: "无法创建 JavaScriptCore 上下文")
         }
         var exceptionMessage: String?
+        var handlingException = false
         context.exceptionHandler = { _, exception in
-            exceptionMessage = exception?.toString() ?? "未知 JavaScript 异常"
+            guard !handlingException else {
+                exceptionMessage = exceptionMessage ?? "JavaScript 异常（异常对象无法转换为文本）"
+                return
+            }
+            handlingException = true
+            defer { handlingException = false }
+            exceptionMessage = exception?.toString() ?? exceptionMessage ?? "未知 JavaScript 异常"
             DiagnosticLog.shared.record(.error, category: "JS", message: exceptionMessage ?? "未知 JavaScript 异常")
+        }
+        box.onError = { [weak context] error in
+            context?.exception = JSValue(newErrorFromMessage: "RSS 变量存储失败：\(error.localizedDescription)", in: context)
         }
         context.setObject(result.foundationObject, forKeyedSubscript: "result" as NSString)
         context.setObject((executionContext.content ?? result).foundationObject, forKeyedSubscript: "src" as NSString)
@@ -261,7 +464,11 @@ public struct JavaScriptRuleEvaluator: Sendable {
         installJavaImporterCompatibility(in: context)
         installSource(in: context, source: executionContext.source, variables: box)
         installBook(in: context, book: executionContext.book)
+        if let bookRefresher, let book = executionContext.book {
+            try installUpdatableBook(in: context, book: book, variables: box, refresher: bookRefresher)
+        }
         installChapter(in: context, chapter: executionContext.chapter)
+        let articleObject = installRSSArticle(in: context, article: executionContext.rssArticle, variables: box)
         context.evaluateScript("""
             (function () {
               var nativeParse = JSON.parse;
@@ -322,7 +529,13 @@ public struct JavaScriptRuleEvaluator: Sendable {
         guard value.stringValue.utf8.count <= maximumResultLength else {
             throw RuleEngineError.resourceLimit(rule: script, detail: "JavaScript 结果超过长度上限")
         }
-        return .init(value: value, variables: box.values)
+        if let error = box.error { throw error }
+        try executionContext.checkCancellation()
+        var article = try updatedRSSArticle(articleObject, original: executionContext.rssArticle, variables: box.values, variableState: box.rssState)
+        try executionContext.checkCancellation()
+        try box.rssState?.commit()
+        article?.ruleVariableState = box.rssState
+        return .init(value: value, variables: box.values, rssArticle: article)
     }
 
     private func installJava(
@@ -331,7 +544,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         result: JSONValue,
         executionContext: RuleExecutionContext
     ) {
-        guard let box = variables as? VariableBoxProxy else { return }
+        guard let box = variables as? JSVariableBox else { return }
         installJavaBlocks(
             in: context,
             get: { key in
@@ -341,7 +554,26 @@ public struct JavaScriptRuleEvaluator: Sendable {
             },
             put: { box.put($0, $1) },
             result: result,
-            executionContext: executionContext
+            executionContext: executionContext,
+            currentContext: { [weak context] in
+                try executionContext.checkCancellation()
+                var current = executionContext
+                current.variables = box.values
+                current.rssArticle = try self.updatedRSSArticle(
+                    context?.objectForKeyedSubscript("rssArticle"), original: executionContext.rssArticle,
+                    variables: box.values, variableState: box.rssState
+                )
+                return current
+            },
+            applyState: { [weak context] values, updatedArticle in
+                box.values = values
+                guard let article = updatedArticle else { return }
+                box.rssState = article.ruleVariableState
+                // Keep the same JS object: scripts may hold aliases to it.
+                if let object = context?.objectForKeyedSubscript("rssArticle") {
+                    self.setRSSArticleFields(article, on: object)
+                }
+            }
         )
     }
 
@@ -458,7 +690,9 @@ public struct JavaScriptRuleEvaluator: Sendable {
         get: @escaping (String) -> String,
         put: @escaping (String, String) -> String,
         result: JSONValue,
-        executionContext: RuleExecutionContext
+        executionContext: RuleExecutionContext,
+        currentContext: @escaping () throws -> RuleExecutionContext,
+        applyState: @escaping ([String: String], RssArticle?) -> Void
     ) {
         let java = JSValue(newObjectIn: context)
         let getBlock: @convention(block) (String) -> String = { key in get(key) }
@@ -474,14 +708,18 @@ public struct JavaScriptRuleEvaluator: Sendable {
             }
             return title
         }
-        let getStringBlock: @convention(block) (String, Any?, Bool) -> String = { rule, content, isURL in
-            let input = content.map(JSONValue.bridge) ?? executionContext.content ?? result
-            return (try? self.evaluateStringRule(
-                rule,
-                content: input,
-                isURL: isURL,
-                executionContext: executionContext
-            )) ?? ""
+        let getRuleBlock: @convention(block) (String, Any?, String, Bool, Bool, Bool) -> [String: Any] = { rule, content, mode, isURL, isFragment, unescape in
+            do {
+                var current = try currentContext()
+                current.isHTMLFragment = isFragment || current.isHTMLFragment
+                let input = content.map(JSONValue.bridge) ?? current.content ?? result
+                let evaluation = try self.evaluateNestedRule(rule, content: input, mode: mode, executionContext: current)
+                let value = self.nestedRuleValue(evaluation, rule: rule, mode: mode, isURL: isURL, unescape: unescape, context: current)
+                applyState(evaluation.variables, evaluation.rssArticle)
+                return ["value": value.foundationObject]
+            } catch {
+                return ["error": error.localizedDescription]
+            }
         }
         let md5Block: @convention(block) (String) -> String = { value in
             Insecure.MD5.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -563,8 +801,9 @@ public struct JavaScriptRuleEvaluator: Sendable {
                     rawURL,
                     extraHeaders: [:],
                     timeoutValue: timeoutValue,
-                    executionContext: executionContext
+                    executionContext: try currentContext()
                 )
+                applyState(response.requestVariables, response.rssArticle)
                 return response.decodedText
             } catch {
                 return error.localizedDescription
@@ -583,8 +822,9 @@ public struct JavaScriptRuleEvaluator: Sendable {
                         rawURL,
                         extraHeaders: [:],
                         timeoutValue: nil,
-                        executionContext: executionContext
+                        executionContext: try currentContext()
                     )
+                    applyState(response.requestVariables, response.rssArticle)
                     return [
                         "url": response.finalURL.absoluteString,
                         "body": response.decodedText,
@@ -610,7 +850,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
                     body: body.map { Self.stringify($0) },
                     headers: Self.headerMap(headers),
                     timeoutValue: timeout,
-                    executionContext: executionContext
+                    executionContext: try currentContext()
                 )
                 return [
                     "urlText": response.finalURL.absoluteString,
@@ -629,8 +869,9 @@ public struct JavaScriptRuleEvaluator: Sendable {
                     rawURL,
                     extraHeaders: Self.headerMap(headerValue),
                     timeoutValue: timeoutValue,
-                    executionContext: executionContext
+                    executionContext: try currentContext()
                 )
+                applyState(response.requestVariables, response.rssArticle)
                 return [
                     "url": response.finalURL.absoluteString,
                     "body": response.decodedText,
@@ -655,7 +896,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         java?.setObject(getBlock, forKeyedSubscript: "get" as NSString)
         java?.setObject(putBlock, forKeyedSubscript: "put" as NSString)
         java?.setObject(putVolumeBlock, forKeyedSubscript: "putVolume" as NSString)
-        java?.setObject(getStringBlock, forKeyedSubscript: "__getString" as NSString)
+        java?.setObject(getRuleBlock, forKeyedSubscript: "__getRule" as NSString)
         java?.setObject(md5Block, forKeyedSubscript: "md5Encode" as NSString)
         java?.setObject(base64Encode, forKeyedSubscript: "base64Encode" as NSString)
         java?.setObject(base64Decode, forKeyedSubscript: "base64Decode" as NSString)
@@ -708,13 +949,44 @@ public struct JavaScriptRuleEvaluator: Sendable {
                 }
                 return responseOf(java.__directRequest('GET', target, null, headers || {}, timeout));
               };
+              function extractRule(rule, content, mode, isUrl, unescape) {
+                var fragment = content && typeof content === 'object' && typeof content.__legadoHTML === 'string';
+                var response = java.__getRule(String(rule == null ? '' : rule), fragment ? content.__legadoHTML : content == null ? src : content,
+                  mode, Boolean(isUrl), Boolean(fragment), unescape !== false);
+                if (response.error) throw new Error(response.error);
+                return response.value;
+              }
+              function listOf(values) {
+                if (!Array.isArray(values)) return values;
+                Object.defineProperties(values, {
+                  get: {value: function (index) { return this[index]; }},
+                  size: {value: function () { return this.length; }},
+                  isEmpty: {value: function () { return this.length === 0; }}
+                });
+                return values;
+              }
+              function elementOf(value) {
+                if (Array.isArray(value)) return listOf(value.map(elementOf));
+                if (typeof value !== 'string' || !/^\\s*</.test(value)) return value;
+                // HTML fragments come from the real HTML parser. Keep them
+                // usable as explicit content for subsequent nested rules.
+                return {
+                  __legadoHTML: value,
+                  toString: function () { return this.__legadoHTML; },
+                  outerHtml: function () { return this.__legadoHTML; },
+                  text: function () { return extractRule('@CSS:@text', this, 'string', false); },
+                  ownText: function () { return extractRule('@CSS:@ownText', this, 'string', false); },
+                  attr: function (name) { return extractRule('@CSS:@' + String(name), this, 'string', false); },
+                  select: function (rule) { return elementOf(extractRule('@CSS:' + rule, this, 'elements', false)); }
+                };
+              }
               java.getString = function (rule, content, isUrl) {
-                return java.__getString(
-                  String(rule == null ? '' : rule),
-                  arguments.length < 2 || content == null ? src : content,
-                  Boolean(isUrl)
-                );
+                if (arguments.length === 2 && typeof content === 'boolean') return extractRule(rule, null, 'string', false, content);
+                return extractRule(rule, content, 'string', isUrl);
               };
+              java.getStringList = function (rule, content, isUrl) { return listOf(extractRule(rule, content, 'strings', isUrl)); };
+              java.getElement = function (rule, content) { return elementOf(extractRule(rule, content, 'element', false)); };
+              java.getElements = function (rule, content) { return elementOf(extractRule(rule, content, 'elements', false)); };
               java.head = function (url, headers, timeout) {
                 return responseOf(java.__directRequest('HEAD', String(url), null, headers || {}, timeout));
               };
@@ -800,6 +1072,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         timeoutValue: Any?,
         executionContext: RuleExecutionContext
     ) throws -> HTTPResponse {
+        try executionContext.checkCancellation()
         guard !rawURL.isEmpty else {
             throw RuleEngineError.invalidInput(rule: rawURL, expected: "java.ajax/connect URL")
         }
@@ -807,8 +1080,16 @@ public struct JavaScriptRuleEvaluator: Sendable {
         var headers = try source.map { try BookSourceHeaderResolver().resolve($0) } ?? [:]
         headers.merge(extraHeaders) { _, extra in extra }
         let base = URL(string: executionContext.baseURL.isEmpty ? source?.bookSourceUrl ?? "" : executionContext.baseURL)
-        let prepared = try urlBuilder.prepare(rawURL, baseURL: base, defaultHeaders: headers)
-        if prepared.useWebView || prepared.webJavaScript != nil {
+        var requestBuilder = urlBuilder
+        requestBuilder.rssVariableStore = rssVariableStore
+        var requestContext = URLTemplateContext(
+            key: executionContext.key, page: executionContext.page, variables: executionContext.variables,
+            source: source, book: executionContext.book, chapter: executionContext.chapter, rssArticle: executionContext.rssArticle
+        )
+        requestContext.cancellation = executionContext.cancellation
+        requestContext.nestedRuleDepth = executionContext.nestedRuleDepth
+        let prepared = try requestBuilder.prepare(rawURL, context: requestContext, baseURL: base, defaultHeaders: headers)
+        if prepared.useWebView {
             throw RuleEngineError.unsupportedRule(rule: rawURL, feature: "JS 内 WKWebView 请求")
         }
         let milliseconds = Self.number(timeoutValue)
@@ -825,9 +1106,13 @@ public struct JavaScriptRuleEvaluator: Sendable {
         let attempts = retryCount == Int.max ? Int.max : retryCount + 1
         var lastError: Error = HTTPClientError.nonHTTPResponse
         for attempt in 0..<attempts {
+            try executionContext.checkCancellation()
             do {
                 var response = try networkLoader.load(request)
+                try executionContext.checkCancellation()
                 response.requestedCharset = prepared.charset
+                response.requestVariables = prepared.variables
+                response.rssArticle = prepared.rssArticle
                 if let cookie = response.headers.first(where: { $0.key.caseInsensitiveCompare("Set-Cookie") == .orderedSame })?.value {
                     LegadoCookieStore.shared.setCookie(cookie, for: response.finalURL.absoluteString)
                 }
@@ -838,19 +1123,25 @@ public struct JavaScriptRuleEvaluator: Sendable {
                     response.data = Data(response.data.map { String(format: "%02x", $0) }.joined().utf8)
                     response.requestedCharset = "utf-8"
                 } else if let bodyScript = prepared.bodyJavaScript {
+                    var bodyContext = executionContext
+                    bodyContext.variables = prepared.variables
+                    bodyContext.baseURL = response.finalURL.absoluteString
+                    bodyContext.rssArticle = prepared.rssArticle
                     let transformed = try JavaScriptRuleEvaluator(
                         maximumScriptLength: maximumScriptLength,
                         maximumResultLength: maximumResultLength,
                         networkLoader: networkLoader,
-                        urlBuilder: urlBuilder
+                        urlBuilder: requestBuilder,
+                        rssVariableStore: rssVariableStore
                     ).evaluate(
                         script: bodyScript,
                         result: .string(response.decodedText),
-                        executionContext: executionContext
+                        executionContext: bodyContext
                     )
                     response.data = Data(transformed.value.stringValue.utf8)
                     response.requestedCharset = "utf-8"
                     response.requestVariables = transformed.variables
+                    response.rssArticle = transformed.rssArticle
                 }
                 return response
             } catch {
@@ -983,6 +1274,209 @@ public struct JavaScriptRuleEvaluator: Sendable {
         context.setObject(object, forKeyedSubscript: "book" as NSString)
     }
 
+    private func installUpdatableBook(
+        in context: JSContext, book: Book, variables: JSVariableBox, refresher: any BookUpdateJavaScriptRefreshing
+    ) throws {
+        let data = try JSONEncoder().encode(book)
+        guard var fields = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw RuleEngineError.invalidInput(rule: "preUpdateJs", expected: "书籍字段")
+        }
+        // Codable omits nil fields; the native Android book still has their
+        // getters/setters, so expose those properties as null as well.
+        for key in ["kind", "customTag", "coverUrl", "customCoverUrl", "intro", "customIntro", "charset",
+                    "latestChapterTitle", "durChapterTitle", "wordCount", "variable", "readConfig"] where fields[key] == nil {
+            fields[key] = NSNull()
+        }
+        context.setObject(fields, forKeyedSubscript: "book" as NSString)
+        let object = context.objectForKeyedSubscript("book")
+        let get: @convention(block) (String) -> String = { variables.get($0) }
+        let put: @convention(block) (String, Any?) -> Bool = { key, value in
+            if value == nil || value is NSNull { variables.values.removeValue(forKey: key) }
+            else { variables.values[key] = Self.stringify(value) }
+            return true
+        }
+        let snapshot: @convention(block) () -> [String: String] = { variables.values }
+        let replace: @convention(block) (String?) -> Void = { raw in
+            variables.values = raw.flatMap { try? JSONDecoder().decode([String: String].self, from: Data($0.utf8)) } ?? [:]
+        }
+        let refresh: @convention(block) (String, Bool) -> String? = { [weak context] raw, research in
+            do {
+                guard raw.utf8.count <= self.maximumResultLength else {
+                    throw RuleEngineError.resourceLimit(rule: "preUpdateJs", detail: "书籍字段超过长度上限")
+                }
+                let current = try JSONDecoder().decode(Book.self, from: Data(raw.utf8))
+                let updated = try refresher.refreshBook(current, research: research)
+                variables.values = updated.variable.flatMap { try? JSONDecoder().decode([String: String].self, from: Data($0.utf8)) } ?? [:]
+                return String(decoding: try JSONEncoder().encode(updated), as: UTF8.self)
+            } catch {
+                context?.exception = JSValue(newErrorFromMessage: error.localizedDescription, in: context)
+                return nil
+            }
+        }
+        object?.setObject(get, forKeyedSubscript: "__getVariable" as NSString)
+        object?.setObject(put, forKeyedSubscript: "putVariable" as NSString)
+        object?.setObject(snapshot, forKeyedSubscript: "__variables" as NSString)
+        object?.setObject(replace, forKeyedSubscript: "__replaceVariables" as NSString)
+        context.setObject(refresh, forKeyedSubscript: "__legadoRefreshBook" as NSString)
+        context.evaluateScript("""
+            (function (current) {
+              Object.keys(current).forEach(function (key) {
+                if (typeof current[key] === 'function') return;
+                var suffix = key.charAt(0).toUpperCase() + key.slice(1);
+                current['get' + suffix] = function () { return current[key]; };
+                current['set' + suffix] = function (value) { current[key] = value; };
+              });
+              Object.defineProperty(current, 'variable', {
+                enumerable: true, configurable: true,
+                get: function () { return JSON.stringify(current.__variables()); },
+                set: function (value) { current.__replaceVariables(value); }
+              });
+              current.getVariable = function (key) { return arguments.length ? current.__getVariable(String(key)) : current.variable; };
+              current.setVariable = function (value) { current.variable = value; };
+              var methods = {
+                get: function (key) { var values = current.__variables(); return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : null; },
+                put: function (key, value) { var old = methods.get(key); current.putVariable(String(key), value); return old; },
+                remove: function (key) { var old = methods.get(key); current.putVariable(String(key), null); return old; },
+                containsKey: function (key) { return Object.prototype.hasOwnProperty.call(current.__variables(), key); },
+                size: function () { return Object.keys(current.__variables()).length; },
+                isEmpty: function () { return methods.size() === 0; },
+                clear: function () { current.variable = '{}'; },
+                keySet: function () { return Object.keys(current.__variables()); },
+                values: function () { var values = current.__variables(); return Object.keys(values).map(function (key) { return values[key]; }); },
+                putAll: function (other) { Object.keys(other).forEach(function (key) { current.putVariable(key, other[key]); }); }
+              };
+              var map = new Proxy({}, {
+                get: function (_, key) { return Object.prototype.hasOwnProperty.call(methods, key) ? methods[key] : methods.get(key); },
+                set: function (_, key, value) { current.putVariable(String(key), value); return true; },
+                deleteProperty: function (_, key) { current.putVariable(String(key), null); return true; },
+                ownKeys: function () { return Object.keys(current.__variables()); },
+                getOwnPropertyDescriptor: function () { return {enumerable: true, configurable: true}; }
+              });
+              Object.defineProperty(current, 'variableMap', { get: function () { return map; } });
+              current.getVariableMap = function () { return map; };
+              function refresh(research) {
+                var updated = JSON.parse(__legadoRefreshBook(JSON.stringify(current), research));
+                Object.keys(current).forEach(function (key) {
+                  if (typeof current[key] !== 'function' && !Object.prototype.hasOwnProperty.call(updated, key)) current[key] = null;
+                });
+                Object.keys(updated).forEach(function (key) { current[key] = updated[key]; });
+              }
+              java.refreshTocUrl = function () { refresh(false); };
+              java.reGetBook = function () { refresh(true); };
+            })(book);
+            """)
+    }
+
+    private func installRSSArticle(in context: JSContext, article: RssArticle?, variables: JSVariableBox) -> JSValue? {
+        guard let article else {
+            context.setObject(NSNull(), forKeyedSubscript: "rssArticle" as NSString)
+            return nil
+        }
+        let object = JSValue(newObjectIn: context)
+        if let object { setRSSArticleFields(article, on: object) }
+        let get: @convention(block) (String) -> String = { variables.get($0) }
+        let put: @convention(block) (String, Any?) -> Bool = { key, value in
+            variables.putVariable(key, value == nil || value is NSNull ? nil : Self.stringify(value))
+            return true
+        }
+        let getBig: @convention(block) (String) -> String? = { variables.getBig($0) }
+        let putBig: @convention(block) (String, Any?) -> Void = { key, value in
+            variables.rssState?.put(key, value == nil || value is NSNull ? nil : Self.stringify(value))
+        }
+        let putMap: @convention(block) (String, Any?) -> Void = { key, value in
+            variables.values[key] = value == nil || value is NSNull ? nil : Self.stringify(value)
+        }
+        let snapshot: @convention(block) () -> [String: String] = { variables.values }
+        let replace: @convention(block) (Any?) -> Void = { value in
+            let raw = Self.stringify(value)
+            var updated = RssArticle()
+            updated.variable = raw
+            variables.values = updated.variableMap
+        }
+        object?.setObject(get, forKeyedSubscript: "__getVariable" as NSString)
+        object?.setObject(put, forKeyedSubscript: "putVariable" as NSString)
+        object?.setObject(getBig, forKeyedSubscript: "__getBigVariable" as NSString)
+        object?.setObject(putBig, forKeyedSubscript: "putBigVariable" as NSString)
+        object?.setObject(putMap, forKeyedSubscript: "__putMap" as NSString)
+        object?.setObject(snapshot, forKeyedSubscript: "__variables" as NSString)
+        object?.setObject(replace, forKeyedSubscript: "__replaceVariables" as NSString)
+        context.setObject(object, forKeyedSubscript: "rssArticle" as NSString)
+        context.evaluateScript(rssArticleBridgeScript)
+        return object
+    }
+
+    private func setRSSArticleFields(_ article: RssArticle, on object: JSValue) {
+        let fields: [String: Any] = [
+            "origin": article.origin, "sort": article.sort, "title": article.title,
+            "order": article.order, "link": article.link, "pubDate": article.pubDate as Any? ?? NSNull(),
+            "description": article.description as Any? ?? NSNull(), "content": article.content as Any? ?? NSNull(),
+            "image": article.image as Any? ?? NSNull(), "group": article.group,
+            "read": article.read, "type": article.type, "durPos": article.durPos
+        ]
+        for (key, value) in fields { object.setObject(value, forKeyedSubscript: key as NSString) }
+    }
+
+    private var rssArticleBridgeScript: String {
+        """
+            (function (article) {
+              Object.keys(article).forEach(function (key) {
+                if (typeof article[key] === 'function') return;
+                var suffix = key.charAt(0).toUpperCase() + key.slice(1);
+                article['get' + suffix] = function () { return article[key]; };
+                article['set' + suffix] = function (value) { article[key] = value; };
+              });
+              Object.defineProperty(article, 'variable', {
+                enumerable: true,
+                get: function () { return JSON.stringify(article.__variables()); },
+                set: function (value) { article.__replaceVariables(value); }
+              });
+              article.getVariable = function (key) {
+                return arguments.length ? article.__getVariable(String(key)) : article.variable;
+              };
+              article.getBigVariable = function (key) {
+                // JSC bridges a nil String? block result as undefined; Kotlin
+                // exposes null, which scripts commonly compare strictly.
+                var value = article.__getBigVariable(String(key));
+                return value == null ? null : value;
+              };
+              article.setVariable = function (value) { article.variable = value; };
+              var methods = {
+                get: function (key) { var values = article.__variables(); return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : null; },
+                put: function (key, value) { var old = methods.get(key); article.__putMap(String(key), value); return old; },
+                remove: function (key) { var old = methods.get(key); article.__putMap(String(key), null); return old; },
+                containsKey: function (key) { return Object.prototype.hasOwnProperty.call(article.__variables(), key); },
+                size: function () { return Object.keys(article.__variables()).length; },
+                isEmpty: function () { return methods.size() === 0; },
+                clear: function () { article.__replaceVariables('{}'); },
+                putAll: function (other) { Object.keys(other).forEach(function (key) { article.__putMap(key, other[key]); }); },
+                keySet: function () { return Object.keys(article.__variables()); },
+                values: function () { var values = article.__variables(); return Object.keys(values).map(function (key) { return values[key]; }); }
+              };
+              var map = new Proxy({}, {
+                get: function (_, key) { return Object.prototype.hasOwnProperty.call(methods, key) ? methods[key] : methods.get(key); },
+                set: function (_, key, value) { article.__putMap(String(key), value); return true; },
+                deleteProperty: function (_, key) { article.__putMap(String(key), null); return true; },
+                ownKeys: function () { return Object.keys(article.__variables()); },
+                getOwnPropertyDescriptor: function () { return {enumerable: true, configurable: true}; }
+              });
+              Object.defineProperty(article, 'variableMap', { get: function () { return map; } });
+              article.getVariableMap = function () { return map; };
+            })(rssArticle);
+            """
+    }
+
+    private func updatedRSSArticle(_ object: JSValue?, original: RssArticle?, variables: [String: String], variableState: RSSVariableState?) throws -> RssArticle? {
+        guard let object, let original else { return nil }
+        let fields = ["origin", "sort", "title", "order", "link", "pubDate", "description", "content", "image", "group", "read", "type", "durPos"]
+        var values: [String: JSONValue] = [:]
+        for field in fields { values[field] = JSONValue.bridge(object.forProperty(field)?.toObject()) }
+        var article = try JSONDecoder().decode(RssArticle.self, from: JSONEncoder().encode(JSONValue.object(values)))
+        article.variable = variables.isEmpty && original.variable == nil
+            ? nil : String(decoding: try JSONEncoder().encode(variables), as: UTF8.self)
+        article.ruleVariableState = variableState
+        return article
+    }
+
     private func installChapter(in context: JSContext, chapter: BookChapter?) {
         let object = JSValue(newObjectIn: context)
         let getTitle: @convention(block) () -> String = { chapter?.title ?? "" }
@@ -1007,83 +1501,79 @@ public struct JavaScriptRuleEvaluator: Sendable {
         context.setObject(chapter?.title ?? "", forKeyedSubscript: "title" as NSString)
     }
 
-    private func evaluateStringRule(
-        _ rule: String,
-        content: JSONValue,
-        isURL: Bool,
-        executionContext: RuleExecutionContext
-    ) throws -> String {
-        let trimmedRule = rule.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedRule.isEmpty else { return "" }
-
-        if case .object(let object) = content,
-           let direct = object[trimmedRule] {
-            return resolveJavaScriptRuleURL(direct.stringValue, enabled: isURL, context: executionContext)
+    private func evaluateNestedRule(
+        _ rule: String, content: JSONValue, mode: String, executionContext: RuleExecutionContext
+    ) throws -> RuleEvaluation {
+        try RuleExecutionWorker.nestedRule {
+            try evaluateNestedRuleOnWorker(rule, content: content, mode: mode, executionContext: executionContext)
         }
+    }
 
-        let jsonContent: JSONValue?
-        if case .string(let text) = content { jsonContent = try? JSONValue.decode(data: Data(text.utf8)) }
-        else { jsonContent = content }
-        let plan = try RuleExpressionParser().parse(trimmedRule, inputLooksLikeJSON: jsonContent != nil)
-        var branchResults: [[String]] = []
-        for branch in plan.branches {
-            var values: [String]
-            if branch.expression.isEmpty {
-                values = [content.stringValue]
+    private func evaluateNestedRuleOnWorker(
+        _ rule: String, content: JSONValue, mode: String, executionContext: RuleExecutionContext
+    ) throws -> RuleEvaluation {
+        try executionContext.checkCancellation()
+        guard executionContext.nestedRuleDepth < 16 else {
+            throw RuleEngineError.resourceLimit(rule: rule, detail: "嵌套规则超过深度上限")
+        }
+        var execution = executionContext
+        execution.nestedRuleDepth += 1
+        execution.replacesEachListItem = mode == "strings"
+        let wasDeferred = execution.rssArticle?.ruleVariableState?.defersCommit ?? false
+        execution.rssArticle?.ruleVariableState?.defersCommit = true
+        let listMode = mode == "element" || mode == "elements"
+        let evaluation: RuleEvaluation
+        if rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            evaluation = .init(variables: execution.variables, rssArticle: execution.rssArticle)
+        } else if case .object(let object) = content, let direct = object[rule] {
+            evaluation = .init(values: [direct], variables: execution.variables, rssArticle: execution.rssArticle)
+        } else {
+            let engine = RuleEngine(javaScript: self)
+            if case .string(let text) = content {
+                evaluation = engine.evaluateSynchronously(rule, inText: text, baseURL: execution.baseURL, listMode: listMode, context: execution)
             } else {
-                switch branch.mode {
-                case .css:
-                    values = try HTMLRuleEvaluator().extractCSS(
-                        branch.expression,
-                        html: content.stringValue,
-                        baseURL: executionContext.baseURL,
-                        isFragment: executionContext.isHTMLFragment
-                    )
-                case .xpath:
-                    values = try HTMLRuleEvaluator().extractXPath(branch.expression, html: content.stringValue, isFragment: executionContext.isHTMLFragment)
-                case .jsonPath:
-                    let json: JSONValue
-                    if case .string(let text) = content {
-                        json = try JSONValue.decode(data: Data(text.utf8))
-                    } else {
-                        json = content
-                    }
-                    values = RuleEvaluation(values: try JSONPathEvaluator().evaluateRule(branch.expression, in: json)).strings
-                case .regex:
-                    values = try RegexEvaluator().captureGroups(pattern: branch.expression, input: content.stringValue)
-                        .map { $0.count > 1 ? $0.dropFirst().joined() : $0.first ?? "" }
-                case .javaScript:
-                    values = [try evaluate(
-                        script: branch.expression,
-                        result: content,
-                        executionContext: executionContext
-                    ).value.stringValue]
-                case .webJavaScript:
-                    throw RuleEngineError.unsupportedRule(rule: branch.expression, feature: "java.getString WebView JavaScript")
-                }
+                evaluation = engine.evaluateSynchronously(rule, in: content, listMode: listMode, context: execution)
             }
-            if plan.combination == .fallback, values.joined(separator: "\n").isEmpty { values = [] }
-            branchResults.append(values)
-            if plan.combination == .fallback, !values.isEmpty { break }
         }
+        if let error = evaluation.diagnostics.first(where: { $0.severity == .error }) {
+            throw RuleEngineError.malformedRule(rule: rule, detail: error.message)
+        }
+        var completed = evaluation
+        completed.rssArticle?.ruleVariableState?.defersCommit = wasDeferred
+        return completed
+    }
 
-        let combined: [String]
-        switch plan.combination {
-        case .single, .concatenate:
-            combined = branchResults.flatMap { $0 }
-        case .fallback:
-            combined = branchResults.first(where: { !$0.isEmpty }) ?? []
-        case .interleave:
-            guard let firstCount = branchResults.first?.count else { return "" }
-            combined = (0..<firstCount).flatMap { index in
-                branchResults.compactMap { $0.indices.contains(index) ? $0[index] : nil }
+    private func nestedRuleValue(
+        _ evaluation: RuleEvaluation, rule: String, mode: String, isURL: Bool, unescape: Bool, context: RuleExecutionContext
+    ) -> JSONValue {
+        switch mode {
+        case "strings":
+            guard !rule.isEmpty else { return .null }
+            if evaluation.values == [.null] { return .null }
+            let strings: [String]
+            if evaluation.values.count == 1, case .string(let value) = evaluation.values[0] {
+                strings = value.components(separatedBy: "\n")
+            } else { strings = evaluation.strings }
+            if !isURL { return .array(strings.map(JSONValue.string)) }
+            var seen = Set<String>()
+            return .array(strings.compactMap {
+                let url = resolveJavaScriptRuleURL($0, enabled: true, context: context)
+                return !url.isEmpty && seen.insert(url).inserted ? .string(url) : nil
+            })
+        case "element":
+            guard let first = evaluation.values.first else { return .null }
+            if case .string(let value) = first, value.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("<") {
+                return .array(evaluation.listItems(rule: rule))
             }
+            return first
+        case "elements": return .array(evaluation.listItems(rule: rule))
+        default:
+            guard !rule.isEmpty else { return .string("") }
+            var value = evaluation.strings.joined(separator: "\n")
+            if unescape, value.contains("&") { value = (try? Parser.unescapeEntities(value, false)) ?? value }
+            if isURL, value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .string(context.baseURL) }
+            return .string(resolveJavaScriptRuleURL(value, enabled: isURL, context: context))
         }
-        var result = combined.joined(separator: "\n")
-        if let branch = plan.branches.first, let pattern = branch.replacePattern, !pattern.isEmpty {
-            result = try RegexEvaluator().replacing(pattern: pattern, in: result, with: branch.replacement, firstOnly: branch.replaceFirst)
-        }
-        return resolveJavaScriptRuleURL(result, enabled: isURL, context: executionContext)
     }
 
     private func resolveJavaScriptRuleURL(
@@ -1363,16 +1853,37 @@ private protocol VariableBoxProxy: AnyObject {
 
 private final class JSVariableBox: VariableBoxProxy {
     var values: [String: String]
+    var rssState: RSSVariableState?
+    var error: Error?
+    var onError: ((Error) -> Void)?
 
     init(_ values: [String: String]) {
         self.values = values
     }
 
-    func get(_ key: String) -> String { values[key] ?? "" }
+    func get(_ key: String) -> String { values[key] ?? getBig(key) ?? "" }
+
+    func getBig(_ key: String) -> String? {
+        do { return try rssState?.get(key) }
+        catch { self.error = error; onError?(error); return nil }
+    }
+
+    func putVariable(_ key: String, _ value: String?) {
+        guard rssState != nil else { values[key] = value; return }
+        // Kotlin String.length counts UTF-16 code units, including both halves
+        // of emoji, rather than Swift graphemes or UTF-8 bytes.
+        if let value, value.utf16.count < 10_000 {
+            rssState?.put(key, nil)
+            values[key] = value
+        } else {
+            rssState?.put(key, value)
+            values.removeValue(forKey: key)
+        }
+    }
 
     @discardableResult
     func put(_ key: String, _ value: String) -> String {
-        values[key] = value
+        putVariable(key, value)
         return value
     }
 }

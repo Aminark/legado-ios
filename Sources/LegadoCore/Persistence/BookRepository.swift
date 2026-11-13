@@ -5,6 +5,12 @@ public protocol BookRepository: Sendable {
     func save(_ books: [Book]) async throws
 }
 
+/// Stores the shelf and its replacement directory in one transaction. The
+/// implementation owns both tables; callers must use the matching chapter store.
+public protocol SourceSwitchBookRepository: BookRepository {
+    func saveSourceSwitch(_ books: [Book], chapters: [BookChapter], bookURL: String) async throws
+}
+
 public actor FileBookRepository: BookRepository {
     private let fileURL: URL
     private let encoder: JSONEncoder

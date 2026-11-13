@@ -71,7 +71,7 @@ struct LegadoApp: App {
                             return
                         }
                         await sourceLibrary.load()
-                        if url.scheme?.lowercased() == "legado", url.path.lowercased() == "/replacerule" {
+                        if RuleImportInput.isDeepLink(url, for: "replaceRule") {
                             await replaceRuleLibrary.load()
                             await replaceRuleLibrary.importText(url.absoluteString)
                             if let notice = replaceRuleLibrary.notice {

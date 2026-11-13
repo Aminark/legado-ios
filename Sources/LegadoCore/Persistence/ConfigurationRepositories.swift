@@ -306,6 +306,9 @@ public actor SQLiteConfigurationRepository: ConfigurationRepository {
     private let database: LegadoDatabase
     public init(database: LegadoDatabase) { self.database = database }
     public func loadTxtTocRules() async throws -> [TxtTocRule] { try await database.loadTxtTocRules() }
+    public func loadTxtTocRules(initialDefaults: [TxtTocRule]) async throws -> [TxtTocRule] {
+        try await database.loadTxtTocRules(initialDefaults: initialDefaults)
+    }
     public func saveTxtTocRules(_ values: [TxtTocRule]) async throws { try await database.replaceTxtTocRules(values) }
     public func loadHttpTTS() async throws -> [HttpTTS] { try await database.loadHttpTTS() }
     public func saveHttpTTS(_ values: [HttpTTS]) async throws { try await database.replaceHttpTTS(values) }

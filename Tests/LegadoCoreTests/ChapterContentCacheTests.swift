@@ -3,6 +3,49 @@ import Testing
 @testable import LegadoCore
 
 struct ChapterContentCacheTests {
+    @Test func rekeyCopiesOnlySafeMatchesAndPreservesOriginalEntries() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let old = Book(bookUrl: "old", name: "书", origin: "source")
+        let new = Book(bookUrl: "new", name: "书", origin: "source")
+        let titles = ["第一章", "唯一标题", "番外", "番外", "无效来源"]
+        let originals = titles.enumerated().map { BookChapter(url: "old/\($0.offset)", title: $0.element, bookUrl: old.bookUrl, index: $0.offset) }
+        for chapter in originals {
+            try await cache.save(.init(bookURL: old.bookUrl, chapterURL: chapter.url, content: "正文\(chapter.index)",
+                                       sourceID: chapter.index == 4 ? "wrong-source" : old.origin))
+        }
+        let updated = titles.enumerated().map { BookChapter(url: $0.offset == 0 ? "old/0" : "new/\($0.offset)", title: $0.element, bookUrl: new.bookUrl, index: $0.offset) }
+        #expect(try await cache.copyContents(from: old, chapters: originals, to: new, chapters: updated) == 2)
+        #expect(try await cache.load(bookURL: new.bookUrl, chapterURL: "old/0")?.content == "正文0")
+        #expect(try await cache.load(bookURL: new.bookUrl, chapterURL: "new/1")?.content == "正文1")
+        for index in 2...4 { #expect(try await cache.load(bookURL: new.bookUrl, chapterURL: "new/\(index)") == nil) }
+        for chapter in originals { #expect(try await cache.load(bookURL: old.bookUrl, chapterURL: chapter.url) != nil) }
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func legacyTextSupplementIsReadableWithoutChangingMediaMetadata(sourceType: Int) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapter = BookChapter(url: "chapter", title: "章", bookUrl: book.bookUrl, index: 0)
+        var source = BookSource(bookSourceUrl: "source", bookSourceName: "源")
+        source.bookSourceType = sourceType
+        try await cache.save(.init(bookURL: book.bookUrl, chapterURL: chapter.url,
+                                   content: "旧正文", supplementalContent: "旧副文", sourceID: source.id))
+        let loader = StubChapterLoader(content: "网络正文")
+        let coordinator = ChapterContentCoordinator(loader: loader, cache: cache)
+
+        let loaded = await coordinator.load(book: book, chapter: chapter, source: source)
+
+        #expect(loaded.loadedFromCache)
+        #expect(loaded.report.content == (sourceType == 0 ? "旧正文\n旧副文" : "旧正文"))
+        #expect(loaded.report.supplementalContent == (sourceType == 0 ? nil : "旧副文"))
+        #expect(await loader.calls() == 0)
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: chapter.url)?.content == "旧正文")
+    }
+
     @Test func failedPageDoesNotTurnPartialContentIntoSuccessfulCache() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

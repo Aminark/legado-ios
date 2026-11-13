@@ -15,6 +15,7 @@ public struct RSSContentFetchResult: Sendable {
     public var body: String
     public var content: String
     public var diagnostics: [RuleDiagnostic]
+    public var article: RssArticle
 }
 
 public struct RSSService: Sendable {
@@ -58,13 +59,14 @@ public struct RSSService: Sendable {
         key: String? = nil
     ) async throws -> RSSFetchResult {
         let adapter = source.bookSourceAdapter
-        let headers = try BookSourceHeaderResolver().resolve(adapter)
-        let prepared = try urlBuilder.prepare(
-            sortURL,
-            context: .init(key: key, page: page, source: adapter),
-            baseURL: URL(string: source.sourceUrl),
-            defaultHeaders: headers
-        )
+        let prepared = try await RuleExecutionWorker.run {
+            try urlBuilder.prepare(
+                sortURL,
+                context: .init(key: key, page: page, source: adapter),
+                baseURL: URL(string: source.sourceUrl),
+                defaultHeaders: BookSourceHeaderResolver().resolve(adapter)
+            )
+        }
         let response = try await networkPolicy.execute(
             prepared,
             source: adapter,
@@ -99,13 +101,14 @@ public struct RSSService: Sendable {
 
     public func contentDetailed(article: RssArticle, rule: String, source: RssSource) async throws -> RSSContentFetchResult {
         let adapter = source.bookSourceAdapter
-        let headers = try BookSourceHeaderResolver().resolve(adapter)
-        let prepared = try urlBuilder.prepare(
-            article.link,
-            context: .init(variables: article.variableMap, source: adapter),
-            baseURL: URL(string: article.origin),
-            defaultHeaders: headers
-        )
+        let prepared = try await RuleExecutionWorker.run {
+            try urlBuilder.prepare(
+                article.link,
+                context: .init(variables: article.variableMap, source: adapter, rssArticle: article),
+                baseURL: URL(string: article.origin),
+                defaultHeaders: BookSourceHeaderResolver().resolve(adapter)
+            )
+        }
         let response = try await networkPolicy.execute(
             prepared,
             source: adapter,
@@ -117,8 +120,13 @@ public struct RSSService: Sendable {
         let result = await engine.evaluate(
             rule,
             inText: response.decodedText,
-            baseURL: URL(string: article.link, relativeTo: URL(string: article.origin))?.absoluteURL.absoluteString ?? article.link,
-            context: .init(variables: article.variableMap, baseURL: response.finalURL.absoluteString, source: adapter)
+            baseURL: response.finalURL.absoluteString,
+            context: .init(
+                variables: response.requestVariables,
+                baseURL: response.finalURL.absoluteString,
+                source: adapter,
+                rssArticle: response.rssArticle ?? article
+            )
         )
         if let error = result.diagnostics.first(where: { $0.severity == .error }) {
             throw RuleEngineError.malformedRule(rule: rule, detail: error.message)
@@ -129,7 +137,8 @@ public struct RSSService: Sendable {
             statusCode: response.statusCode,
             body: response.decodedText,
             content: result.joinedString ?? "",
-            diagnostics: result.diagnostics
+            diagnostics: result.diagnostics,
+            article: result.rssArticle ?? response.rssArticle ?? article
         )
     }
 }

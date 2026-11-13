@@ -7,6 +7,7 @@ public enum LocalBookError: Error, LocalizedError, Sendable {
     case oversized
     case unreadableEncoding
     case missingFile
+    case emptyFile
 
     public var errorDescription: String? {
         switch self {
@@ -14,6 +15,7 @@ public enum LocalBookError: Error, LocalizedError, Sendable {
         case .oversized: "本地书超过当前配置允许的大小"
         case .unreadableEncoding: "无法识别 TXT 编码"
         case .missingFile: "本地书文件已丢失"
+        case .emptyFile: "TXT 文件没有正文"
         }
     }
 }
@@ -40,6 +42,7 @@ public enum TxtTocRuleSelector {
         var maximum = -1
         var selected: TxtTocRule?
         for rule in rules.filter(\.enable).sorted(by: { $0.serialNumber < $1.serialNumber }) {
+            if Task.isCancelled { break }
             guard !rule.rule.isEmpty else { continue }
             guard let expression = try? NSRegularExpression(pattern: rule.rule, options: .anchorsMatchLines) else { continue }
             var start = 0
@@ -47,6 +50,7 @@ public enum TxtTocRuleSelector {
             var shortGapCount = 0
             var lastTitle: String?
             for match in expression.matches(in: content, range: NSRange(location: 0, length: source.length)) {
+                if Task.isCancelled { break }
                 let length = match.range.location - start
                 if start == 0 || length > 1_000 {
                     let rawTitle = source.substring(with: match.range)
@@ -93,7 +97,7 @@ private struct TxtHeadingMatch {
 public struct LocalBookService: Sendable {
     public var maximumFileSize: Int64
     public var tocRules: [TxtTocRule]
-    private var loadsLiveTocRules = false
+    private var usesFallbackTocRule = true
 
     public init(maximumFileSize: Int64 = .max, tocRules: [TxtTocRule] = []) {
         self.maximumFileSize = maximumFileSize
@@ -102,6 +106,14 @@ public struct LocalBookService: Sendable {
 
     public static func live() -> LocalBookService {
         LocalBookService(tocRules: TxtTocRuleDefaults.load())
+    }
+
+    public func usingStoredTocRules(from repository: SQLiteConfigurationRepository) async throws -> LocalBookService {
+        var configured = self
+        configured.tocRules = try await repository.loadTxtTocRules(initialDefaults: tocRules)
+            .filter(\.enable).sorted { $0.serialNumber < $1.serialNumber }
+        configured.usesFallbackTocRule = false
+        return configured
     }
 
     public static func supports(_ url: URL) -> Bool {
@@ -179,7 +191,9 @@ public struct LocalBookService: Sendable {
     }
 
     private func textFileReport(data: Data, sourceURL: URL, destination: URL) throws -> LocalBookImportReport {
+        guard !data.isEmpty else { throw LocalBookError.emptyFile }
         let decoded = try decode(Data(data.prefix(512_000)), allowTruncatedTail: data.count > 512_000)
+        guard data.count > bomLength(in: data, encoding: decoded.encoding) else { throw LocalBookError.emptyFile }
 
         let name = sourceURL.deletingPathExtension().lastPathComponent
         var book = Book(bookUrl: destination.absoluteString, name: name, origin: "local")
@@ -194,36 +208,23 @@ public struct LocalBookService: Sendable {
         }
         if let selectedRule {
             book.tocUrl = selectedRule.rule + TxtTocRuleSelector.separator + selectedRule.replacement
+        } else if !usesFallbackTocRule {
+            book.tocUrl = TxtTocRuleSelector.separator
         }
         let fullBOMLength = bomLength(in: data, encoding: decoded.encoding)
-        let hasTOC = !headingMatches(
-            data: data,
-            encoding: decoded.encoding,
-            bomLength: fullBOMLength,
-            pattern: selectedRule?.rule ?? fallbackTocPattern,
-            usesFirstCapture: selectedRule == nil
-        ).isEmpty
-        var chapters = chapters(
+        var intro: String?
+        var chapters = try chapters(
             data: data,
             encoding: decoded.encoding,
             bomLength: fullBOMLength,
             book: book,
             fallbackTitle: name,
-            selectedRule: selectedRule
+            selectedRule: selectedRule,
+            intro: &intro
         )
-        let totalWordCount = applyWordCounts(&chapters, data: data, encoding: decoded.encoding)
+        let totalWordCount = try applyWordCounts(&chapters, data: data, encoding: decoded.encoding)
         book.wordCount = wordCountFormat(totalWordCount)
-        if hasTOC,
-           let first = chapters.first(where: { !$0.isVolume && $0.start == Int64(fullBOMLength) }),
-           first.start == Int64(fullBOMLength),
-           let endValue = first.end,
-           endValue > Int64(fullBOMLength),
-           let preface = String(
-               data: data.subdata(in: fullBOMLength..<min(Int(endValue), data.count)),
-               encoding: decoded.encoding
-           ) {
-            book.intro = preface.utf16.count > 600 ? String(preface.prefix(600)) : preface
-        }
+        book.intro = intro
         book.totalChapterNum = chapters.count
         book.latestChapterTitle = chapters.last?.title
         return .init(book: book, chapters: chapters)
@@ -241,16 +242,101 @@ public struct LocalBookService: Sendable {
             rule, title, index, previous, length in
             transformedTitle(title, script: rule.replacement, index: index, previousTitle: previous, previousLength: length, book: book, volumeState: selectionVolumeState)
         }
-        var chapters = chapters(
+        var intro: String?
+        var chapters = try chapters(
             data: decoded.data,
             encoding: decoded.encoding,
             bomLength: decoded.bomLength,
             book: book,
             fallbackTitle: book.name,
-            selectedRule: selectedRule
+            selectedRule: selectedRule,
+            intro: &intro
         )
-        _ = applyWordCounts(&chapters, data: decoded.data, encoding: decoded.encoding)
+        _ = try applyWordCounts(&chapters, data: decoded.data, encoding: decoded.encoding)
         return .init(chapters: chapters)
+    }
+
+    /// Rebuild on the original file; nil selects from the current enabled rules,
+    /// while an explicit empty rule requests byte-based chapters without a TOC.
+    public func rebuildTextFile(
+        book: Book, rule: TxtTocRule?, splitLongChapter: Bool,
+        previousChapters: [BookChapter]
+    ) throws -> LocalBookImportReport {
+        guard let url = URL(string: book.bookUrl), url.isFileURL,
+              url.pathExtension.lowercased() == "txt" else { throw LocalBookError.unsupportedFormat }
+        try Task.checkCancellation()
+        if let rule, !rule.rule.isEmpty { _ = try NSRegularExpression(pattern: rule.rule, options: .anchorsMatchLines) }
+        let decoded = try read(book)
+        guard decoded.data.count > decoded.bomLength else { throw LocalBookError.emptyFile }
+        var updated = book
+        updated.charset = decoded.charset
+        if updated.readConfig == nil { updated.readConfig = BookReadConfig() }
+        updated.readConfig?.splitLongChapter = splitLongChapter
+        let volumeState = TxtVolumeState()
+        let selected = rule ?? TxtTocRuleSelector.select(
+            content: textProbe(decoded.data, encoding: decoded.encoding), rules: effectiveTocRules()
+        ) { rule, title, index, previous, length in
+            transformedTitle(title, script: rule.replacement, index: index, previousTitle: previous,
+                             previousLength: length, book: updated, volumeState: volumeState)
+        }
+        try Task.checkCancellation()
+        updated.tocUrl = selected.map { $0.rule + TxtTocRuleSelector.separator + $0.replacement }
+            ?? (usesFallbackTocRule ? "" : TxtTocRuleSelector.separator)
+        var intro: String?
+        var rebuilt = try chapters(data: decoded.data, encoding: decoded.encoding, bomLength: decoded.bomLength,
+                               book: updated, fallbackTitle: updated.name, selectedRule: selected, intro: &intro)
+        updated.wordCount = wordCountFormat(try applyWordCounts(&rebuilt, data: decoded.data, encoding: decoded.encoding))
+        updated.intro = intro
+        updated.totalChapterNum = rebuilt.count
+        updated.latestChapterTitle = rebuilt.last?.title
+        remapReadingPosition(&updated, from: previousChapters, to: rebuilt, data: decoded.data, encoding: decoded.encoding)
+        return .init(book: updated, chapters: rebuilt)
+    }
+
+    private func remapReadingPosition(
+        _ book: inout Book, from previous: [BookChapter], to chapters: [BookChapter],
+        data: Data, encoding: String.Encoding
+    ) {
+        let readable = chapters.filter { !$0.isVolume }
+        guard let first = readable.first else { return }
+        let old = previous.first { $0.index == book.durChapterIndex }
+        var anchor = old?.start ?? first.start ?? 0
+        if let old, let raw = chapterText(old, data: data, encoding: encoding) {
+            let leading = leadingWhitespaceLength(raw)
+            let position = max(book.durChapterPos, 0)
+            var rawPosition = min(raw.utf16.count, leading > 0 && position > 0 ? leading + max(position - 2, 0) : position)
+            // Reader offsets are UTF-16. Clamp an offset inside an emoji to a
+            // scalar boundary before converting that prefix back to file bytes.
+            while rawPosition > 0,
+                  String.Index(raw.utf16.index(raw.utf16.startIndex, offsetBy: rawPosition), within: raw) == nil {
+                rawPosition -= 1
+            }
+            let prefix = (raw as NSString).substring(to: rawPosition)
+            anchor += Int64(prefix.data(using: encoding)?.count ?? 0)
+        }
+        let chapter = readable.first { ($0.start ?? 0) <= anchor && anchor < ($0.end ?? 0) }
+            ?? readable.last { ($0.start ?? 0) <= anchor } ?? first
+        let start = max(Int(chapter.start ?? 0), 0)
+        let end = min(Int(chapter.end ?? Int64(data.count)), data.count)
+        let point = min(max(Int(anchor), start), end)
+        let prefix = String(data: data.subdata(in: start..<point), encoding: encoding) ?? ""
+        let raw = chapterText(chapter, data: data, encoding: encoding) ?? ""
+        let leading = leadingWhitespaceLength(raw)
+        book.durChapterIndex = chapter.index
+        book.durChapterTitle = chapter.title
+        book.durChapterPos = leading > 0 ? (prefix.utf16.count <= leading ? 0 : prefix.utf16.count - leading + 2) : prefix.utf16.count
+    }
+
+    private func chapterText(_ chapter: BookChapter, data: Data, encoding: String.Encoding) -> String? {
+        let start = max(Int(chapter.start ?? 0), 0)
+        let end = min(Int(chapter.end ?? Int64(data.count)), data.count)
+        guard start <= end else { return nil }
+        return String(data: data.subdata(in: start..<end), encoding: encoding)
+    }
+
+    private func leadingWhitespaceLength(_ text: String) -> Int {
+        guard let range = text.range(of: #"^[\n\s]+"#, options: .regularExpression) else { return 0 }
+        return text[range].utf16.count
     }
 
     public func loadContent(book: Book, chapter: BookChapter) throws -> ChapterContentReport {
@@ -260,6 +346,7 @@ public struct LocalBookService: Sendable {
         }
         guard let url = URL(string: book.bookUrl), url.isFileURL,
               FileManager.default.fileExists(atPath: url.path) else { throw LocalBookError.missingFile }
+        try validateFile(url)
         let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let start = max(Int(chapter.start ?? 0), 0)
         let end = min(Int(chapter.end ?? Int64(fileSize)), fileSize)
@@ -274,7 +361,11 @@ public struct LocalBookService: Sendable {
         let contentData = try handle.read(upToCount: end - start) ?? Data()
         let encoding: String.Encoding
         if let charset = book.charset, let stored = self.encoding(named: charset) {
-            encoding = stored
+            if stored == .utf16 {
+                try handle.seek(toOffset: 0)
+                let marker = try handle.read(upToCount: 2) ?? Data()
+                encoding = marker.starts(with: [0xFF, 0xFE]) ? .utf16LittleEndian : .utf16BigEndian
+            } else { encoding = stored }
         } else {
             try handle.seek(toOffset: 0)
             let probe = try handle.read(upToCount: 512_000) ?? Data()
@@ -288,9 +379,14 @@ public struct LocalBookService: Sendable {
     private func read(_ book: Book) throws -> (charset: String, encoding: String.Encoding, bomLength: Int, data: Data) {
         guard let url = URL(string: book.bookUrl), url.isFileURL,
               FileManager.default.fileExists(atPath: url.path) else { throw LocalBookError.missingFile }
+        try validateFile(url)
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard !data.isEmpty else { throw LocalBookError.emptyFile }
         if let charset = book.charset, let encoding = encoding(named: charset) {
-            return (charset, encoding, bomLength(in: data, encoding: encoding), data)
+            let concrete = encoding == .utf16
+                ? (data.starts(with: [0xFF, 0xFE]) ? String.Encoding.utf16LittleEndian : .utf16BigEndian) : encoding
+            let resolvedCharset = encoding == .utf16 ? (concrete == .utf16LittleEndian ? "UTF-16LE" : "UTF-16BE") : charset
+            return (resolvedCharset, concrete, bomLength(in: data, encoding: concrete), data)
         }
         let decoded = try decode(Data(data.prefix(512_000)), allowTruncatedTail: data.count > 512_000)
         return (decoded.charset, decoded.encoding, bomLength(in: data, encoding: decoded.encoding), data)
@@ -375,10 +471,11 @@ public struct LocalBookService: Sendable {
         bomLength: Int,
         book: Book,
         fallbackTitle: String,
-        selectedRule: TxtTocRule?
-    ) -> [BookChapter] {
-        let pattern = selectedRule?.rule ?? fallbackTocPattern
-        let matches = headingMatches(
+        selectedRule: TxtTocRule?,
+        intro: inout String?
+    ) throws -> [BookChapter] {
+        let pattern = selectedRule?.rule ?? (usesFallbackTocRule ? fallbackTocPattern : "")
+        let matches = try headingMatches(
             data: data,
             encoding: encoding,
             bomLength: bomLength,
@@ -387,7 +484,7 @@ public struct LocalBookService: Sendable {
         )
         guard !matches.isEmpty else {
             if data.count - bomLength > 10 * 1_024 {
-                return chaptersWithoutTOC(data, encoding: encoding, bomLength: bomLength, book: book)
+                return try chaptersWithoutTOC(data, encoding: encoding, bomLength: bomLength, book: book)
             }
             var chapter = BookChapter(url: "local://chapter/0", title: fallbackTitle, bookUrl: book.bookUrl, index: 0)
             chapter.start = Int64(bomLength)
@@ -398,40 +495,47 @@ public struct LocalBookService: Sendable {
         var previousTitle: String?
         var chapters: [BookChapter] = []
         let volumeState = TxtVolumeState()
-        if let first = matches.first,
-           first.start > Int64(bomLength),
-           let preface = String(
-               data: data.subdata(in: bomLength..<min(Int(first.start), data.count)),
-               encoding: encoding
-           ),
-           !preface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            var insertedVolumes: [String] = []
-            let title = transformedTitle(
-                "前言",
-                script: selectedRule?.replacement,
-                index: chapters.count,
-                book: book,
-                volumeState: volumeState,
-                onVolume: { insertedVolumes.append($0) }
-            )
-            for volumeTitle in insertedVolumes {
-                var volume = BookChapter(url: "", title: volumeTitle, bookUrl: book.bookUrl, index: chapters.count)
-                volume.start = Int64(bomLength)
-                volume.end = Int64(bomLength)
-                volume.baseUrl = book.bookUrl
-                volume.isVolume = true
-                chapters.append(volume)
-            }
-            if !title.isEmpty {
-                var chapter = BookChapter(url: "", title: title, bookUrl: book.bookUrl, index: chapters.count)
-                chapter.start = Int64(bomLength)
-                chapter.end = first.start
-                chapter.baseUrl = book.bookUrl
-                chapters.append(chapter)
+        func appendPreface(before boundary: Int64) {
+            if boundary > Int64(bomLength),
+               let preface = String(
+                   data: data.subdata(in: bomLength..<min(Int(boundary), data.count)),
+                   encoding: encoding
+               ),
+               !preface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                var insertedVolumes: [String] = []
+                let title = transformedTitle(
+                    "前言",
+                    script: selectedRule?.replacement,
+                    index: chapters.count,
+                    book: book,
+                    volumeState: volumeState,
+                    onVolume: { insertedVolumes.append($0) }
+                )
+                // Android preserves a deliberately hidden preface in full in
+                // the introduction, so suppressing its title never loses text.
+                intro = !title.isEmpty && preface.utf16.count > 600 ? String(preface.prefix(600)) : preface
+                for volumeTitle in insertedVolumes {
+                    var volume = BookChapter(url: "", title: volumeTitle, bookUrl: book.bookUrl, index: chapters.count)
+                    volume.start = Int64(bomLength)
+                    volume.end = Int64(bomLength)
+                    volume.baseUrl = book.bookUrl
+                    volume.isVolume = true
+                    chapters.append(volume)
+                }
+                if !title.isEmpty {
+                    var chapter = BookChapter(url: "", title: title, bookUrl: book.bookUrl, index: chapters.count)
+                    chapter.start = Int64(bomLength)
+                    chapter.end = boundary
+                    chapter.baseUrl = book.bookUrl
+                    chapters.append(chapter)
+                }
             }
         }
+        var previousAcceptedEnd = Int64(bomLength)
         for (matchIndex, match) in matches.enumerated() {
-            splitLastLongChapterIfNeeded(
+            try Task.checkCancellation()
+            if chapters.allSatisfy(\.isVolume) { appendPreface(before: match.start) }
+            try splitLastLongChapterIfNeeded(
                 &chapters,
                 data: data,
                 encoding: encoding,
@@ -445,14 +549,44 @@ public struct LocalBookService: Sendable {
                 script: selectedRule?.replacement,
                 index: chapters.count,
                 previousTitle: previousTitle,
-                previousLength: match.previousLength,
+                previousLength: previousTitle == nil ? -1 : (String(
+                    data: data.subdata(in: Int(previousAcceptedEnd)..<Int(match.start)), encoding: encoding
+                )?.utf16.count ?? 0),
                 book: book,
                 volumeState: volumeState,
                 onVolume: { insertedVolumes.append($0) }
             )
-            previousTitle = title
             let start = match.end
             let end = matchIndex + 1 < matches.count ? matches[matchIndex + 1].start : Int64(data.count)
+            guard !title.isEmpty else {
+                // A suppressed heading is ordinary body text. Extend the last
+                // chapter through it instead of dropping bytes or adding an
+                // unreadable chapter with an empty title.
+                if let last = chapters.lastIndex(where: { !$0.isVolume }) { chapters[last].end = end }
+                // putVolume is a script side effect even when the returned
+                // heading is hidden. Keep a zero-length volume marker and the
+                // body in the preceding readable chapter, without turning the
+                // marker into a normal chapter on the next match.
+                for volumeTitle in insertedVolumes {
+                    var volume = BookChapter(url: "", title: volumeTitle, bookUrl: book.bookUrl, index: chapters.count)
+                    volume.start = match.start
+                    volume.end = match.start
+                    volume.baseUrl = book.bookUrl
+                    volume.isVolume = true
+                    chapters.append(volume)
+                }
+                if let volumeTitle = insertedVolumes.last { previousTitle = volumeTitle }
+                continue
+            }
+            if let last = chapters.indices.last, !chapters[last].isVolume,
+               let priorStart = chapters[last].start,
+               let body = String(data: data.subdata(in: Int(priorStart)..<Int(match.start)), encoding: encoding),
+               body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                chapters[last].isVolume = true
+                volumeState.lastTitle = chapters[last].title
+            }
+            previousTitle = title
+            previousAcceptedEnd = match.end
             for volumeTitle in insertedVolumes {
                 let offset = chapters.last?.end ?? 0
                 var volume = BookChapter(url: "local://chapter/\(chapters.count)", title: volumeTitle, bookUrl: book.bookUrl, index: chapters.count)
@@ -468,7 +602,15 @@ public struct LocalBookService: Sendable {
             chapter.baseUrl = book.bookUrl
             chapters.append(chapter)
         }
-        splitLastLongChapterIfNeeded(
+        if chapters.allSatisfy(\.isVolume) {
+            var chapter = BookChapter(url: "", title: fallbackTitle, bookUrl: book.bookUrl, index: chapters.count)
+            chapter.start = Int64(bomLength)
+            chapter.end = Int64(data.count)
+            chapter.baseUrl = book.bookUrl
+            chapters.append(chapter)
+            return finalized(chapters, book: book)
+        }
+        try splitLastLongChapterIfNeeded(
             &chapters,
             data: data,
             encoding: encoding,
@@ -490,7 +632,7 @@ public struct LocalBookService: Sendable {
         book: Book,
         volumeState: TxtVolumeState,
         enabled: Bool
-    ) {
+    ) throws {
         guard enabled, book.readConfig?.splitLongChapter ?? true,
               var chapter = chapters.last,
               !chapter.isVolume,
@@ -505,7 +647,7 @@ public struct LocalBookService: Sendable {
         chapter.tag = nil
         chapters.append(chapter)
         volumeState.lastTitle = chapter.title
-        chapters.append(contentsOf: splitByteRange(
+        chapters.append(contentsOf: try splitByteRange(
             data,
             start: start,
             end: end,
@@ -522,8 +664,8 @@ public struct LocalBookService: Sendable {
         encoding: String.Encoding,
         book: Book,
         title: (Int) -> String
-    ) -> [BookChapter] {
-        splitHeadinglessRange(data, start: initialStart, end: rangeEnd, encoding: encoding, book: book) { _, _, index in title(index) }
+    ) throws -> [BookChapter] {
+        try splitHeadinglessRange(data, start: initialStart, end: rangeEnd, encoding: encoding, book: book) { _, _, index in title(index) }
     }
 
     private func headingMatches(
@@ -532,25 +674,31 @@ public struct LocalBookService: Sendable {
         bomLength: Int,
         pattern: String,
         usesFirstCapture: Bool
-    ) -> [TxtHeadingMatch] {
+    ) throws -> [TxtHeadingMatch] {
+        try Task.checkCancellation()
+        guard !pattern.isEmpty else { return [] }
         guard let expression = try? NSRegularExpression(pattern: pattern, options: .anchorsMatchLines) else { return [] }
         if data.count <= 2 * 1_024 * 1_024,
            bomLength <= data.count,
            let text = String(data: data.subdata(in: bomLength..<data.count), encoding: encoding) {
             let source = text as NSString
-            let offsets = byteOffsetMap(text, encoding: encoding, initialOffset: bomLength)
-            return expression.matches(in: text, range: NSRange(location: 0, length: source.length)).map { match in
+            let offsets = try byteOffsetMap(text, encoding: encoding, initialOffset: bomLength)
+            var previousEnd = 0
+            return try expression.matches(in: text, range: NSRange(location: 0, length: source.length)).map { match in
+                try Task.checkCancellation()
                 let titleRange = usesFirstCapture && match.numberOfRanges > 1 ? match.range(at: 1) : match.range
                 let title = titleRange.location == NSNotFound ? "" : source.substring(with: titleRange)
                 let start = min(match.range.location, offsets.count - 1)
                 let end = min(NSMaxRange(match.range), offsets.count - 1)
-                return .init(title: title, start: offsets[start], end: offsets[end], previousLength: match.range.location)
+                defer { previousEnd = NSMaxRange(match.range) }
+                return .init(title: title, start: offsets[start], end: offsets[end], previousLength: match.range.location - previousEnd)
             }
         }
         let blockSize = 512_000
         var position = bomLength
         var output: [TxtHeadingMatch] = []
         while position < data.count {
+            try Task.checkCancellation()
             let limit = min(position + blockSize, data.count)
             var end = limit
             if limit < data.count,
@@ -559,15 +707,17 @@ public struct LocalBookService: Sendable {
                 end = newline
             }
             if end <= position { end = limit }
+            end = alignedBoundary(in: data, start: position, proposedEnd: end, encoding: encoding)
             let blockData = data.subdata(in: position..<end)
             guard let block = String(data: blockData, encoding: encoding) else {
                 position = end
                 continue
             }
             let source = block as NSString
-            let offsets = byteOffsetMap(block, encoding: encoding, initialOffset: position)
+            let offsets = try byteOffsetMap(block, encoding: encoding, initialOffset: position)
             var previousEnd = 0
             for match in expression.matches(in: block, range: NSRange(location: 0, length: source.length)) {
+                try Task.checkCancellation()
                 let titleRange = usesFirstCapture && match.numberOfRanges > 1 ? match.range(at: 1) : match.range
                 let title = titleRange.location == NSNotFound ? "" : source.substring(with: titleRange)
                 let startIndex = min(match.range.location, offsets.count - 1)
@@ -585,8 +735,8 @@ public struct LocalBookService: Sendable {
         return output
     }
 
-    private func chaptersWithoutTOC(_ data: Data, encoding: String.Encoding, bomLength: Int, book: Book) -> [BookChapter] {
-        let chapters = splitHeadinglessRange(data, start: bomLength, end: data.count, encoding: encoding, book: book) {
+    private func chaptersWithoutTOC(_ data: Data, encoding: String.Encoding, bomLength: Int, book: Book) throws -> [BookChapter] {
+        let chapters = try splitHeadinglessRange(data, start: bomLength, end: data.count, encoding: encoding, book: book) {
             block, chapter, _ in "第\(block)章(\(chapter))"
         }
         return finalized(chapters, book: book)
@@ -599,7 +749,7 @@ public struct LocalBookService: Sendable {
         encoding: String.Encoding,
         book: Book,
         title: (Int, Int, Int) -> String
-    ) -> [BookChapter] {
+    ) throws -> [BookChapter] {
         let bufferSize = 512_000
         let maximumLength = 10 * 1_024
         var cursor = rangeStart
@@ -607,10 +757,12 @@ public struct LocalBookService: Sendable {
         var output: [BookChapter] = []
         var finalChapterNumber = 0
         while cursor < rangeEnd {
+            try Task.checkCancellation()
             block += 1
-            let blockEnd = min(cursor + bufferSize, rangeEnd)
+            let blockEnd = alignedBoundary(in: data, start: cursor, proposedEnd: min(cursor + bufferSize, rangeEnd), encoding: encoding)
             var chapterInBlock = 0
             while blockEnd - cursor > maximumLength {
+                try Task.checkCancellation()
                 chapterInBlock += 1
                 let searchStart = cursor + maximumLength
                 let newline = newlineIndex(
@@ -659,9 +811,10 @@ public struct LocalBookService: Sendable {
         _ chapters: inout [BookChapter],
         data: Data,
         encoding: String.Encoding
-    ) -> Int {
+    ) throws -> Int {
         var total = 0
         for index in chapters.indices where !chapters[index].isVolume {
+            try Task.checkCancellation()
             let start = max(Int(chapters[index].start ?? 0), 0)
             let end = min(max(Int(chapters[index].end ?? Int64(start)), start), data.count)
             guard start < end else {
@@ -699,8 +852,10 @@ public struct LocalBookService: Sendable {
 
     private func rule(storedIn value: String) -> TxtTocRule? {
         guard !value.isEmpty else { return nil }
-        let parts = value.components(separatedBy: TxtTocRuleSelector.separator)
-        return .init(name: "本书目录规则", rule: parts[0], replacement: parts.dropFirst().first ?? "")
+        guard let separator = value.range(of: TxtTocRuleSelector.separator) else {
+            return .init(name: "本书目录规则", rule: value)
+        }
+        return .init(name: "本书目录规则", rule: String(value[..<separator.lowerBound]), replacement: String(value[separator.upperBound...]))
     }
 
     private func effectiveTocRules() -> [TxtTocRule] {
@@ -772,6 +927,14 @@ public struct LocalBookService: Sendable {
         encoding == .utf16 || encoding == .utf16LittleEndian || encoding == .utf16BigEndian
     }
 
+    private func alignedBoundary(in data: Data, start: Int, proposedEnd: Int, encoding: String.Encoding) -> Int {
+        for removed in 0...3 where proposedEnd - removed > start {
+            let end = proposedEnd - removed
+            if String(data: data.subdata(in: start..<end), encoding: encoding) != nil { return end }
+        }
+        return proposedEnd
+    }
+
     private func newlineIndex(
         in data: Data,
         range: Range<Int>,
@@ -808,11 +971,12 @@ public struct LocalBookService: Sendable {
         return nil
     }
 
-    private func byteOffsetMap(_ content: String, encoding: String.Encoding, initialOffset: Int) -> [Int64] {
+    private func byteOffsetMap(_ content: String, encoding: String.Encoding, initialOffset: Int) throws -> [Int64] {
         var offsets = [Int64](repeating: Int64(initialOffset), count: content.utf16.count + 1)
         var utf16Index = 0
         var byteOffset = initialOffset
         for scalar in content.unicodeScalars {
+            if utf16Index.isMultiple(of: 1_024) { try Task.checkCancellation() }
             let scalarText = String(scalar)
             let unitCount = scalarText.utf16.count
             let byteCount = isUTF16(encoding)

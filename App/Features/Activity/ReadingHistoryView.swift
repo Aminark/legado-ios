@@ -15,13 +15,14 @@ struct ReadingHistoryView: View {
     }
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            ReadingPillSearchField(placeholder: "搜索", text: $searchText)
             if activity.summaries.isEmpty {
-                ReadingUnavailableView(
-                    "还没有阅读记录",
-                    systemImage: "clock.arrow.circlepath",
-                    description: Text(enableReadRecord ? "翻页后会按设备累计阅读时长。" : "阅读记录当前已关闭。")
-                )
+                ReadingIllustratedEmptyState(
+                    artwork: "HistoryEmptyArtwork",
+                    title: "还没有阅读记录",
+                    message: enableReadRecord ? "翻页后会按设备累计阅读时长" : "阅读记录当前已关闭"
+                ) { EmptyView() }
             } else {
                 List {
                     Section {
@@ -56,13 +57,16 @@ struct ReadingHistoryView: View {
                     }
                 }
                 .listStyle(.insetGrouped)
+                .readingScrollContentBackgroundHidden()
             }
         }
         .navigationTitle("阅读记录")
-        .searchable(text: $searchText, prompt: "搜索")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarHidden(false)
+        .background(ReadingTheme.canvas)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Menu("阅读记录选项", systemImage: "ellipsis.circle") {
+                Menu("阅读记录选项", systemImage: "ellipsis") {
                     Toggle("记录阅读时长", isOn: $enableReadRecord)
                     Section("排序") {
                         sortButton("书名", value: 0)

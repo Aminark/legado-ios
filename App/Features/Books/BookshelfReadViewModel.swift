@@ -20,7 +20,7 @@ final class BookshelfReadViewModel: ObservableObject {
         self.updateCoordinator = updateCoordinator
     }
 
-    func load(book: Book, source: BookSource?) async {
+    func load(book: Book, source: BookSource?, commitUpdate: (@MainActor (BookUpdateReport) async -> Bool)? = nil) async {
         guard chapters.isEmpty, !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
@@ -46,8 +46,12 @@ final class BookshelfReadViewModel: ObservableObject {
             errorMessage = "目录与阅读进度不一致，且当前书籍的书源不存在。请先恢复或更换书源。"
             return
         }
-        let report = await updateCoordinator.refresh(book: book, source: source)
+        let report = await updateCoordinator.refresh(book: book, source: source, persistDirectory: commitUpdate == nil)
         if report.refreshed, matchesReadingProgress(report.book, chapters: report.chapters) {
+            if let commitUpdate, !(await commitUpdate(report)) {
+                errorMessage = "更新后的书籍保存失败，已保留原书籍和阅读位置。"
+                return
+            }
             chapters = report.chapters
             resolvedBook = report.book
         } else {

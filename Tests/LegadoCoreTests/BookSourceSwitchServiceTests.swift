@@ -1,23 +1,75 @@
+import Foundation
 import Testing
 @testable import LegadoCore
 
 struct BookSourceSwitchServiceTests {
+    @Test func loadsCandidateDirectoryWithExistingReadingConfiguration() async {
+        var current = Book(bookUrl: "old", name: "书", origin: "old")
+        current.readConfig = BookReadConfig()
+        current.readConfig?.reverseToc = true
+        let loader = RecordingSwitchDirectoryLoader()
+        let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader,
+            contentLoader: SwitchContentLoader())
+        _ = await service.prepareSwitch(current: current,
+            candidate: SearchBook(bookURL: "new", origin: "new", originName: "新源", type: 0, name: "书"),
+            source: BookSource(bookSourceUrl: "new", bookSourceName: "新源"))
+        #expect(await loader.readConfig?.reverseToc == true)
+    }
+
+    @Test func repeatedChapterTitlesResolveNearCurrentPosition() {
+        var current = Book(bookUrl: "old", name: "书", origin: "old")
+        current.totalChapterNum = 30
+        current.durChapterIndex = 23
+        current.durChapterTitle = "番外"
+        current.durChapterPos = 88
+        let chapters = (0..<31).map {
+            BookChapter(url: "new/\($0)", title: [1, 24].contains($0) ? "番外" : "第\($0)章", bookUrl: "new", index: $0)
+        }
+        let report = BookSourceProgressMapper().migrate(current: current,
+            replacement: Book(bookUrl: "new", name: "书"), chapters: chapters, now: 100)
+        #expect(report.book.durChapterIndex == 24)
+        #expect(report.book.durChapterPos == 88)
+    }
+
+    @Test(arguments: ["第一百零二章 旧的标题", "第１０２章 旧的标题", "102、旧的标题"])
+    func recognizesEquivalentChapterNumbers(title: String) {
+        var current = Book(bookUrl: "old", name: "书", origin: "old")
+        current.totalChapterNum = 120
+        current.durChapterIndex = 101
+        current.durChapterTitle = title
+        let chapters = (0..<122).map {
+            BookChapter(url: "new/\($0)", title: $0 == 103 ? "第102章 新的标题" : "第\($0 + 1000)章", bookUrl: "new", index: $0)
+        }
+        let report = BookSourceProgressMapper().migrate(current: current,
+            replacement: Book(bookUrl: "new", name: "书"), chapters: chapters, now: 100)
+        #expect(report.book.durChapterIndex == 103)
+    }
+
+    @Test(arguments: [Int.min, -1, 0, Int.max]) func invalidImportedPositionsRemainBounded(index: Int) {
+        var current = Book(bookUrl: "old", name: "书")
+        current.totalChapterNum = Int.max
+        current.durChapterIndex = index
+        current.durChapterTitle = "第99999999999999999999999999999999999章"
+        let chapters = [BookChapter(url: "new/1", title: "序", bookUrl: "new", index: 0)]
+        let report = BookSourceProgressMapper().migrate(current: current,
+            replacement: Book(bookUrl: "new", name: "书"), chapters: chapters, now: 100)
+        #expect(report.book.durChapterIndex == 0)
+        #expect(!report.exactChapterMatch)
+    }
+
     @Test(arguments: [false, true]) func refusesPartiallyLoadedDirectoryOrBody(directoryFailed: Bool) async {
-        let repository = InMemoryBookChapterRepository()
         let diagnostic = RuleDiagnostic(severity: .error, code: "request.failed", message: "分页加载失败", rule: "next")
         let loader = StubSwitchLoader(
             chapters: [BookChapter(url: "chapter", title: "第一章", bookUrl: "new", index: 0)],
             diagnostics: directoryFailed ? [diagnostic] : []
         )
         let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader,
-                                              contentLoader: SwitchContentLoader(diagnostics: directoryFailed ? [] : [diagnostic]),
-                                              chapterRepository: repository)
+                                              contentLoader: SwitchContentLoader(diagnostics: directoryFailed ? [] : [diagnostic]))
         let report = await service.prepareSwitch(current: Book(bookUrl: "old", name: "书", origin: "old"),
             candidate: SearchBook(bookURL: "new", origin: "new", originName: "新源", type: 0, name: "书"),
             source: BookSource(bookSourceUrl: "new", bookSourceName: "新源"))
 
         #expect(report == nil)
-        #expect(await repository.load(bookURL: "new").isEmpty)
     }
 
     @Test(.timeLimit(.minutes(1))) func automaticRecoveryUsesEarlyValidSourceWithoutWaitingForSlowSources() async throws {
@@ -26,8 +78,7 @@ struct BookSourceSwitchServiceTests {
         let loader = CandidateAwareSwitchLoader()
         let service = BookSourceSwitchService(searcher: StreamingSwitchSearch(stream: stream),
                                               detailLoader: loader, chapterLoader: loader,
-                                              contentLoader: SwitchContentLoader(),
-                                              chapterRepository: InMemoryBookChapterRepository())
+                                              contentLoader: SwitchContentLoader())
         var source = BookSource(bookSourceUrl: "valid", bookSourceName: "好源")
         source.searchUrl = "/search"
         let candidate = SearchBook(bookURL: "valid-book", origin: "valid", originName: "好源", type: 0, name: "书")
@@ -115,7 +166,7 @@ struct BookSourceSwitchServiceTests {
         #expect(report.book.readConfig == current.readConfig)
     }
 
-    @Test func fallsBackToRelativeProgressAndResetsCharacterOffset() {
+    @Test func fallsBackToExistingIndexAndResetsCharacterOffset() {
         var current = Book(bookUrl: "old", name: "书", origin: "old")
         current.totalChapterNum = 11
         current.durChapterIndex = 5
@@ -127,24 +178,21 @@ struct BookSourceSwitchServiceTests {
         let report = BookSourceProgressMapper().migrate(current: current, replacement: replacement, chapters: chapters, now: 100)
 
         #expect(!report.exactChapterMatch)
-        #expect(report.book.durChapterIndex == 10)
+        #expect(report.book.durChapterIndex == 5)
         #expect(report.book.durChapterPos == 0)
     }
 
     @Test func refusesSwitchWhenCandidateDirectoryCannotBeLoaded() async {
-        let repository = InMemoryBookChapterRepository()
         let service = BookSourceSwitchService(
             searcher: StubSwitchSearch(report: .init(books: [], outcomes: [])),
             detailLoader: StubSwitchLoader(chapters: []),
-            chapterLoader: StubSwitchLoader(chapters: []),
-            chapterRepository: repository
+            chapterLoader: StubSwitchLoader(chapters: [])
         )
         let current = Book(bookUrl: "old", name: "书", origin: "old")
         let candidate = SearchBook(bookURL: "new", origin: "new", originName: "新源", type: 0, name: "书")
         let source = BookSource(bookSourceUrl: "new", bookSourceName: "新源")
 
         #expect(await service.prepareSwitch(current: current, candidate: candidate, source: source) == nil)
-        #expect(await repository.load(bookURL: "new").isEmpty)
     }
 
     @Test func automaticallySkipsBrokenCandidateAndUsesFirstValidDirectory() async {
@@ -159,8 +207,7 @@ struct BookSourceSwitchServiceTests {
             searcher: search,
             detailLoader: loader,
             chapterLoader: loader,
-            contentLoader: SwitchContentLoader(),
-            chapterRepository: InMemoryBookChapterRepository()
+            contentLoader: SwitchContentLoader()
         )
         let current = Book(bookUrl: "old-book", name: "书", origin: "old")
         let sources = ["old", "broken", "valid"].map { id in
@@ -175,20 +222,18 @@ struct BookSourceSwitchServiceTests {
         #expect(available?.report.chapters.map(\.title) == ["有效目录"])
     }
 
-    @Test func refusesCandidateWithDirectoryButNoBodyWithoutSavingItsDirectory() async {
-        let repository = InMemoryBookChapterRepository()
+    @Test func refusesCandidateWithDirectoryButNoBody() async {
         let chapter = BookChapter(url: "new/1", title: "第一章", bookUrl: "new", index: 0)
         let loader = StubSwitchLoader(chapters: [chapter])
         for body in ["", " \n\t"] {
             let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader,
-                                                  contentLoader: SwitchContentLoader(body: body), chapterRepository: repository)
+                                                  contentLoader: SwitchContentLoader(body: body))
             let report = await service.prepareSwitch(
                 current: Book(bookUrl: "old", name: "书", origin: "old"),
                 candidate: SearchBook(bookURL: "new", origin: "new", originName: "新源", type: 0, name: "书"),
                 source: BookSource(bookSourceUrl: "new", bookSourceName: "新源")
             )
             #expect(report == nil)
-            #expect(await repository.load(bookURL: "new").isEmpty)
         }
     }
 
@@ -205,8 +250,7 @@ struct BookSourceSwitchServiceTests {
         let service = BookSourceSwitchService(
             searcher: StubSwitchSearch(report: .init(books: [], outcomes: candidates.map {
                 .init(sourceID: $0.origin, books: [$0], diagnostics: [])
-            })), detailLoader: loader, chapterLoader: loader, contentLoader: SwitchContentLoader(),
-            chapterRepository: InMemoryBookChapterRepository()
+            })), detailLoader: loader, chapterLoader: loader, contentLoader: SwitchContentLoader()
         )
         let available = try #require(await service.firstAvailableSource(for: Book(bookUrl: "old", name: "书", origin: "old"), sources: sources))
         #expect(available.source.id == "valid")
@@ -224,8 +268,7 @@ struct BookSourceSwitchServiceTests {
                         BookChapter(url: "third", title: "第三章", bookUrl: "new", index: 3)]
         let loader = StubSwitchLoader(chapters: chapters)
         let contentLoader = RecordingSwitchContentLoader()
-        let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader, contentLoader: contentLoader,
-                                              chapterRepository: InMemoryBookChapterRepository())
+        let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader, contentLoader: contentLoader)
         let report = try #require(await service.prepareSwitch(current: current,
             candidate: SearchBook(bookURL: "new", origin: "new", originName: "新源", type: 0, name: "书"),
             source: BookSource(bookSourceUrl: "new", bookSourceName: "新源")))
@@ -241,6 +284,17 @@ private struct SwitchContentLoader: ChapterContentLoading {
     var diagnostics: [RuleDiagnostic] = []
     func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
         .init(content: source.id == "broken-body" ? "" : body, diagnostics: diagnostics)
+    }
+}
+
+private actor RecordingSwitchDirectoryLoader: BookDetailLoading, ChapterListLoading {
+    var readConfig: BookReadConfig?
+    func loadDetail(searchBook: SearchBook, source: BookSource) async -> BookDetailReport {
+        .init(book: Book(bookUrl: searchBook.bookURL, name: searchBook.name, origin: source.id))
+    }
+    func loadChapters(book: Book, source: BookSource, maxPages: Int) async -> ChapterListReport {
+        readConfig = book.readConfig
+        return .init(chapters: [BookChapter(url: "new/1", title: "第一章", bookUrl: book.bookUrl, index: 0)])
     }
 }
 

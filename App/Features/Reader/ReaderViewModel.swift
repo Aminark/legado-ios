@@ -234,6 +234,7 @@ final class ReaderViewModel: ObservableObject {
     var hasContinuationWindow: Bool { continuationLoadedIndex != nil }
     var canEditContent: Bool { source != nil }
     var usesReplaceRules: Bool { book.readConfig?.useReplaceRule ?? true }
+    var usesParagraphResegmentation: Bool { book.readConfig?.reSegment ?? false }
     var currentChapterError: String? {
         guard hasLoadedCurrentChapter, !isLoading,
               currentChapter?.isVolume != true else { return nil }
@@ -472,6 +473,20 @@ final class ReaderViewModel: ObservableObject {
         var config = book.readConfig ?? BookReadConfig()
         config.useReplaceRule = !usesReplaceRules
         book.readConfig = config
+        invalidateProcessedContent(position: position)
+        return book
+    }
+
+    @discardableResult
+    func toggleParagraphResegmentation(position: Int? = nil) -> Book {
+        var config = book.readConfig ?? BookReadConfig()
+        config.reSegment = !usesParagraphResegmentation
+        book.readConfig = config
+        invalidateProcessedContent(position: position)
+        return book
+    }
+
+    private func invalidateProcessedContent(position: Int?) {
         content = ""
         pendingSourceContent = nil
         paragraphs = []
@@ -482,7 +497,6 @@ final class ReaderViewModel: ObservableObject {
         if let position { requestedPosition = max(position, 0) }
         isLoading = false
         chapterLoadGeneration &+= 1
-        return book
     }
 
     @discardableResult

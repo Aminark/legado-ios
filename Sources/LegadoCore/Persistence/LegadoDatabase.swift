@@ -111,37 +111,39 @@ public actor LegadoDatabase {
     }
 
     public func replaceBooks(_ values: [Book]) throws {
-        try transaction {
-            if values.isEmpty {
-                try Self.execute(handle, "DELETE FROM books")
-            } else {
-                let placeholders = Array(repeating: "?", count: values.count).joined(separator: ",")
-                let prune = try prepare("DELETE FROM books WHERE book_url NOT IN (\(placeholders))")
-                defer { sqlite3_finalize(prune) }
-                for (offset, value) in values.enumerated() {
-                    try bind(value.bookUrl, to: prune, at: Int32(offset + 1))
-                }
-                try stepDone(prune)
+        try transaction { try writeBooks(values) }
+    }
+
+    private func writeBooks(_ values: [Book]) throws {
+        if values.isEmpty {
+            try Self.execute(handle, "DELETE FROM books")
+        } else {
+            let placeholders = Array(repeating: "?", count: values.count).joined(separator: ",")
+            let prune = try prepare("DELETE FROM books WHERE book_url NOT IN (\(placeholders))")
+            defer { sqlite3_finalize(prune) }
+            for (offset, value) in values.enumerated() {
+                try bind(value.bookUrl, to: prune, at: Int32(offset + 1))
             }
-            let insert = try prepare("""
-                INSERT INTO books(book_url, name, author, position, payload) VALUES(?, ?, ?, ?, ?)
-                ON CONFLICT(book_url) DO UPDATE SET
-                    name = excluded.name,
-                    author = excluded.author,
-                    position = excluded.position,
-                    payload = excluded.payload
-                """)
-            defer { sqlite3_finalize(insert) }
-            for (position, value) in values.enumerated() {
-                sqlite3_reset(insert)
-                sqlite3_clear_bindings(insert)
-                try bind(value.bookUrl, to: insert, at: 1)
-                try bind(value.name, to: insert, at: 2)
-                try bind(value.author, to: insert, at: 3)
-                sqlite3_bind_int64(insert, 4, Int64(position))
-                try bind(try encoder.encode(value), to: insert, at: 5)
-                try stepDone(insert)
-            }
+            try stepDone(prune)
+        }
+        let insert = try prepare("""
+            INSERT INTO books(book_url, name, author, position, payload) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(book_url) DO UPDATE SET
+                name = excluded.name,
+                author = excluded.author,
+                position = excluded.position,
+                payload = excluded.payload
+            """)
+        defer { sqlite3_finalize(insert) }
+        for (position, value) in values.enumerated() {
+            sqlite3_reset(insert)
+            sqlite3_clear_bindings(insert)
+            try bind(value.bookUrl, to: insert, at: 1)
+            try bind(value.name, to: insert, at: 2)
+            try bind(value.author, to: insert, at: 3)
+            sqlite3_bind_int64(insert, 4, Int64(position))
+            try bind(try encoder.encode(value), to: insert, at: 5)
+            try stepDone(insert)
         }
     }
 
@@ -153,28 +155,30 @@ public actor LegadoDatabase {
     }
 
     public func replaceChapters(_ chapters: [BookChapter], bookURL: String) throws {
-        try transaction {
-            let delete = try prepare("DELETE FROM chapters WHERE book_url = ?")
-            defer { sqlite3_finalize(delete) }
-            try bind(bookURL, to: delete, at: 1)
-            try stepDone(delete)
+        try transaction { try writeChapters(chapters, bookURL: bookURL) }
+    }
 
-            let insert = try prepare(
-                "INSERT INTO chapters(url, book_url, chapter_index, payload) VALUES(?, ?, ?, ?)"
-            )
-            defer { sqlite3_finalize(insert) }
-            for (position, original) in chapters.enumerated() {
-                var chapter = original
-                chapter.bookUrl = bookURL
-                chapter.index = position
-                sqlite3_reset(insert)
-                sqlite3_clear_bindings(insert)
-                try bind(chapter.url, to: insert, at: 1)
-                try bind(bookURL, to: insert, at: 2)
-                sqlite3_bind_int64(insert, 3, Int64(position))
-                try bind(try encoder.encode(chapter), to: insert, at: 4)
-                try stepDone(insert)
-            }
+    private func writeChapters(_ chapters: [BookChapter], bookURL: String) throws {
+        let delete = try prepare("DELETE FROM chapters WHERE book_url = ?")
+        defer { sqlite3_finalize(delete) }
+        try bind(bookURL, to: delete, at: 1)
+        try stepDone(delete)
+
+        let insert = try prepare(
+            "INSERT INTO chapters(url, book_url, chapter_index, payload) VALUES(?, ?, ?, ?)"
+        )
+        defer { sqlite3_finalize(insert) }
+        for (position, original) in chapters.enumerated() {
+            var chapter = original
+            chapter.bookUrl = bookURL
+            chapter.index = position
+            sqlite3_reset(insert)
+            sqlite3_clear_bindings(insert)
+            try bind(chapter.url, to: insert, at: 1)
+            try bind(bookURL, to: insert, at: 2)
+            sqlite3_bind_int64(insert, 3, Int64(position))
+            try bind(try encoder.encode(chapter), to: insert, at: 4)
+            try stepDone(insert)
         }
     }
 
@@ -183,6 +187,13 @@ public actor LegadoDatabase {
         defer { sqlite3_finalize(statement) }
         try bind(bookURL, to: statement, at: 1)
         try stepDone(statement)
+    }
+
+    public func replaceBooksAndChapters(_ books: [Book], chapters: [BookChapter], bookURL: String) throws {
+        try transaction {
+            try writeBooks(books)
+            try writeChapters(chapters, bookURL: bookURL)
+        }
     }
 
     public func loadBookmarks() throws -> [Bookmark] {
@@ -449,16 +460,32 @@ public actor LegadoDatabase {
     public func loadTxtTocRules() throws -> [TxtTocRule] {
         try load("SELECT payload FROM txtTocRules ORDER BY serial_number, id", as: TxtTocRule.self)
     }
+    public func loadTxtTocRules(initialDefaults: [TxtTocRule]) throws -> [TxtTocRule] {
+        let stored = try loadTxtTocRules()
+        let initialized = try Self.scalarInt32(handle, "SELECT COUNT(*) FROM legacy_imports WHERE key = 'txtTocRules.defaults'") > 0
+        if stored.isEmpty, !initialized, !initialDefaults.isEmpty {
+            try replaceTxtTocRules(initialDefaults)
+            return try loadTxtTocRules()
+        }
+        return stored
+    }
     public func replaceTxtTocRules(_ values: [TxtTocRule]) throws {
-        try replaceAll(
-            deleteSQL: "DELETE FROM txtTocRules",
-            insertSQL: "INSERT INTO txtTocRules(id, serial_number, enabled, payload) VALUES(?, ?, ?, ?)",
-            values: values
-        ) { statement, value, _, data in
-            sqlite3_bind_int64(statement, 1, value.id)
-            sqlite3_bind_int64(statement, 2, Int64(value.serialNumber))
-            sqlite3_bind_int(statement, 3, value.enable ? 1 : 0)
-            try self.bind(data, to: statement, at: 4)
+        try transaction {
+            try Self.execute(handle, "DELETE FROM txtTocRules")
+            let statement = try prepare("INSERT INTO txtTocRules(id, serial_number, enabled, payload) VALUES(?, ?, ?, ?)")
+            defer { sqlite3_finalize(statement) }
+            for value in values {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                sqlite3_bind_int64(statement, 1, value.id)
+                sqlite3_bind_int64(statement, 2, Int64(value.serialNumber))
+                sqlite3_bind_int(statement, 3, value.enable ? 1 : 0)
+                try bind(try encoder.encode(value), to: statement, at: 4)
+                try stepDone(statement)
+            }
+            // The existing one-time-import registry also tracks default seeding.
+            // A deliberate empty rule list must survive the next application load.
+            try Self.execute(handle, "INSERT OR IGNORE INTO legacy_imports(key) VALUES('txtTocRules.defaults')")
         }
     }
 
@@ -1233,7 +1260,7 @@ public actor SQLiteBookSourceRepository: BookSourceRepository {
     public func save(_ sources: [BookSource]) async throws { try await database.replaceBookSources(sources) }
 }
 
-public actor SQLiteBookRepository: BookRepository {
+public actor SQLiteBookRepository: SourceSwitchBookRepository {
     private let database: LegadoDatabase
     private let legacyFileURL: URL?
     public init(database: LegadoDatabase, legacyFileURL: URL? = nil) {
@@ -1245,6 +1272,9 @@ public actor SQLiteBookRepository: BookRepository {
         return try await database.loadBooks()
     }
     public func save(_ books: [Book]) async throws { try await database.replaceBooks(books) }
+    public func saveSourceSwitch(_ books: [Book], chapters: [BookChapter], bookURL: String) async throws {
+        try await database.replaceBooksAndChapters(books, chapters: chapters, bookURL: bookURL)
+    }
 }
 
 public actor SQLiteBookChapterRepository: BookChapterRepository {

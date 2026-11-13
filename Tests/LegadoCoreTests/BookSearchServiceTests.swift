@@ -25,6 +25,62 @@ private struct DelayedSearchTransport: HTTPTransport {
 }
 
 struct BookSearchServiceTests {
+    @Test func matchingBucketsRankBySourceCountAndKeepTiesStable() {
+        func book(_ id: String, name: String, author: String, kind: String? = nil, origins: Int) -> SearchBook {
+            var book = SearchBook(bookURL: id, origin: id, originName: id, type: 0, name: name, author: author)
+            book.kind = kind
+            book.origins = Set((0..<origins).map { "source-\($0)" })
+            return book
+        }
+        let books = [
+            book("exact-low", name: "key", author: "a", origins: 1),
+            book("exact-high", name: "key", author: "b", origins: 2),
+            book("exact-tie", name: "key", author: "c", origins: 2),
+            book("tag-low", name: "first", author: "a", kind: "key", origins: 1),
+            book("tag-high", name: "second", author: "b", kind: "key", origins: 3),
+            book("contains-low", name: "key-one", author: "a", origins: 1),
+            book("contains-high", name: "key-two", author: "b", origins: 2),
+            book("other-low", name: "other-one", author: "a", origins: 1),
+            book("other-high", name: "other-two", author: "b", origins: 4)
+        ]
+        var accumulator = BookSearchAccumulator()
+        accumulator.add(books)
+
+        #expect(accumulator.results(keyword: "key").map(\.bookURL) == [
+            "exact-high", "exact-tie", "exact-low", "tag-high", "tag-low",
+            "contains-high", "contains-low", "other-low", "other-high"
+        ])
+        var extraOrigin = books[0]
+        extraOrigin.origins = ["source-1", "source-2", "source-3"]
+        accumulator.add([extraOrigin])
+        #expect(accumulator.results(keyword: "key").first?.bookURL == "exact-low")
+    }
+
+    @Test func exposesEarlierMetadataAndVariablesToLaterSearchFields() async throws {
+        let finalURL = try #require(URL(string: "https://search-context.example/search"))
+        let transport = SearchMockTransport(response: .init(
+            data: Data(#"{"books":[{"name":"first","kind":"fiction"}]}"#.utf8),
+            statusCode: 200, headers: [:], finalURL: finalURL
+        ))
+        var source = BookSource(bookSourceUrl: "https://search-context.example", bookSourceName: "上下文搜索")
+        source.searchUrl = "/search"
+        source.ruleSearch = .init(
+            bookList: "$.books", name: "$.name", author: "@js:book.name + '-author'",
+            intro: "@js:book.author + ':' + book.latestChapterTitle",
+            kind: "$.kind", lastChapter: "@js:book.wordCount + '-words'",
+            bookUrl: "@js:'/book/' + book.name + '?cover=' + book.coverUrl + '&token=' + java.get('token')",
+            coverUrl: "@js:java.put('token', book.kind + '-' + book.wordCount); '/cover/' + book.name",
+            wordCount: "@js:book.kind == 'fiction' ? '120' : '60'"
+        )
+
+        let outcome = await BookSearchService(transport: transport).search(keyword: "first", page: 1, source: source)
+
+        #expect(outcome.diagnostics.isEmpty)
+        #expect(outcome.books.first?.intro == "first-author:120-words")
+        #expect(outcome.books.first?.bookURL == "https://search-context.example/book/first?cover=https://search-context.example/cover/first&token=fiction-120")
+        #expect(outcome.books.first?.variables == ["token": "fiction-120"])
+    }
+
     @Test func streamsFastSourceWithoutWaitingForSlowSource() async throws {
         func makeSource(host: String, name: String) -> BookSource {
             var source = BookSource(bookSourceUrl: "https://\(host)", bookSourceName: name)
@@ -129,6 +185,48 @@ struct BookSearchServiceTests {
 
         #expect(merged.count == 1)
         #expect(merged[0].origins == ["one", "two"])
+    }
+
+    @Test func distinctProgrammingTitlesKeepTheirSignificantSymbolsWhenMerging() {
+        let cpp = SearchBook(bookURL: "https://one.test/cpp", origin: "one", originName: "一源", type: 0,
+                             name: "C++教程", author: "同一作者")
+        let csharp = SearchBook(bookURL: "https://two.test/csharp", origin: "two", originName: "二源", type: 0,
+                                name: "C#教程", author: "同一作者")
+        let merged = BookSearchService().merge(outcomes: [
+            .init(sourceID: "one", books: [cpp], diagnostics: []),
+            .init(sourceID: "two", books: [csharp], diagnostics: [])
+        ], keyword: "教程")
+
+        #expect(merged.count == 2)
+        #expect(Set(merged.map(\.name)) == ["C++教程", "C#教程"])
+        #expect(merged.allSatisfy { $0.origins.count == 1 })
+    }
+
+    @Test func mergingPreservesInternalPunctuationTrailingSymbolsAndSymbolOnlyTitles() {
+        let titles = ["C", "C#", "C++", "A-B", "AB", "甲·乙", "甲乙", "+", "-", "!", "?"]
+        let books = titles.enumerated().map { index, title in
+            SearchBook(bookURL: "https://source.test/\(index)", origin: "source", originName: "源", type: 0,
+                       name: title, author: "同一作者")
+        }
+        let merged = BookSearchService().merge(outcomes: [.init(sourceID: "source", books: books, diagnostics: [])], keyword: "")
+
+        #expect(merged.count == titles.count)
+        #expect(Set(merged.map(\.name)) == Set(titles))
+    }
+
+    @Test func mergingKeepsAuthorSymbolsAndStillNormalizesTitleAndAuthorDecoration() {
+        let authors = ["甲+乙", "甲#乙", "甲乙"]
+        var books = authors.enumerated().map { index, author in
+            SearchBook(bookURL: "https://source.test/\(index)", origin: "source", originName: "源", type: 0,
+                       name: "C++教程", author: author)
+        }
+        books.append(.init(bookURL: "https://other.test/decorated", origin: "other", originName: "另一源", type: 0,
+                           name: "《C++教程！》", author: "作者：甲+乙 著"))
+        let merged = BookSearchService().merge(outcomes: [.init(sourceID: "source", books: books, diagnostics: [])], keyword: "教程")
+
+        #expect(merged.count == authors.count)
+        #expect(merged.first(where: { $0.author == "甲+乙" })?.origins == ["source", "other"])
+        #expect(merged.filter { $0.author != "甲+乙" }.allSatisfy { $0.origins == ["source"] })
     }
 
     @Test func searchesHTMLSourceWithCSSRules() async throws {

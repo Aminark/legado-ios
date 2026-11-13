@@ -1,110 +1,5 @@
 import SwiftUI
 
-@MainActor
-final class ExploreSourceViewModel: ObservableObject {
-    enum State: Equatable { case idle, loading, ready, empty, failed }
-
-    let source: BookSource
-    @Published private(set) var kinds: [ExploreKind] = []
-    @Published private(set) var selectedKind: ExploreKind?
-    @Published private(set) var books: [SearchBook] = []
-    @Published private(set) var diagnostics: [RuleDiagnostic] = []
-    @Published private(set) var state: State = .idle
-    @Published private(set) var isLoadingMore = false
-
-    private let service: BookExploreService
-    private var page = 1
-    private var canLoadMore = false
-    private var paginationTask: Task<Void, Never>?
-
-    init(source: BookSource, service: BookExploreService = .init()) {
-        self.source = source
-        self.service = service
-    }
-
-    deinit { paginationTask?.cancel() }
-
-    func load() async {
-        guard state == .idle else { return }
-        await reload()
-    }
-
-    func reload() async {
-        paginationTask?.cancel()
-        selectedKind = nil
-        kinds = []
-        books = []
-        diagnostics = []
-        page = 1
-        canLoadMore = false
-        state = .loading
-
-        let report = await service.kinds(for: source)
-        guard !Task.isCancelled else { return }
-        kinds = report.kinds.filter { $0.navigableURL != nil }
-        diagnostics = report.diagnostics
-        guard let first = kinds.first else {
-            state = diagnostics.contains(where: { $0.severity == .error }) ? .failed : .empty
-            return
-        }
-        await select(kind: first)
-    }
-
-    func select(kind: ExploreKind) async {
-        guard kind.navigableURL != nil else { return }
-        paginationTask?.cancel()
-        selectedKind = kind
-        books = []
-        diagnostics = []
-        page = 1
-        canLoadMore = false
-        state = .loading
-
-        if ProcessInfo.processInfo.arguments.contains("-uiDemo") {
-            books = DemoContent.exploreBooks
-            state = .ready
-            canLoadMore = true
-            return
-        }
-
-        let outcome = await service.explore(source: source, kind: kind, page: page)
-        guard !Task.isCancelled, selectedKind?.id == kind.id else { return }
-        diagnostics = outcome.diagnostics
-        books = outcome.books
-        canLoadMore = !outcome.books.isEmpty
-        state = books.isEmpty ? (outcome.diagnostics.isEmpty ? .empty : .failed) : .ready
-    }
-
-    func loadNextPageIfNeeded(current book: SearchBook) {
-        guard book.id == books.last?.id,
-              canLoadMore,
-              !isLoadingMore,
-              let kind = selectedKind else { return }
-        isLoadingMore = true
-        let nextPage = page + 1
-        paginationTask = Task { [service, source] in
-            if ProcessInfo.processInfo.arguments.contains("-uiDemo") {
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                guard !Task.isCancelled else { return }
-                canLoadMore = false
-                isLoadingMore = false
-                return
-            }
-            let outcome = await service.explore(source: source, kind: kind, page: nextPage)
-            guard !Task.isCancelled, selectedKind?.id == kind.id else {
-                isLoadingMore = false
-                return
-            }
-            let knownURLs = Set(books.map(\.bookURL))
-            books.append(contentsOf: outcome.books.filter { !knownURLs.contains($0.bookURL) })
-            diagnostics += outcome.diagnostics
-            page = nextPage
-            canLoadMore = !outcome.books.isEmpty
-            isLoadingMore = false
-        }
-    }
-}
-
 struct ExploreView: View {
     @EnvironmentObject private var sourceLibrary: SourceLibraryModel
     @Environment(\.colorScheme) private var colorScheme
@@ -438,7 +333,10 @@ private struct ExploreSourceView: View {
     @StateObject private var model: ExploreSourceViewModel
 
     init(source: BookSource) {
-        _model = StateObject(wrappedValue: ExploreSourceViewModel(source: source))
+        _model = StateObject(wrappedValue: ExploreSourceViewModel(
+            source: source,
+            demoBooks: ProcessInfo.processInfo.arguments.contains("-uiDemo") ? DemoContent.exploreBooks : nil
+        ))
     }
 
     var body: some View {
@@ -447,6 +345,13 @@ private struct ExploreSourceView: View {
                 if model.kinds.count > 1 { kindPicker }
                 content
                 if model.isLoadingMore { ProgressView("继续加载…").padding(.vertical, 12) }
+                if let error = model.paginationError {
+                    VStack(spacing: 8) {
+                        Text(error).font(.caption).foregroundStyle(.secondary)
+                        Button("重试加载下一页") { model.retryNextPage() }
+                    }
+                    .padding(.vertical, 12)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)

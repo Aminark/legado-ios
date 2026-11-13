@@ -1,0 +1,642 @@
+[
+  {
+    "title": "",
+    "content": "",
+    "expected": ""
+  },
+  {
+    "title": "第一章",
+    "content": "第一章\n这是被错\n误断开的正文。\n另一段。",
+    "expected": "这是被错误断开的正文。\n另一段。"
+  },
+  {
+    "title": "章",
+    "content": "  他说：\"你好。\"她说：\"再见。\"",
+    "expected": "他说：“你好。”\n她说：“再见。”\n"
+  },
+  {
+    "title": "章",
+    "content": "“哎呀，真是美极了！”皇帝说，“我十分满意！”",
+    "expected": "“哎呀，真是美极了！”\n皇帝说，“我十分满意！”\n"
+  },
+  {
+    "title": "章",
+    "content": "“怕什么！海的美就在这里！”我说道。",
+    "expected": "“怕什么！海的美就在这里！”我说道。\n"
+  },
+  {
+    "title": "章",
+    "content": "适当地改善自己的生活，岂但“你管得着吗”，而且是顺乎天理的。",
+    "expected": "适当地改善自己的生活，岂但“你管得着吗”，而且是顺乎天理的。"
+  },
+  {
+    "title": "章",
+    "content": "他取来“锅”、“碗”和“杯”。",
+    "expected": "他取来“锅”、“碗”和“杯”。"
+  },
+  {
+    "title": "章",
+    "content": "他的“星光”发亮，另一处“星光”也发亮。",
+    "expected": "他的“星光”发亮，另一处“星光”也发亮。"
+  },
+  {
+    "title": "章",
+    "content": "“第一句话。”\n“第二句话。”\n“第三句话。”他离开了。",
+    "expected": "“第一句话。”\n“第二句话。”\n“第三句话。”他离开了。"
+  },
+  {
+    "title": "章",
+    "content": "他说：&quot;你好&quot;",
+    "expected": "他说：“你好”"
+  },
+  {
+    "title": "章",
+    "content": "  \n　\n",
+    "expected": ""
+  },
+  {
+    "title": "章",
+    "content": "😀在门\n外。\n她说：“👨‍👩‍👧‍👦都来了！”",
+    "expected": "😀在门外。\n她说：“👨‍👩‍👧‍👦都来了！”"
+  },
+  {
+    "title": "章",
+    "content": "“",
+    "expected": "”"
+  },
+  {
+    "title": "章",
+    "content": "”",
+    "expected": "”"
+  },
+  {
+    "title": "章",
+    "content": "他说：“没有闭合引号。",
+    "expected": "他说：“没有闭合引号。”"
+  },
+  {
+    "title": "章",
+    "content": "他说。她答。\n后来。",
+    "expected": "他说。\n她答。\n后来。"
+  },
+  {
+    "title": "章",
+    "content": "第一句话。\n第二句话！",
+    "expected": "第一句话。\n第二句话！"
+  },
+  {
+    "title": "章",
+    "content": "正文\r\n仍然连在一起。",
+    "expected": "正文仍然连在一起。"
+  },
+  {
+    "title": "章",
+    "content": "中文English text mixed\nline。",
+    "expected": "中文Englishtextmixedline。"
+  },
+  {
+    "title": "章",
+    "content": "\n\"甲\"\"乙\"",
+    "expected": "“甲”\n“乙”"
+  },
+  {
+    "title": "章",
+    "content": "甲\n和说",
+    "expected": "甲和说"
+  },
+  {
+    "title": "章",
+    "content": "看，，看你我看看",
+    "expected": "看，，看你我看看"
+  },
+  {
+    "title": "章",
+    "content": "你你的乙的。”。。，”。",
+    "expected": "你你的乙的。\n“。。\n，”。"
+  },
+  {
+    "title": "章",
+    "content": "甲“我\"我说。。和乙“我说看的的”和说，看的",
+    "expected": "甲“我”我说。\n。和乙“我说看的的”和说，看的"
+  },
+  {
+    "title": "章",
+    "content": "\"\"\n\n“”：你”：他",
+    "expected": "”\n“：你”：他"
+  },
+  {
+    "title": "章",
+    "content": "。”\"看。””",
+    "expected": "。”\n“看。”\n“"
+  },
+  {
+    "title": "章",
+    "content": "他，甲“你甲，说他和的\"：乙看：我”乙甲你的看和，",
+    "expected": "他，甲“你甲，说他和的”：乙看：我“乙甲你的看和，”"
+  },
+  {
+    "title": "章",
+    "content": "”“他“”乙”看他乙他\n他\n“和说他说“的",
+    "expected": "”\n“他”\n“乙”看他乙他他“和说他说”的"
+  },
+  {
+    "title": "章",
+    "content": "和看说看",
+    "expected": "和看说看"
+  },
+  {
+    "title": "章",
+    "content": "\"甲",
+    "expected": "”甲"
+  },
+  {
+    "title": "章",
+    "content": "“：看\"说你。看乙看”。“我“的\n，甲",
+    "expected": "“：看”说你。看乙看“。”我“的，甲”"
+  },
+  {
+    "title": "章",
+    "content": "”，说乙他：，”甲：你：。“我你说””和",
+    "expected": "”\n，说乙他：，“甲：你：。”\n“我你说”\n“和"
+  },
+  {
+    "title": "章",
+    "content": "。和””。\n你“，：甲你：你看你我乙\"他，：。”他",
+    "expected": "。和”\n“。\n你“，：甲你：你看你我乙”\n“他，：。”他"
+  },
+  {
+    "title": "章",
+    "content": "：的“的乙甲““甲和他\n",
+    "expected": "：的“的乙甲”\n“甲和他”"
+  },
+  {
+    "title": "章",
+    "content": "看乙\n他说",
+    "expected": "看乙他说"
+  },
+  {
+    "title": "章",
+    "content": "甲我甲乙说",
+    "expected": "甲我甲乙说"
+  },
+  {
+    "title": "章",
+    "content": "：，",
+    "expected": "：，"
+  },
+  {
+    "title": "章",
+    "content": "你甲\n”看说。",
+    "expected": "你甲“看说。\n"
+  },
+  {
+    "title": "章",
+    "content": "\"”，，\n和他他\n\"：他说\n说：说我我”。你：",
+    "expected": "”\n“，，和他他”：他说说：说我我“。你：“"
+  },
+  {
+    "title": "章",
+    "content": "和看，，",
+    "expected": "和看，，"
+  },
+  {
+    "title": "章",
+    "content": "“\n他说”",
+    "expected": "“他说”"
+  },
+  {
+    "title": "章",
+    "content": "他，我他的\"\"的的乙我",
+    "expected": "他，我他的”\n“的的乙我”"
+  },
+  {
+    "title": "章",
+    "content": "我\"。你他看和他说。看的\n\n的乙\n\"",
+    "expected": "我“。你他看和他说。\n看的的乙”"
+  },
+  {
+    "title": "章",
+    "content": "”看\n说：他他看，的说我我。",
+    "expected": "“看说：他他看，的说我我。”"
+  },
+  {
+    "title": "章",
+    "content": "和\"说。乙\n甲“",
+    "expected": "和“说。\n乙甲”"
+  },
+  {
+    "title": "章",
+    "content": "甲”",
+    "expected": "甲”"
+  },
+  {
+    "title": "章",
+    "content": "你和的：\n乙",
+    "expected": "你和的：乙"
+  },
+  {
+    "title": "章",
+    "content": "看乙：他\"，我看他",
+    "expected": "看乙：他“，我看他”"
+  },
+  {
+    "title": "章",
+    "content": "“，”",
+    "expected": "”，“"
+  },
+  {
+    "title": "章",
+    "content": "你看和他的，\"”“\"的你你：乙\"",
+    "expected": "你看和他的，”\n“的你你：乙”"
+  },
+  {
+    "title": "章",
+    "content": "我”我”。他的\n，我的“，说我",
+    "expected": "我“我”。他的，我的“，说我"
+  },
+  {
+    "title": "章",
+    "content": "我：“的他看乙。的\n”",
+    "expected": "我：“的他看乙。的”"
+  },
+  {
+    "title": "章",
+    "content": "：，“甲的。",
+    "expected": "：，“甲的。”"
+  },
+  {
+    "title": "章",
+    "content": "乙。你的看和甲\n，。\"乙，",
+    "expected": "乙。你的看和甲，。\n“乙，”"
+  },
+  {
+    "title": "章",
+    "content": "“\n的\"和看的说。看",
+    "expected": "“的”和看的说。\n看"
+  },
+  {
+    "title": "章",
+    "content": "乙我你。甲和甲：“你，甲你\"：，”：你甲\n：\n",
+    "expected": "乙我你。甲和甲：“你，甲你”\n：，“：你甲：“"
+  },
+  {
+    "title": "章",
+    "content": "和：甲你你和",
+    "expected": "和：甲你你和"
+  },
+  {
+    "title": "章",
+    "content": "甲”\"说我",
+    "expected": "甲”\n“说我"
+  },
+  {
+    "title": "章",
+    "content": "你你。",
+    "expected": "你你。"
+  },
+  {
+    "title": "章",
+    "content": "。的甲：\n我看“\"”我的“\n的我：乙甲",
+    "expected": "。的甲：我看”\n“我的”的我：乙甲"
+  },
+  {
+    "title": "章",
+    "content": "乙甲乙，：乙说甲",
+    "expected": "乙甲乙，：乙说甲"
+  },
+  {
+    "title": "章",
+    "content": "\n你乙，",
+    "expected": "你乙，"
+  },
+  {
+    "title": "章",
+    "content": "乙的",
+    "expected": "乙的"
+  },
+  {
+    "title": "章",
+    "content": "和\"乙，的\"\n。“说”的他：他看\"乙看。说\"",
+    "expected": "和“乙，的”。\n“说”的他：他看“乙看。说”"
+  },
+  {
+    "title": "章",
+    "content": "我：看的说",
+    "expected": "我：看的说"
+  },
+  {
+    "title": "章",
+    "content": "\n的看说甲我乙和乙说\n，的：",
+    "expected": "的看说甲我乙和乙说，的："
+  },
+  {
+    "title": "章",
+    "content": "：你：看甲\"，说“你\"甲",
+    "expected": "：你：看甲“，说”\n“你”甲"
+  },
+  {
+    "title": "章",
+    "content": "说和“说",
+    "expected": "说和”说"
+  },
+  {
+    "title": "章",
+    "content": "\n乙说他，的\n说看我的",
+    "expected": "乙说他，的说看我的"
+  },
+  {
+    "title": "章",
+    "content": "我你”：说你乙我“\"\"：",
+    "expected": "我你“：说你乙我”\n“："
+  },
+  {
+    "title": "章",
+    "content": "，，和看，",
+    "expected": "，，和看，"
+  },
+  {
+    "title": "章",
+    "content": "你的”“”乙说和说看我\n\"他\"：”看说甲甲我",
+    "expected": "你的”\n“乙说和说看我”\n“他”\n：“看说甲甲我”\n"
+  },
+  {
+    "title": "章",
+    "content": "\n他乙",
+    "expected": "他乙"
+  },
+  {
+    "title": "章",
+    "content": "\"看说乙我乙看的：乙\"和甲”\n，\"甲”的",
+    "expected": "“看说乙我乙看的：乙”\n“和甲”，“甲”的"
+  },
+  {
+    "title": "章",
+    "content": "看看\"你\"，他说和，“甲看”你。他“\"你乙：，看和",
+    "expected": "看看“你”\n，他说和，“甲看”\n“你。他”\n“你乙：，看和”"
+  },
+  {
+    "title": "章",
+    "content": "”他，甲说",
+    "expected": "“他，甲说”"
+  },
+  {
+    "title": "章",
+    "content": "和“和“，甲甲说\"\"“和。和他和\"说看的“甲的你：",
+    "expected": "和”和“，甲甲说”\n“和。和他和”说看的“甲的你：“"
+  },
+  {
+    "title": "章",
+    "content": "他\"。说我\"我的看看的看看\"的和看\"",
+    "expected": "他“。说我”我的看看的看看“的和看”"
+  },
+  {
+    "title": "章",
+    "content": "甲：。的乙\n说\"\"看说，：",
+    "expected": "甲：。的乙说”\n“看说，：“"
+  },
+  {
+    "title": "章",
+    "content": "“乙。甲\"你我和\n\"的甲：，看",
+    "expected": "“乙。甲”你我和“的甲：，看”"
+  },
+  {
+    "title": "章",
+    "content": "，和的他，看乙他\"看他",
+    "expected": "，和的他，看乙他“看他”"
+  },
+  {
+    "title": "章",
+    "content": "\n和你\n说乙甲的我看看甲说我你：",
+    "expected": "和你说乙甲的我看看甲说我你："
+  },
+  {
+    "title": "章",
+    "content": "“你你",
+    "expected": "“你你”"
+  },
+  {
+    "title": "章",
+    "content": "他。你”“我乙\"",
+    "expected": "他。你”\n“我乙”"
+  },
+  {
+    "title": "章",
+    "content": "和他\n他\n看”。",
+    "expected": "和他他看”。"
+  },
+  {
+    "title": "章",
+    "content": "甲：，”“，。的乙，：。“说的说",
+    "expected": "甲：，”\n“，。的乙，：。”说的说"
+  },
+  {
+    "title": "章",
+    "content": "“和，”说\"\"你乙乙，。的说说。”乙",
+    "expected": "”\n和，“说”\n“你乙乙，。的说说。\n”乙"
+  },
+  {
+    "title": "章",
+    "content": "和\n乙，：看的",
+    "expected": "和乙，：看的"
+  },
+  {
+    "title": "章",
+    "content": "：”你\n看我说，，和我。\n甲说",
+    "expected": "：“你看我说，，和我。”\n甲说"
+  },
+  {
+    "title": "章",
+    "content": "的，”和乙看甲\n乙你甲“\n“你说乙，",
+    "expected": "的，“和乙看甲乙你甲”\n“你说乙，”"
+  },
+  {
+    "title": "章",
+    "content": "的”\n的\n他和",
+    "expected": "的“的他和”"
+  },
+  {
+    "title": "章",
+    "content": "他“你\n乙“我甲“乙他”\"甲。我“乙。和“看和\"甲",
+    "expected": "他“你乙”我甲“乙他”\n“甲。我”乙。和“看和”甲"
+  },
+  {
+    "title": "章",
+    "content": "你甲“看。看\"：他乙”的“",
+    "expected": "你甲“看。看”：他乙“的”"
+  },
+  {
+    "title": "章",
+    "content": "你”\"\"你\"，，”：，说\n“",
+    "expected": "你”\n“你”\n，，“：，说”\n"
+  },
+  {
+    "title": "章",
+    "content": "看你",
+    "expected": "看你"
+  },
+  {
+    "title": "章",
+    "content": "\"乙。的，，”说“\"他\"\n看，看甲：。乙甲”",
+    "expected": "”乙。\n的，，“说”\n“他”\n“看，看甲：。乙甲”"
+  },
+  {
+    "title": "章",
+    "content": "甲和”的说我乙我说甲和你\"甲。你乙：我我的：",
+    "expected": "甲和“的说我乙我说甲和你”甲。你乙：我我的："
+  },
+  {
+    "title": "章",
+    "content": "。的你”我甲我乙",
+    "expected": "。的你“我甲我乙”"
+  },
+  {
+    "title": "章",
+    "content": "”：看，看\n我和我。“",
+    "expected": "“：看，看我和我。”"
+  },
+  {
+    "title": "章",
+    "content": "的你”。“，“我你“看我说。““和\"\n的的”说甲",
+    "expected": "的你“。”，“我你”\n“看我说。”\n“和“的的“说甲"
+  },
+  {
+    "title": "章",
+    "content": "\n说和",
+    "expected": "说和"
+  },
+  {
+    "title": "章",
+    "content": "。甲乙我\"的说甲乙的”我和\"",
+    "expected": "。甲乙我“的说甲乙的”\n“我和”"
+  },
+  {
+    "title": "章",
+    "content": "乙乙和乙：看。”“甲”乙乙：\n“",
+    "expected": "乙乙和乙：看。”\n“甲”\n“乙乙：“"
+  },
+  {
+    "title": "章",
+    "content": "“乙”说，的。他\n他“，\n甲”你，”\"我”你\n他",
+    "expected": "“乙”说，的。他他“，甲”\n“你，”\n“我”你他"
+  },
+  {
+    "title": "章",
+    "content": "，\n：，看你你。乙的",
+    "expected": "，：，看你你。乙的"
+  },
+  {
+    "title": "章",
+    "content": "说。。你的“和乙，",
+    "expected": "说。\n。你的“和乙，”"
+  },
+  {
+    "title": "章",
+    "content": "“乙",
+    "expected": "”乙"
+  },
+  {
+    "title": "章",
+    "content": "\"的我他”乙““”说甲和的的的甲我\n\n：的。他甲",
+    "expected": "“的我他”\n“乙”\n“说甲和的的的甲我：的。他甲”"
+  },
+  {
+    "title": "章",
+    "content": "他你看说“乙说我我：",
+    "expected": "他你看说“乙说我我：“"
+  },
+  {
+    "title": "章",
+    "content": "你：：看乙看说\"我和。\n的甲说",
+    "expected": "你：：看乙看说“我和。”\n的甲说"
+  },
+  {
+    "title": "章",
+    "content": "和。，和。。甲和\"我”和我",
+    "expected": "和。，和。。甲和“我”和我"
+  },
+  {
+    "title": "章",
+    "content": "，我看““：甲和看”\"，”“我",
+    "expected": "，我看”\n“：甲和看”\n“，”\n“我"
+  },
+  {
+    "title": "章",
+    "content": "甲他，乙乙：。他乙，你”。的：\n和",
+    "expected": "甲他，乙乙：。他乙，你“。的：和”"
+  },
+  {
+    "title": "章",
+    "content": "”说“看甲和看\n乙他和甲\n\n",
+    "expected": "“说”看甲和看乙他和甲"
+  },
+  {
+    "title": "章",
+    "content": "看我的甲“乙甲”和\n我你",
+    "expected": "看我的甲“乙甲”和我你"
+  },
+  {
+    "title": "章",
+    "content": "他，，看的\n，“甲。甲",
+    "expected": "他，，看的，“甲。甲”"
+  },
+  {
+    "title": "章",
+    "content": "说甲我他：，的\"",
+    "expected": "说甲我他：，的”"
+  },
+  {
+    "title": "章",
+    "content": "，\"”，",
+    "expected": "，”\n“，"
+  },
+  {
+    "title": "章",
+    "content": "乙说：”甲说乙\"。\"。甲乙：乙和的",
+    "expected": "乙说：“甲说乙”\n。\n“。甲乙：乙和的”"
+  },
+  {
+    "title": "章",
+    "content": "和",
+    "expected": "和"
+  },
+  {
+    "title": "章",
+    "content": "甲 乙\n丙。",
+    "expected": "甲 乙丙。"
+  },
+  {
+    "title": "章",
+    "content": "甲乙\n丙。",
+    "expected": "甲乙丙。"
+  },
+  {
+    "title": "章",
+    "content": "甲 乙\n丙。",
+    "expected": "甲 乙丙。"
+  },
+  {
+    "title": "章",
+    "content": "甲​乙\n丙。",
+    "expected": "甲​乙丙。"
+  },
+  {
+    "title": "章",
+    "content": "甲 乙\n丙。",
+    "expected": "甲 乙丙。"
+  },
+  {
+    "title": "章",
+    "content": "甲 乙\n丙。",
+    "expected": "甲 乙丙。"
+  },
+  {
+    "title": "章",
+    "content": "甲　乙\n丙。",
+    "expected": "甲乙丙。"
+  },
+  {
+    "title": "章",
+    "content": "甲\t乙\n丙。",
+    "expected": "甲乙丙。"
+  }
+]

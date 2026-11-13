@@ -4,6 +4,7 @@ import WebKit
 struct OtherSettingsView: View {
     @AppStorage("auto_refresh") private var autoRefresh = false
     @AppStorage("onlyUpdateRead") private var onlyUpdateRead = false
+    @AppStorage("bookshelfSort") private var bookshelfSort = 0
     @AppStorage("defaultHomePage") private var defaultHomePage = "bookshelf"
     @State private var settings = ApplicationSettingsStore.shared.settings
     @State private var maintenance: Maintenance?
@@ -26,7 +27,10 @@ struct OtherSettingsView: View {
                     Text("设置").tag("settings")
                 }
                 Toggle("启动时更新书架", isOn: $autoRefresh)
-                Toggle("自动更新仅检查读过的书", isOn: $onlyUpdateRead).disabled(!autoRefresh)
+                Toggle("自动更新仅检查已读至最新章的书", isOn: $onlyUpdateRead).disabled(!autoRefresh)
+                Picker("默认书架排序", selection: $bookshelfSort) {
+                    ForEach(BookshelfSort.allCases) { sort in Text(sort.title).tag(sort.rawValue) }
+                }
             }
             Section("网络与存储") {
                 NavigationLink {

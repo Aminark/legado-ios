@@ -39,7 +39,7 @@ struct RootTabView: View {
                             book: DemoContent.books[0],
                             sources: DemoContent.sources,
                             demoCandidates: DemoContent.sourceSwitchCandidates
-                        ) { _, _ in }
+                        ) { _, _ in true }
                     } else if ProcessInfo.processInfo.arguments.contains("-uiDemoBookDetail") {
                         BookDetailView(
                             demoBook: DemoContent.books[0],
@@ -72,15 +72,15 @@ struct RootTabView: View {
                     showsDemoReader = ProcessInfo.processInfo.arguments.contains("-uiDemoReader")
                 }
             }
-                .tabItem { Label("书架", systemImage: "book.fill") }
+                .tabItem { Label("书架", systemImage: selection == .bookshelf ? "book.fill" : "book").environment(\.symbolVariants, .none) }
                 .tag(Tab.bookshelf)
 
             ReadingNavigationStack { ExploreView() }
-                .tabItem { Label("发现", systemImage: "safari") }
+                .tabItem { Label("发现", systemImage: "safari").environment(\.symbolVariants, .none) }
                 .tag(Tab.explore)
 
             ReadingNavigationStack { ReadingStatisticsView() }
-                .tabItem { Label("统计", systemImage: "chart.bar") }
+                .tabItem { Label("统计", systemImage: selection == .statistics ? "chart.bar.fill" : "chart.bar").environment(\.symbolVariants, .none) }
                 .tag(Tab.statistics)
 
             ReadingNavigationStack {
@@ -100,7 +100,7 @@ struct RootTabView: View {
                     SettingsView()
                 }
             }
-                .tabItem { Label("我的", systemImage: "person.crop.circle") }
+                .tabItem { Label("我的", systemImage: "person").environment(\.symbolVariants, .none) }
                 .tag(Tab.my)
         }
         .readingTabBarBackground()
@@ -154,7 +154,9 @@ private struct BookshelfView: View {
     @State private var pendingLocalFiles: [LocalBookImportFile] = []
     @State private var selectedGroupID = BookGroup.idAll
     @State private var showsGroupManager = false
+    @State private var showsBookOrder = false
     @AppStorage("bookshelfLayout") private var bookshelfLayout = "grid3"
+    @AppStorage("bookshelfSort") private var bookshelfSort = 0
 
     private var selectedGroup: BookGroup {
         library.visibleGroups.first(where: { $0.id == selectedGroupID })
@@ -162,7 +164,7 @@ private struct BookshelfView: View {
             ?? BookGroup(groupId: BookGroup.idAll, groupName: "全部")
     }
 
-    private var displayedBooks: [Book] { library.books(in: selectedGroup) }
+    private var displayedBooks: [Book] { library.books(in: selectedGroup, defaultSort: bookshelfSort) }
 
     private var recentBook: Book? {
         displayedBooks.filter(BookReadingPresentation.hasStarted)
@@ -171,62 +173,70 @@ private struct BookshelfView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                ReadingPageHeader(title: "书架", subtitle: "阅读，让时间有了形状") {
-                    NavigationLink { SearchView() } label: {
-                        ReadingToolbarIcon(systemName: "magnifyingglass")
-                    }
-                    .accessibilityLabel("搜索")
-                    bookshelfMenu
-                }
-                if library.visibleGroups.count > 1 {
-                    bookshelfGroups.padding(.bottom, 24)
-                }
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if displayedBooks.isEmpty {
-                        EmptyBookshelfHero { showsLocalImporter = true }
-                    } else {
-                        if let book = recentBook {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("继续阅读")
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(.secondary)
-                                NavigationLink {
-                                    BookshelfBookDestination(book: book, source: sources.sources.first { $0.bookSourceUrl == book.origin })
-                                } label: {
-                                    ContinueReadingCard(book: book)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("继续阅读，\(book.name)，\(BookReadingPresentation.position(book))")
-                                .accessibilityIdentifier("bookshelf.continue")
-                            }
-                            .padding(.bottom, 30)
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 0) {
+                    ReadingPageHeader(title: "书架", subtitle: "阅读，让时间有了形状") {
+                        NavigationLink { SearchView() } label: {
+                            ReadingToolbarIcon(systemName: "magnifyingglass")
                         }
-                        bookshelfSummary
-                        if bookshelfLayout.hasPrefix("grid") {
-                            LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
-                                ForEach(displayedBooks) { book in
-                                    BookshelfBookLink(book: book, compact: false, grid: true)
-                                }
-                            }
+                        .accessibilityLabel("搜索")
+                        bookshelfMenu
+                    }
+                    if !library.books.isEmpty && library.visibleGroups.count > 1 {
+                        bookshelfGroups.padding(.bottom, 24)
+                    }
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if displayedBooks.isEmpty {
+                            EmptyBookshelfHero { showsLocalImporter = true }
+                                .padding(.top, min(80, max(24, geometry.size.height * 0.075)))
                         } else {
-                            ForEach(displayedBooks) { book in
-                                BookshelfBookLink(book: book, compact: bookshelfLayout == "compact", grid: false)
-                                if book.id != displayedBooks.last?.id {
-                                    Rectangle().fill(ReadingTheme.separator).frame(height: 0.5)
-                                        .padding(.leading, bookshelfLayout == "compact" ? 54 : 66)
+                            if let book = recentBook {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    Text("继续阅读")
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(.secondary)
+                                    NavigationLink {
+                                        BookshelfBookDestination(book: book, source: sources.sources.first { $0.bookSourceUrl == book.origin })
+                                    } label: {
+                                        ContinueReadingCard(book: book)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel("继续阅读，\(book.name)，\(BookReadingPresentation.position(book))")
+                                    .accessibilityIdentifier("bookshelf.continue")
+                                }
+                                .padding(.bottom, 30)
+                            }
+                            bookshelfSummary
+                            if bookshelfLayout.hasPrefix("grid") {
+                                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
+                                    ForEach(displayedBooks) { book in
+                                        BookshelfBookLink(book: book, compact: false, grid: true)
+                                    }
+                                }
+                            } else {
+                                ForEach(displayedBooks) { book in
+                                    BookshelfBookLink(book: book, compact: bookshelfLayout == "compact", grid: false)
+                                    if book.id != displayedBooks.last?.id {
+                                        Rectangle().fill(ReadingTheme.separator).frame(height: 0.5)
+                                            .padding(.leading, bookshelfLayout == "compact" ? 54 : 66)
+                                    }
                                 }
                             }
                         }
                     }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 32)
                 }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 32)
+                .frame(maxWidth: .infinity)
             }
         }
         .background(ReadingTheme.canvas)
         .navigationBarHidden(true)
+        .refreshable {
+            guard selectedGroup.enableRefresh else { return }
+            await library.checkForUpdates(sources: sources.sources, group: selectedGroup)
+        }
         .readingLocalBookFileImporter(isPresented: $showsLocalImporter) { files in
             pendingLocalFiles = files
         } onError: { error in
@@ -245,7 +255,10 @@ private struct BookshelfView: View {
             BookGroupManagerView()
                 .environmentObject(library)
         }
-        .alert("本地书导入失败", isPresented: Binding(
+        .sheet(isPresented: $showsBookOrder) {
+            BookOrderView(groupID: selectedGroup.id).environmentObject(library)
+        }
+        .alert("书架操作失败", isPresented: Binding(
             get: { library.errorMessage != nil },
             set: { if !$0 { library.clearError() } }
         )) {
@@ -302,10 +315,29 @@ private struct BookshelfView: View {
         } else {
             Menu {
                 Button("更新目录", systemImage: "arrow.clockwise") {
-                    Task { await library.checkForUpdates(sources: sources.sources) }
+                    Task { await library.checkForUpdates(sources: sources.sources, group: selectedGroup) }
                 }
                 Button("本地书", systemImage: "plus") { showsLocalImporter = true }
                 Button("书架分组", systemImage: "rectangle.3.group") { showsGroupManager = true }
+                Menu("本分组设置", systemImage: "slider.horizontal.3") {
+                    Picker("书籍排序", selection: Binding(
+                        get: { selectedGroup.bookSort },
+                        set: { sort in Task { await library.setGroupSort(selectedGroup, sort: sort) } }
+                    )) {
+                        Text("跟随默认排序").tag(-1)
+                        ForEach(BookshelfSort.allCases) { sort in Text(sort.title).tag(sort.rawValue) }
+                    }
+                    Button("调整书籍顺序") { showsBookOrder = true }
+                        .disabled(displayedBooks.count < 2)
+                    Toggle("允许下拉更新", isOn: Binding(
+                        get: { selectedGroup.enableRefresh },
+                        set: { enabled in Task { await library.setGroupRefreshEnabled(selectedGroup, enabled: enabled) } }
+                    ))
+                    Toggle("仅更新已读至最新章的书", isOn: Binding(
+                        get: { selectedGroup.onlyUpdateRead },
+                        set: { enabled in Task { await library.setGroupOnlyUpdateRead(selectedGroup, enabled: enabled) } }
+                    ))
+                }
                 Menu("书架布局", systemImage: "square.grid.2x2") {
                     layoutButton("列表", value: "list")
                     layoutButton("紧凑列表", value: "compact")
@@ -361,6 +393,48 @@ private struct BookshelfView: View {
         } label: {
             if bookshelfLayout == value { Label(title, systemImage: "checkmark") }
             else { Text(title) }
+        }
+    }
+}
+
+private struct BookOrderView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var library: BookLibraryModel
+    let groupID: Int64
+
+    private var group: BookGroup {
+        var value = library.groups.first { $0.id == groupID } ?? .init(groupId: groupID, groupName: "书籍")
+        value.bookSort = BookshelfSort.custom.rawValue
+        return value
+    }
+
+    var body: some View {
+        ReadingNavigationStack {
+            List {
+                Section {
+                    ForEach(library.books(in: group)) { book in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(book.name)
+                            Text(book.author).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .onMove { offsets, destination in
+                        Task { await library.moveBooks(in: group, from: offsets, to: destination) }
+                    }
+                } footer: {
+                    Text("拖动调整自定义顺序。书籍的自定义顺序在各分组间共用。")
+                }
+            }
+            .environment(\.editMode, .constant(.active))
+            .navigationTitle("调整书籍顺序")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+            .task { await library.setGroupSort(group, sort: BookshelfSort.custom.rawValue) }
+            .alert("保存失败", isPresented: Binding(
+                get: { library.errorMessage != nil },
+                set: { if !$0 { library.clearError() } }
+            )) {
+                Button("好") { library.clearError() }
+            } message: { Text(library.errorMessage ?? "") }
         }
     }
 }
@@ -708,37 +782,67 @@ private struct LocalBookImportReviewView: View {
 }
 
 private struct EmptyBookshelfHero: View {
+    @Environment(\.colorScheme) private var colorScheme
     let onImport: () -> Void
 
     var body: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "books.vertical")
-                .font(.system(size: 40, weight: .ultraLight))
-                .foregroundStyle(ReadingTheme.accent)
+        VStack(spacing: 0) {
+            Image("BookshelfEmptyArtwork")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 168, height: 112)
+                .opacity(colorScheme == .dark ? 0.78 : 1)
                 .accessibilityHidden(true)
-            VStack(spacing: 10) {
-                Text("书架还是空的").font(.title3.weight(.semibold))
-                Text("导入本地书，或添加书源后搜索书籍。")
-                    .font(.subheadline).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+            Text("书架还是空的")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(ReadingTheme.ink)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.top, 22)
+            Text("导入本地书，或添加书源后搜索书籍")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 12)
+            Button(action: onImport) {
+                HStack(spacing: 12) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 19, weight: .medium))
+                        .accessibilityHidden(true)
+                    Text("导入本地书")
+                        .font(.headline)
+                }
+                .foregroundStyle(ReadingTheme.onAccent)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 14)
+                .frame(minWidth: 170, minHeight: 44)
+                .background(ReadingTheme.accentFill, in: Capsule())
+                .contentShape(Capsule())
             }
-            VStack(spacing: 12) {
-                Button("导入本地书", action: onImport)
-                    .readingProminentButtonStyle()
-                    .controlSize(.large)
-                NavigationLink("添加书源") { SourceManagementView() }
-                    .font(.subheadline)
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("bookshelf.importLocal")
+            .padding(.top, 28)
+            NavigationLink { SourceManagementView() } label: {
+                Text("添加书源")
+                    .font(.body)
+                    .foregroundStyle(ReadingTheme.ink)
+                    .padding(.horizontal, 24)
                     .frame(minHeight: 44)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("bookshelf.addSource")
+            .padding(.top, 12)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 80)
+        .padding(.bottom, 32)
     }
 }
 
 struct BookshelfReadView: View {
     let book: Book
     let source: BookSource?
+    @EnvironmentObject private var library: BookLibraryModel
     @StateObject private var model = BookshelfReadViewModel()
 
     var body: some View {
@@ -762,7 +866,11 @@ struct BookshelfReadView: View {
                 ProgressView("正在打开…")
             }
         }
-        .task { await model.load(book: book, source: source) }
+        .task {
+            await model.load(book: book, source: source) { report in
+                await library.commitPreparedUpdate(requestedBook: book, report: report)
+            }
+        }
     }
 }
 
@@ -834,6 +942,7 @@ struct SearchView: View {
     @State private var selectedSourceID: String?
     @State private var didStartInitialSearch = false
     @State private var searchIsPresented = false
+    @State private var visibleResultIDs = Set<String>()
     @AppStorage("precisionSearch") private var precisionSearch = false
 
     init(fixedSource: BookSource? = nil, initialKeyword: String = "") {
@@ -875,6 +984,12 @@ struct SearchView: View {
             if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 model.cancel(reset: true)
             }
+        }
+        .onChange(of: model.state) { state in
+            if state == .finished { loadMoreForVisibleLastResult() }
+        }
+        .onChange(of: model.isLoadingMore) { loading in
+            if !loading { loadMoreForVisibleLastResult() }
         }
         .onChange(of: library.sources.count) { _ in
             guard !didStartInitialSearch,
@@ -1015,10 +1130,12 @@ struct SearchView: View {
                         SearchBookRow(book: book)
                     }
                     .buttonStyle(.plain)
-                    .onAppear { loadMoreIfNeeded(book) }
+                    .onAppear { resultAppeared(book) }
+                    .onDisappear { visibleResultIDs.remove(book.id) }
                 } else {
                     SearchBookRow(book: book)
-                        .onAppear { loadMoreIfNeeded(book) }
+                        .onAppear { resultAppeared(book) }
+                        .onDisappear { visibleResultIDs.remove(book.id) }
                 }
             }
             if model.isLoadingMore {
@@ -1089,8 +1206,16 @@ struct SearchView: View {
         scopedSources.filter { $0.enabled && $0.searchUrl?.isEmpty == false }.count
     }
 
-    private func loadMoreIfNeeded(_ book: SearchBook) {
-        if model.state != .searching, book.id == model.books.last?.id { model.loadMore() }
+    private func resultAppeared(_ book: SearchBook) {
+        visibleResultIDs.insert(book.id)
+        loadMoreForVisibleLastResult()
+    }
+
+    private func loadMoreForVisibleLastResult() {
+        // A streamed result can appear before its search finishes. Recheck
+        // after each batch as well as appearance; the row may stay on screen.
+        guard let lastID = model.books.last?.id, visibleResultIDs.contains(lastID) else { return }
+        model.loadMore()
     }
 
     private var diagnosticsCard: some View {
@@ -1800,6 +1925,7 @@ private struct BookmarkEditorView: View {
 }
 
 private struct BookmarkReaderDestination: View {
+    @EnvironmentObject private var library: BookLibraryModel
     let book: Book
     let bookmark: Bookmark
     let source: BookSource?
@@ -1836,6 +1962,7 @@ private struct BookmarkReaderDestination: View {
     private func load() async {
         guard isLoading, chapters.isEmpty else { return }
         let loaded: [BookChapter]
+        var resolvedBook = book
         if book.origin == "local" {
             let targetBook = book
             do {
@@ -1856,7 +1983,15 @@ private struct BookmarkReaderDestination: View {
             let coordinator = Self.chapterCoordinator()
             let cached = await coordinator.storedChapters(bookURL: book.bookUrl)
             if cached.isEmpty {
-                let report = await coordinator.refresh(book: book, source: source)
+                let report = await coordinator.refresh(book: book, source: source, persistDirectory: false)
+                if report.refreshed {
+                    if library.contains(book), !(await library.commitPreparedUpdate(requestedBook: book, report: report)) {
+                        errorMessage = "更新后的书籍保存失败，已保留原书籍和阅读位置。"
+                        isLoading = false
+                        return
+                    }
+                    resolvedBook = library.books.first(where: { $0.bookUrl == report.book.bookUrl }) ?? report.book
+                }
                 loaded = report.chapters
                 if loaded.isEmpty { errorMessage = report.diagnostics.first?.message ?? "目录加载失败。" }
             } else {
@@ -1867,7 +2002,7 @@ private struct BookmarkReaderDestination: View {
             isLoading = false
             return
         }
-        var restored = book
+        var restored = resolvedBook
         if restored.readConfig == nil { restored.readConfig = BookReadConfig() }
         restored.readConfig?.epubLocation = bookmark.epubLocation
         restored.durChapterIndex = target

@@ -11,14 +11,16 @@ public struct HTTPResponse: Sendable {
     public var finalURL: URL
     public var requestedCharset: String?
     public var requestVariables: [String: String]
+    public var rssArticle: RssArticle?
 
-    public init(data: Data, statusCode: Int, headers: [String: String], finalURL: URL, requestedCharset: String? = nil, requestVariables: [String: String] = [:]) {
+    public init(data: Data, statusCode: Int, headers: [String: String], finalURL: URL, requestedCharset: String? = nil, requestVariables: [String: String] = [:], rssArticle: RssArticle? = nil) {
         self.data = data
         self.statusCode = statusCode
         self.headers = headers
         self.finalURL = finalURL
         self.requestedCharset = requestedCharset
         self.requestVariables = requestVariables
+        self.rssArticle = rssArticle
     }
 
     public var decodedText: String {
@@ -636,7 +638,7 @@ public actor SourceNetworkPolicy {
         snapshotStage: DifferentialStage = .debug
     ) async throws -> HTTPResponse {
         try await acquire(source: source)
-        if prepared.url.scheme?.lowercased() == "data" {
+        if prepared.url.scheme?.lowercased() == "data", !prepared.useWebView {
             do {
                 let response = try dataURIResponse(for: prepared)
                 let transformed = try await transformBodyIfNeeded(response, prepared: prepared, source: source)
@@ -661,7 +663,7 @@ public actor SourceNetworkPolicy {
                 throw error
             }
         }
-        if prepared.useWebView || prepared.webJavaScript != nil {
+        if prepared.useWebView {
             guard let executor = webViewExecutor ?? SourceWebViewExecutorRegistry.shared.executor() else {
                 throw RuleEngineError.unsupportedRule(rule: prepared.ruleURL, feature: "后台 WKWebView 请求")
             }
@@ -669,6 +671,7 @@ public actor SourceNetworkPolicy {
                 prepared,
                 source: source,
                 executor: executor,
+                transport: transport,
                 timeout: timeout,
                 snapshotRecorder: snapshotRecorder,
                 snapshotStage: snapshotStage
@@ -729,7 +732,6 @@ public actor SourceNetworkPolicy {
     ) async throws -> HTTPStreamResponse {
         guard prepared.url.scheme?.lowercased() != "data",
               !prepared.useWebView,
-              prepared.webJavaScript == nil,
               prepared.bodyJavaScript == nil,
               prepared.responseType == nil else {
             throw RuleEngineError.unsupportedRule(rule: prepared.ruleURL, feature: "流式响应转换")
@@ -764,6 +766,7 @@ public actor SourceNetworkPolicy {
         _ prepared: PreparedRequest,
         source: BookSource,
         executor: any SourceWebViewRequestExecuting,
+        transport: any HTTPTransport,
         timeout: TimeInterval,
         snapshotRecorder: (any DifferentialSnapshotRecording)?,
         snapshotStage: DifferentialStage
@@ -785,8 +788,33 @@ public actor SourceNetworkPolicy {
         var lastError: Error = HTTPClientError.nonHTTPResponse
         for attempt in 0..<attempts {
             do {
+                try Task.checkCancellation()
+                if prepared.method == .post, prepared.webViewHTML == nil {
+                    let page: HTTPResponse
+                    if let proxy = prepared.proxy {
+                        guard let proxyTransport = transport as? any ProxyHTTPTransport else {
+                            throw RuleEngineError.unsupportedRule(rule: prepared.ruleURL, feature: "当前传输层不支持代理")
+                        }
+                        page = try await proxyTransport.data(for: request, proxy: proxy)
+                    } else { page = try await transport.data(for: request) }
+                    guard (200...299).contains(page.statusCode) else { throw HTTPClientError.statusResponse(page) }
+                    if source.enabledCookieJar == true {
+                        captureCookies(response: page, sourceID: source.id)
+                        let cookies = cookieHeader(sourceID: source.id, url: page.finalURL)
+                        let explicit = request.value(forHTTPHeaderField: "Cookie") ?? ""
+                        webPrepared.headers["Cookie"] = mergeCookieHeaders(cookies, explicit)
+                    }
+                    var decoded = page
+                    decoded.requestedCharset = prepared.charset ?? page.requestedCharset
+                    webPrepared.webViewHTML = decoded.decodedText
+                    webPrepared.url = page.finalURL
+                }
+                try Task.checkCancellation()
                 var response = try await executor.execute(webPrepared, source: source, timeout: timeout)
-                response.requestedCharset = prepared.charset
+                try Task.checkCancellation()
+                // WKWebView serializes JavaScript results as UTF-8 even when
+                // the original document used a legacy encoding.
+                response.requestedCharset = response.requestedCharset ?? prepared.charset
                 guard (200...299).contains(response.statusCode) else {
                     throw HTTPClientError.statusResponse(response)
                 }
@@ -819,6 +847,7 @@ public actor SourceNetworkPolicy {
     ) async throws -> HTTPResponse {
         var response = original
         response.requestVariables = prepared.variables
+        response.rssArticle = prepared.rssArticle
         if prepared.responseType != nil {
             response.data = Data(original.data.map { String(format: "%02x", $0) }.joined().utf8)
             response.requestedCharset = "utf-8"
@@ -835,12 +864,14 @@ public actor SourceNetworkPolicy {
                 page: prepared.page,
                 source: source,
                 book: prepared.book,
-                chapter: prepared.chapter
+                chapter: prepared.chapter,
+                rssArticle: prepared.rssArticle
             )
         )
         response.data = Data(transformed.value.stringValue.utf8)
         response.requestedCharset = "utf-8"
         response.requestVariables = transformed.variables
+        response.rssArticle = transformed.rssArticle ?? response.rssArticle
         return response
     }
 

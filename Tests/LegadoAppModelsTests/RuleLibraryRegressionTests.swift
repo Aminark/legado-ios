@@ -180,6 +180,49 @@ struct RuleLibraryRegressionTests {
         #expect(model.sources == [first, second])
     }
 
+    @Test func oneClickImportSourceAliasesReachPreviewThroughPasteAndDeepLink() async throws {
+        let endpoint = "https://import.test/one-click"
+        let document = #"[{"bookSourceUrl":"https://source.test","bookSourceName":"一键导入书源"}]"#
+        for route in ["legado://import/importonline", "legado://import/auto", "yuedu://booksource/importonline"] {
+            for viaDeepLink in [false, true] {
+                let transport = ImportFixtureTransport(documents: [endpoint: document])
+                let repository = InMemoryBookSourceRepository()
+                let model = SourceLibraryModel(repository: repository, importTransport: transport)
+                let input = route + "?src=https%3A%2F%2Fimport.test%2Fone-click"
+                if viaDeepLink { await model.handleDeepLink(try #require(URL(string: input))) }
+                else { await model.previewInput(input) }
+                #expect(await transport.requests.count == 1)
+                #expect(model.pendingImport?.items.map(\.source.bookSourceName) == ["一键导入书源"])
+                #expect(model.pendingImport?.invalidCount == 0)
+                #expect(model.notice == nil)
+                #expect(model.sources.isEmpty)
+                #expect(await repository.load().isEmpty)
+            }
+        }
+    }
+
+    @Test func oneClickAutomaticImportRejectsRSSAndMixedKindsWithoutSourceMutation() async {
+        let rss = #"{"sourceUrl":"https://rss.test","sourceName":"RSS订阅","ruleArticles":"item"}"#
+        let source = #"{"bookSourceUrl":"https://source.test","bookSourceName":"书源"}"#
+        let original = BookSource(bookSourceUrl: "https://kept.test", bookSourceName: "保留书源")
+        let purification = #"{"name":"净化","pattern":"广告","replacement":""}"#
+        let unsupportedTheme = #"{"themeName":"主题"}"#
+        for (document, errorWord) in [(rss, "RSS"), ("[" + source + "," + rss + "]", "混合"),
+                                      (purification, "净化规则"), (unsupportedTheme, "阅读主题")] {
+            let transport = ImportFixtureTransport(documents: ["https://import.test/automatic": document])
+            let repository = InMemoryBookSourceRepository(sources: [original])
+            let model = SourceLibraryModel(repository: repository, importTransport: transport)
+            await model.load()
+            await model.previewInput("legado://import/auto?src=https%3A%2F%2Fimport.test%2Fautomatic")
+            #expect(await transport.requests.count == 1)
+            #expect(model.pendingImport == nil)
+            #expect(model.notice?.kind == .error)
+            #expect(model.notice?.detail.contains(errorWord) == true)
+            #expect(model.sources == [original])
+            #expect(await repository.load() == [original])
+        }
+    }
+
     @Test func remoteManifestFeedsPreviewAndHonorsWithoutUserAgent() async throws {
         let transport = ImportFixtureTransport(documents: [
             "https://import.test/manifest": #"{"sourceUrls":["https://import.test/a#requestWithoutUA","https://import.test/b"]}"#,

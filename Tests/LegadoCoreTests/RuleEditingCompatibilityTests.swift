@@ -65,6 +65,32 @@ struct RuleEditingCompatibilityTests {
         #expect(throws: BookSourceImportError.self) { try RuleImportInput.parse("https://") }
     }
 
+    @Test func oneClickImportAcceptsSourceAliasesAndKeepsTypedBoundaries() throws {
+        let encoded = "https%3A%2F%2Fexample.test%2Fsources.json%23requestWithoutUA"
+        let aliases = [
+            ("legado://import/importonline", "bookSource"),
+            ("legado://import/auto", "bookSource"),
+            ("yuedu://booksource/importonline", "bookSource"),
+            ("yuedu://replace/importonline", "replaceRule")
+        ]
+        for (route, kind) in aliases {
+            let input = try RuleImportInput.parse(route + "?src=" + encoded, kind: kind)
+            #expect(input == .remote(URL(string: "https://example.test/sources.json")!, withoutUserAgent: true))
+            #expect(input.request()?.value(forHTTPHeaderField: "User-Agent") == "null")
+        }
+        #expect(throws: BookSourceImportError.self) {
+            try RuleImportInput.parse("yuedu://replace/importonline?src=https://example.test/rules", kind: "bookSource")
+        }
+        #expect(throws: BookSourceImportError.self) {
+            try RuleImportInput.parse("legado://import/rssSource?src=https://example.test/rss", kind: "bookSource")
+        }
+        var nested = URLComponents(string: "legado://import/auto")!
+        nested.queryItems = [.init(name: "src", value: " yuedu://booksource/importonline?src=https://example.test/sources")]
+        #expect(throws: BookSourceImportError.self) { try RuleImportInput.parse(nested.string!) }
+        #expect(RuleImportInput.isDeepLink(URL(string: "yuedu://replace/importonline?src=https://example.test/rules")!, for: "replaceRule"))
+        #expect(!RuleImportInput.isDeepLink(URL(string: "legado://import/auto?src=https://example.test/sources")!, for: "replaceRule"))
+    }
+
     @Test func purificationTestMatchesReaderScopesAndCaptures() throws {
         var rule = ReplaceRule(id: 1, name: "替换", pattern: "第([0-9]+)章", replacement: "Chapter $1")
         rule.scopeTitle = true
