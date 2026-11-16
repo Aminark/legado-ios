@@ -91,9 +91,11 @@ final class ReaderPagingGeometryTests: XCTestCase {
             XCTAssertTrue(clip.clipsToBounds)
             XCTAssertLessThanOrEqual(clip.frame.maxY, view.bounds.height - 16 + 0.5)
             let glyphs = view.layoutManager.glyphRange(forCharacterRange: pages[index].characterRange, actualCharacterRange: nil)
-            let ink = view.layoutManager.boundingRect(forGlyphRange: glyphs, in: view.textContainer)
-            XCTAssertGreaterThanOrEqual(ink.minY + view.textContainerInset.top - view.contentOffset.y, 16 - 0.5)
-            XCTAssertLessThanOrEqual(ink.maxY + view.textContainerInset.top - view.contentOffset.y, clip.bounds.height + 0.5)
+            view.layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { rect, used, _, lineGlyphs, _ in
+                XCTAssertEqual(NSIntersectionRange(glyphs, lineGlyphs), lineGlyphs)
+                XCTAssertGreaterThanOrEqual(rect.minY + view.textContainerInset.top - view.contentOffset.y, 16 - 0.5)
+                XCTAssertLessThanOrEqual(used.maxY + view.textContainerInset.top - view.contentOffset.y, clip.bounds.height + 0.5)
+            }
             if index + 1 < pages.count {
                 XCTAssertEqual(NSMaxRange(ranges[index]), ranges[index + 1].location)
                 coordinator.turnPage(1)
