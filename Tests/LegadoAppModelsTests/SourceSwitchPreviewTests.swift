@@ -5,6 +5,17 @@ import LegadoCore
 
 @MainActor
 struct SourceSwitchPreviewTests {
+    @Test func failedShelfCommitKeepsPreviewAvailableForRetry() async throws {
+        let fixture = SourcePreviewFixture()
+        await fixture.model.select(fixture.candidates[0], sources: fixture.sources)
+        #expect(await fixture.model.confirmSelection() != nil)
+        fixture.model.reportSaveFailure()
+        #expect(fixture.model.canConfirm)
+        #expect(fixture.model.preview != nil)
+        #expect(fixture.model.errorMessage != nil)
+        #expect(await fixture.model.confirmSelection() != nil)
+    }
+
     @Test func openingTheListAutomaticallyFetchesAndGroupsTheSameChapterWithoutSaving() async {
         let body = String(repeating: "雨夜中的灯塔照亮了远处的海湾。", count: 20)
         let f = SourcePreviewFixture(bodyA: body, bodyB: body, automatic: true, allExact: true)
@@ -77,8 +88,7 @@ struct SourceSwitchPreviewTests {
         let loader = SourcePreviewContentLoader(bodies: Dictionary(uniqueKeysWithValues: ids.map { ($0, "本章正文") }),
                                                 suspended: Set(ids))
         let directory = SourcePreviewDirectoryLoader(exactForAll: true)
-        let service = BookSourceSwitchService(detailLoader: directory, chapterLoader: directory, contentLoader: loader,
-                                              chapterRepository: InMemoryBookChapterRepository())
+        let service = BookSourceSwitchService(detailLoader: directory, chapterLoader: directory, contentLoader: loader)
         let model = SourceSwitchViewModel(book: book, service: service, candidates: candidates,
                                           referenceService: SourcePreviewReference(value: nil), cache: SourceSwitchCache())
         let load = Task { await model.load(sources: sources) }
@@ -143,7 +153,7 @@ struct SourceSwitchPreviewTests {
         #expect(confirmed.report.verifiedContent?.content == preview.report.verifiedContent?.content)
         #expect(await f.loader.requestCount("a") == 1)
         #expect(await f.loader.requestedChapter("a") == "第二章·灯塔")
-        #expect(await f.repository.load(bookURL: f.book.bookUrl) == confirmed.report.chapters)
+        #expect(await f.repository.load(bookURL: f.book.bookUrl) == f.oldChapters)
         #expect(!f.model.canConfirm)
         #expect(await f.model.confirmSelection() == nil)
     }
@@ -274,7 +284,7 @@ struct SourceSwitchPreviewTests {
         let tracker = PartialSearchTracker(candidates: f.candidates)
         let directory = SourcePreviewDirectoryLoader(exactForAll: true)
         let service = BookSourceSwitchService(searcher: PartialSourceSearch(tracker: tracker), detailLoader: directory,
-            chapterLoader: directory, contentLoader: f.loader, chapterRepository: f.repository)
+            chapterLoader: directory, contentLoader: f.loader)
         let model = SourceSwitchViewModel(book: f.book, service: service, referenceService: f.referenceService, cache: f.cache)
         let pending = Task { await model.load(sources: f.sources) }
         while model.verificationStates[f.candidates[0].id] != .ready { await Task.yield() }
@@ -425,7 +435,7 @@ private struct SourcePreviewFixture {
         referenceService = SourcePreviewReference(value: reference)
         service = BookSourceSwitchService(searcher: searcher,
                                               detailLoader: directory, chapterLoader: directory,
-                                              contentLoader: loader, chapterRepository: repository)
+                                              contentLoader: loader)
         model = SourceSwitchViewModel(book: current, service: service, candidates: automatic ? [] : candidates,
                                       referenceService: referenceService, cache: cache)
     }

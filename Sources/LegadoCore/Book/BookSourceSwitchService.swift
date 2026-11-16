@@ -100,7 +100,7 @@ public struct BookSourceProgressMapper: Sendable {
         migrated.durChapterIndex = resolvedIndex
         migrated.durChapterTitle = chapters.indices.contains(resolvedIndex) ? chapters[resolvedIndex].title : nil
         migrated.durChapterTime = current.durChapterTime
-        return .init(book: migrated, chapters: chapters, exactChapterMatch: match.matched)
+        return .init(book: migrated, chapters: chapters, exactChapterMatch: match.exact)
     }
 }
 
@@ -112,8 +112,8 @@ private enum ChapterProgressMatcher {
     private static let numbered = try! NSRegularExpression(pattern: ".*?第([\(numerals)]+)[章节篇回集话]")
     private static let prefixed = try! NSRegularExpression(pattern: "^(?:[\(numerals)]+[,:、])*([\(numerals)]+)(?:[,:、]|\\.[^\\d])")
 
-    static func match(current: Book, chapters: [BookChapter]) -> (index: Int, matched: Bool) {
-        guard !chapters.isEmpty else { return (0, false) }
+    static func match(current: Book, chapters: [BookChapter]) -> (index: Int, matched: Bool, exact: Bool) {
+        guard !chapters.isEmpty else { return (0, false, false) }
         let oldIndex = max(current.durChapterIndex, 0)
         let fallback = min(oldIndex, chapters.count - 1)
         let oldTitle = normalized(current.durChapterTitle ?? "")
@@ -121,8 +121,14 @@ private enum ChapterProgressMatcher {
         // Retain the iOS exact-title match, choosing the closest occurrence for
         // repeated names such as 番外 instead of silently jumping to the first.
         let exact = readable.filter { !oldTitle.isEmpty && normalized(chapters[$0].title) == oldTitle }
-        if let index = nearest(exact, to: fallback) { return (index, true) }
-        guard oldIndex > 0 else { return (fallback, false) }
+        if let index = nearest(exact, to: fallback) { return (index, true, exact.count == 1) }
+        let oldName = comparableName(current.durChapterTitle ?? "")
+        if !oldName.isEmpty {
+            let named = readable.filter { comparableName(chapters[$0].title) == oldName }
+            if named.count == 1, let index = named.first { return (index, true, true) }
+            if named.count > 1 { return (fallback, false, false) }
+        }
+        guard oldIndex > 0 else { return (fallback, false, false) }
 
         // Use the original search window, with bounded arithmetic for imported
         // metadata; malformed chapter counts must not overflow or trap.
@@ -132,16 +138,15 @@ private enum ChapterProgressMatcher {
         let lower = Int(min(Double(chapters.count - 1), max(0, min(Double(oldIndex), scaled) - 10)))
         let upper = Int(min(Double(chapters.count - 1), max(Double(oldIndex), scaled) + 10))
         let candidates = readable.filter { $0 >= lower && $0 <= upper }
-        let oldName = pureName(current.durChapterTitle ?? "")
         if !oldName.isEmpty {
             let matches = candidates.filter { similarity(oldName, pureName(chapters[$0].title)) > 0.96 }
-            if let index = nearest(matches, to: fallback) { return (index, true) }
+            if let index = nearest(matches, to: fallback) { return (index, false, false) }
         }
         if let number = chapterNumber(current.durChapterTitle ?? ""), number > 0 {
             let matches = candidates.filter { chapterNumber(chapters[$0].title) == number }
-            if let index = nearest(matches, to: fallback) { return (index, true) }
+            if let index = nearest(matches, to: fallback) { return (index, false, false) }
         }
-        return (fallback, false)
+        return (fallback, false, false)
     }
 
     private static func nearest(_ indices: [Int], to index: Int) -> Int? {
@@ -162,6 +167,11 @@ private enum ChapterProgressMatcher {
             .replacingOccurrences(of: "^.*?第[\(numerals)]+[章节篇回集话](?!$)|^(?:[\(numerals)]+[,:、])*[\(numerals)]+(?:[,:、](?!$)|\\.(?=[^\\d]))", with: "", options: .regularExpression)
             .replacingOccurrences(of: #"(?!^)(?:[〖【《〔\[{(][^〖【《〔\[{()〕》】〗\]}]+)?[)〕》】〗\]}]$|^[〖【《〔\[{(](?:[^〖【《〔\[{()〕》】〗\]}]+[〕》】〗\]})])?(?!$)"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"[^A-Za-z0-9_\p{Han}]"#, with: "", options: .regularExpression)
+    }
+
+    private static func comparableName(_ value: String) -> String {
+        let prefix = #"^\s*第\s*[0-9０-９〇零一二两兩三四五六七八九十百千万萬壹贰貳叁參肆伍陆陸柒捌玖拾佰仟]+\s*[章回]\s*"#
+        return normalized(value.replacingOccurrences(of: prefix, with: "", options: .regularExpression))
     }
 
     private static func similarity(_ lhs: String, _ rhs: String) -> Double {
@@ -309,7 +319,6 @@ public actor BookSourceSwitchService {
         candidate: SearchBook,
         source: BookSource,
         now: Int64? = nil,
-        persistChapters: Bool = true,
         requireExactChapterMatch: Bool = false
     ) async -> BookSourceSwitchReport? {
         guard !Task.isCancelled else { return nil }

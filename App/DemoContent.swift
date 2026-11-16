@@ -130,8 +130,7 @@ enum DemoContent {
     static var sourceSwitchService: BookSourceSwitchService {
         let loader = DemoSourceSwitchLoader(body: readerText,
             sameText: ProcessInfo.processInfo.arguments.contains("-uiDemoSourceGroups"))
-        return BookSourceSwitchService(detailLoader: loader, chapterLoader: loader, contentLoader: loader,
-                                       chapterRepository: InMemoryBookChapterRepository())
+        return BookSourceSwitchService(detailLoader: loader, chapterLoader: loader, contentLoader: loader)
     }
 
     static var sourceSwitchReferenceService: any SourceChapterReferencing {

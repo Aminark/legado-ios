@@ -95,7 +95,7 @@ public struct ChapterImageParser: Sendable {
                 // web address remains prose, even in a mixed image chapter.
                 let urlPart = line.range(of: #",\s*(?=\{)"#, options: .regularExpression).map { String(line[..<$0.lowerBound]) } ?? line
                 let imageExtension = URL(string: urlPart)?.pathExtension.lowercased()
-                let looksLikeImage = imageExtension.map { ["png", "jpg", "jpeg", "webp", "gif", "avif", "bmp"].contains($0) } ?? false
+                let looksLikeImage: Bool = imageExtension.map { ["png", "jpg", "jpeg", "webp", "gif", "avif", "bmp"].contains($0) } ?? false
                 if !urlPart.contains(where: { $0.isWhitespace || $0 == "<" || $0 == ">" }), (allowBareURLs || looksLikeImage),
                    let address = resolve(line, baseURL: baseURL),
                    line.hasPrefix("http://") || line.hasPrefix("https://") || line.hasPrefix("//")

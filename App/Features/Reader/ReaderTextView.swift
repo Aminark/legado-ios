@@ -1358,7 +1358,7 @@ struct ReaderTextView: UIViewRepresentable {
             turnPage(gesture.direction == .left ? 1 : -1)
         }
 
-        private func turnPage(_ direction: Int) {
+        func turnPage(_ direction: Int) {
             guard !isTurningPage, let view = textView else { return }
             if isAutoReading { resetAutoReadForPageChange() }
             guard let target = adjacentPageOffset(in: view, direction: direction) else {

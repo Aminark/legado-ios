@@ -337,7 +337,7 @@ final class SourceSwitchViewModel: ObservableObject {
         else {
             let task = Task {
                 await service.prepareSwitch(current: book, candidate: candidate.book, source: source,
-                                            persistChapters: false, requireExactChapterMatch: exactOnly)
+                                            requireExactChapterMatch: exactOnly)
             }
             request = Preparation(token: UUID(), task: task)
             preparations[key] = request

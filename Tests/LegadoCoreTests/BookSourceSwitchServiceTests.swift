@@ -198,12 +198,11 @@ struct BookSourceSwitchServiceTests {
         let loader = StubSwitchLoader(chapters: chapters)
         let contentLoader = RecordingSwitchContentLoader()
         let repository = InMemoryBookChapterRepository()
-        let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader, contentLoader: contentLoader,
-                                              chapterRepository: repository)
+        let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader, contentLoader: contentLoader)
 
         let report = try #require(await service.prepareSwitch(current: current,
             candidate: SearchBook(bookURL: replacement.bookUrl, origin: "new", originName: "新源", type: 0, name: "书"),
-            source: BookSource(bookSourceUrl: "new", bookSourceName: "新源"), persistChapters: false))
+            source: BookSource(bookSourceUrl: "new", bookSourceName: "新源")))
 
         #expect(report.exactChapterMatch)
         #expect(report.book.durChapterIndex == 240)
@@ -247,8 +246,11 @@ struct BookSourceSwitchServiceTests {
                 replacement: Book(bookUrl: "new", name: "书", origin: "new"), chapters: chapters, now: 100)
 
             #expect(!report.exactChapterMatch)
-            #expect(report.book.durChapterIndex == 10)
-            #expect(report.book.durChapterPos == 0)
+            // Upstream keeps the nearest repeated full title for manual progress;
+            // ambiguous names still cannot trigger automatic verification.
+            let repeatedFullTitle = !oldTitle.isEmpty && oldTitle == firstTitle && oldTitle == secondTitle
+            #expect(report.book.durChapterIndex == (repeatedFullTitle ? 2 : 5))
+            #expect(report.book.durChapterPos == (repeatedFullTitle ? 88 : 0))
         }
     }
 
@@ -357,12 +359,12 @@ struct BookSourceSwitchServiceTests {
         let content = RecordingSwitchContentLoader()
         let repository = InMemoryBookChapterRepository()
         let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader,
-                                              contentLoader: content, chapterRepository: repository)
+                                              contentLoader: content)
 
         let report = try #require(await service.prepareSwitch(current: current,
             candidate: SearchBook(bookURL: "new", origin: "new", originName: "新源", type: 0, name: "书"),
             source: BookSource(bookSourceUrl: "new", bookSourceName: "新源"),
-            persistChapters: false, requireExactChapterMatch: true))
+            requireExactChapterMatch: true))
 
         #expect(!report.exactChapterMatch)
         #expect(report.verifiedContent == nil)
@@ -420,11 +422,10 @@ struct BookSourceSwitchServiceTests {
         let chapters = [volume, BookChapter(url: "body", title: "第二章", bookUrl: "new", index: 1)]
         let loader = StubSwitchLoader(chapters: chapters)
         let service = BookSourceSwitchService(detailLoader: loader, chapterLoader: loader,
-                                              contentLoader: SwitchContentLoader(),
-                                              chapterRepository: InMemoryBookChapterRepository())
+                                              contentLoader: SwitchContentLoader())
         let report = try #require(await service.prepareSwitch(current: current,
             candidate: SearchBook(bookURL: "new", origin: "new", originName: "新源", type: 0, name: "书"),
-            source: BookSource(bookSourceUrl: "new", bookSourceName: "新源"), persistChapters: false))
+            source: BookSource(bookSourceUrl: "new", bookSourceName: "新源")))
         #expect(!report.exactChapterMatch)
         #expect(report.book.durChapterIndex == 1)
         #expect(report.book.durChapterTitle == "第二章")

@@ -5,6 +5,7 @@ struct SourceSwitchView: View {
     @StateObject private var model: SourceSwitchViewModel
     @FocusState private var isSearchFocused: Bool
     @State private var isSaving = false
+    @State private var saveFailed = false
     let sources: [BookSource]
     let onSwitched: @MainActor (BookSourceSwitchReport, BookSource) async -> Bool
 
@@ -51,13 +52,15 @@ struct SourceSwitchView: View {
                 } label: { Image(systemName: "arrow.clockwise") }
                 .accessibilityLabel("刷新换源结果")
                 .accessibilityIdentifier("sourceSwitch.refresh")
-                .disabled(model.isSwitching || model.isRefreshing)
+                .disabled(model.isSwitching || model.isRefreshing || isSaving)
             }
         }
-        .interactiveDismissDisabled(isSaving)
+        .interactiveDismissDisabled(isSaving || model.isSwitching)
         .task { await model.load(sources: sources) }
         .onDisappear { model.cancelSelection() }
-        .interactiveDismissDisabled(model.isSwitching)
+        .alert("换源未保存", isPresented: $saveFailed) {
+            Button("好", role: .cancel) { model.clearError() }
+        } message: { Text(model.errorMessage ?? "换源未能保存，请重试。") }
     }
 
     private var sourceSearchField: some View {
@@ -229,7 +232,7 @@ struct SourceSwitchView: View {
                     isSaving = true
                     defer { isSaving = false }
                     if await onSwitched(available.report, available.source) { dismiss() }
-                    else { model.reportSaveFailure() }
+                    else { model.reportSaveFailure(); saveFailed = true }
                 }
             }
         } label: {
