@@ -288,7 +288,10 @@ struct BookDetailView: View {
                             HStack(spacing: 12) {
                                 Text(String(format: "%02d", chapter.index + 1))
                                     .font(.caption.monospacedDigit()).foregroundStyle(.tertiary).frame(width: 28)
-                                Text(chapter.title).font(.subheadline).foregroundStyle(.primary).lineLimit(2)
+                                Text(chapter.title)
+                                    .font(.subheadline)
+                                    .foregroundStyle(model.isChapterCached(chapter) ? Color.primary : Color.secondary)
+                                    .lineLimit(2)
                                 Spacer()
                                 if chapter.isVip { Image(systemName: "lock.fill").font(.caption).foregroundStyle(.orange) }
                                 Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
@@ -320,6 +323,7 @@ private struct BookTableOfContentsView: View {
     let source: BookSource
     @State private var searchText = ""
     @State private var descending = false
+    @State private var cachedURLs: Set<String> = []
 
     private var displayedChapters: [BookChapter] {
         let filtered = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -340,7 +344,9 @@ private struct BookTableOfContentsView: View {
                         HStack(spacing: 12) {
                             Text("\(chapter.index + 1)")
                                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 42, alignment: .trailing)
-                            Text(chapter.title).lineLimit(2)
+                            Text(chapter.title)
+                                .foregroundStyle(chapter.index == book.durChapterIndex || cachedURLs.contains(chapter.url) ? Color.primary : Color.secondary)
+                                .lineLimit(2)
                             Spacer()
                             if chapter.index == book.durChapterIndex {
                                 Image(systemName: "location.fill").foregroundStyle(ReadingTheme.accent)
@@ -351,6 +357,9 @@ private struct BookTableOfContentsView: View {
                 }
             }
             .searchable(text: $searchText, prompt: "搜索目录")
+            .task {
+                cachedURLs = (try? await ChapterContentCache.live().cachedChapterURLs(bookURL: book.bookUrl, among: chapters)) ?? []
+            }
             .navigationTitle("目录")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

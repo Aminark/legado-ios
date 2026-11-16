@@ -1,7 +1,9 @@
 import SwiftUI
+import CloudKit
 
 @main
 struct LegadoApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @UIApplicationDelegateAdaptor(LegadoAppDelegate.self) private var appDelegate
     @StateObject private var sourceLibrary: SourceLibraryModel
     @StateObject private var bookLibrary: BookLibraryModel
@@ -9,11 +11,13 @@ struct LegadoApp: App {
     @StateObject private var readingActivity: ReadingActivityModel
     @StateObject private var rssLibrary: RSSLibraryModel
     @StateObject private var ruleSubscriptions: RuleSubscriptionModel
+    @StateObject private var backupSync: BackupSyncModel
 
     init() {
         AppDiagnostics.shared.start()
         SourceWebViewExecutorRegistry.shared.register(WKSourceWebViewExecutor())
         let demo = ProcessInfo.processInfo.arguments.contains("-uiDemo")
+        _backupSync = StateObject(wrappedValue: BackupSyncModel(demo: demo))
         _sourceLibrary = StateObject(wrappedValue: demo
             ? SourceLibraryModel.demo(sources: DemoContent.sources)
             : SourceLibraryModel.live())
@@ -39,7 +43,9 @@ struct LegadoApp: App {
                 .environmentObject(readingActivity)
                 .environmentObject(rssLibrary)
                 .environmentObject(ruleSubscriptions)
+                .environmentObject(backupSync)
                 .task {
+                    await backupSync.recoverInterruptedImport()
                     await sourceLibrary.load()
                     if let index = ProcessInfo.processInfo.arguments.firstIndex(of: "-uiAutomationImportURL"),
                        ProcessInfo.processInfo.arguments.indices.contains(index + 1),
@@ -58,8 +64,42 @@ struct LegadoApp: App {
                         await bookLibrary.checkForUpdates(sources: sourceLibrary.sources, onlyRead: UserDefaults.standard.bool(forKey: "onlyUpdateRead"))
                     }
                     await ruleSubscriptions.checkAutomaticUpdates(bookSources: sourceLibrary, rssSources: rssLibrary, replaceRules: replaceRuleLibrary)
+                    await backupSync.start()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .CKAccountChanged)) { _ in backupSync.accountChanged() }
+                .onReceive(NotificationCenter.default.publisher(for: BackupSyncModel.didApply)) { _ in
+                    Task {
+                        await bookLibrary.waitForPendingSaves()
+                        await sourceLibrary.reloadAfterLibraryImport()
+                        await bookLibrary.load(); await readingActivity.load(); await replaceRuleLibrary.load()
+                        await rssLibrary.load(); await ruleSubscriptions.load()
+                    }
+                }
+                .task(id: scenePhase) {
+                    guard scenePhase == .active else { return }
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(nanoseconds: 60_000_000_000) }
+                        catch { return }
+                        guard !Task.isCancelled, scenePhase == .active else { return }
+                        if !backupSync.automaticBackupProviders.isEmpty {
+                            await bookLibrary.waitForPendingSaves()
+                            guard !Task.isCancelled else { return }
+                            await backupSync.automaticSync(backupsOnly: true)
+                        }
+                    }
+                }
+                .onChange(of: scenePhase) { phase in
+                    guard phase == .active || phase == .background else { return }
+                    let backgroundID = phase == .background && backupSync.hasAutomaticSync
+                        ? UIApplication.shared.beginBackgroundTask(withName: "LibrarySync") { Task { @MainActor in backupSync.cancelSynchronization() } } : .invalid
+                    Task {
+                        await bookLibrary.waitForPendingSaves()
+                        await backupSync.automaticSync()
+                        if backgroundID != .invalid { UIApplication.shared.endBackgroundTask(backgroundID) }
+                    }
                 }
                 .onOpenURL { url in
+                    if GoogleBackupAccount.handle(url) { return }
                     Task {
                         if url.isFileURL && url.pathExtension.lowercased() == "epub" {
                             let file = LocalBookImportFile(url: url)
