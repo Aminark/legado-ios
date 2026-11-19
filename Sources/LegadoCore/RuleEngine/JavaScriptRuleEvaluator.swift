@@ -5,6 +5,7 @@ import JavaScriptCore
 import SwiftSoup
 
 public struct RuleExecutionContext: Sendable {
+    var browserRequest: (@Sendable (String, String) -> Bool)?
     var nestedRuleDepth = 0
     var replacesEachListItem = false
     var cancellation: RuleExecutionCancellation?
@@ -268,10 +269,22 @@ private final class JavaScriptRedirectBlocker: NSObject, URLSessionTaskDelegate,
 
 public struct JavaScriptRuleEvaluator: Sendable {
     public var maximumScriptLength: Int
+    public var maximumLibraryLength: Int
     public var maximumResultLength: Int
     private let networkLoader: any JavaScriptNetworkLoading
     private let urlBuilder: LegadoURLBuilder
     private let rssVariableStore: RSSVariableStore
+
+    public func evaluateSourceAction(
+        script: String,
+        result: JSONValue,
+        source: BookSource,
+        requestBrowser: @escaping @Sendable (String, String) -> Bool
+    ) async throws -> JavaScriptRuleResult {
+        var context = RuleExecutionContext(baseURL: source.bookSourceUrl, source: source)
+        context.browserRequest = requestBrowser
+        return try await evaluateAsync(script: script, result: result, executionContext: context)
+    }
 
     public func evaluateAsync(script: String, result: JSONValue, executionContext: RuleExecutionContext) async throws -> JavaScriptRuleResult {
         try await RuleExecutionWorker.run {
@@ -281,12 +294,14 @@ public struct JavaScriptRuleEvaluator: Sendable {
 
     public init(
         maximumScriptLength: Int = 64 * 1_024,
+        maximumLibraryLength: Int = 128 * 1_024,
         maximumResultLength: Int = 2 * 1_024 * 1_024,
         networkLoader: any JavaScriptNetworkLoading = SynchronousJavaScriptNetworkLoader(),
         urlBuilder: LegadoURLBuilder = .init(),
         rssVariableStore: RSSVariableStore = .shared
     ) {
         self.maximumScriptLength = maximumScriptLength
+        self.maximumLibraryLength = maximumLibraryLength
         self.maximumResultLength = maximumResultLength
         self.networkLoader = networkLoader
         self.urlBuilder = urlBuilder
@@ -485,7 +500,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
 
         if let library = executionContext.source?.jsLib?.trimmingCharacters(in: .whitespacesAndNewlines),
            !library.isEmpty {
-            guard library.utf8.count <= maximumScriptLength else {
+            guard library.utf8.count <= maximumLibraryLength else {
                 throw RuleEngineError.resourceLimit(rule: library, detail: "书源 jsLib 超过长度上限")
             }
             try rejectUnboundedExecution(library)
@@ -914,6 +929,13 @@ public struct JavaScriptRuleEvaluator: Sendable {
         java?.setObject(logValue, forKeyedSubscript: "log" as NSString)
         java?.setObject(logValue, forKeyedSubscript: "logType" as NSString)
         java?.setObject(logValue, forKeyedSubscript: "toast" as NSString)
+        if let requestBrowser = executionContext.browserRequest {
+            let browser: @convention(block) (String, String) -> Bool = { url, title in
+                requestBrowser(url, title)
+            }
+            java?.setObject(browser, forKeyedSubscript: "startBrowser" as NSString)
+            java?.setObject(browser, forKeyedSubscript: "startBrowserAwait" as NSString)
+        }
         java?.setObject(urlEncode, forKeyedSubscript: "encodeURI" as NSString)
         java?.setObject(getCookieHeader, forKeyedSubscript: "getCookieHeader" as NSString)
         java?.setObject(getCookieValue, forKeyedSubscript: "__getCookieValue" as NSString)
@@ -1129,6 +1151,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
                     bodyContext.rssArticle = prepared.rssArticle
                     let transformed = try JavaScriptRuleEvaluator(
                         maximumScriptLength: maximumScriptLength,
+                        maximumLibraryLength: maximumLibraryLength,
                         maximumResultLength: maximumResultLength,
                         networkLoader: networkLoader,
                         urlBuilder: requestBuilder,
