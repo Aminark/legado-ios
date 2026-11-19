@@ -273,6 +273,24 @@ struct JavaScriptRuleEvaluatorTests {
 
         #expect(value.value.stringValue == "lib:ok")
     }
+    @Test func scriptLoginActionsCanRequestBrowserPresentation() async throws {
+        let source = BookSource(bookSourceUrl: "https://reader.example.test", bookSourceName: "Example")
+        let script = """
+            function openLogin() {
+                return java.startBrowserAwait(result.address, "Sign in");
+            }
+            openLogin()
+            """
+        let value = try await JavaScriptRuleEvaluator().evaluateSourceAction(
+            script: script,
+            result: .object(["address": .string("https://reader.example.test/login")]),
+            source: source
+        ) { url, title in
+            url == "https://reader.example.test/login" && title == "Sign in"
+        }
+        #expect(value.value == .bool(true))
+    }
+
     @Test func sharedLibraryHasAnIndependentByteLimit() throws {
         var source = BookSource(bookSourceUrl: "https://library.example.test", bookSourceName: "Large shared library")
         source.jsLib = "/*" + String(repeating: "测", count: 25_000) + "*/ function value() { return 'ok'; }"

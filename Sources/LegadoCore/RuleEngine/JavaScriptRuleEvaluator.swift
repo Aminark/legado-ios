@@ -5,6 +5,7 @@ import JavaScriptCore
 import SwiftSoup
 
 public struct RuleExecutionContext: Sendable {
+    var browserRequest: (@Sendable (String, String) -> Bool)?
     var nestedRuleDepth = 0
     var replacesEachListItem = false
     var cancellation: RuleExecutionCancellation?
@@ -273,6 +274,17 @@ public struct JavaScriptRuleEvaluator: Sendable {
     private let networkLoader: any JavaScriptNetworkLoading
     private let urlBuilder: LegadoURLBuilder
     private let rssVariableStore: RSSVariableStore
+
+    public func evaluateSourceAction(
+        script: String,
+        result: JSONValue,
+        source: BookSource,
+        requestBrowser: @escaping @Sendable (String, String) -> Bool
+    ) async throws -> JavaScriptRuleResult {
+        var context = RuleExecutionContext(baseURL: source.bookSourceUrl, source: source)
+        context.browserRequest = requestBrowser
+        return try await evaluateAsync(script: script, result: result, executionContext: context)
+    }
 
     public func evaluateAsync(script: String, result: JSONValue, executionContext: RuleExecutionContext) async throws -> JavaScriptRuleResult {
         try await RuleExecutionWorker.run {
@@ -917,6 +929,13 @@ public struct JavaScriptRuleEvaluator: Sendable {
         java?.setObject(logValue, forKeyedSubscript: "log" as NSString)
         java?.setObject(logValue, forKeyedSubscript: "logType" as NSString)
         java?.setObject(logValue, forKeyedSubscript: "toast" as NSString)
+        if let requestBrowser = executionContext.browserRequest {
+            let browser: @convention(block) (String, String) -> Bool = { url, title in
+                requestBrowser(url, title)
+            }
+            java?.setObject(browser, forKeyedSubscript: "startBrowser" as NSString)
+            java?.setObject(browser, forKeyedSubscript: "startBrowserAwait" as NSString)
+        }
         java?.setObject(urlEncode, forKeyedSubscript: "encodeURI" as NSString)
         java?.setObject(getCookieHeader, forKeyedSubscript: "getCookieHeader" as NSString)
         java?.setObject(getCookieValue, forKeyedSubscript: "__getCookieValue" as NSString)
