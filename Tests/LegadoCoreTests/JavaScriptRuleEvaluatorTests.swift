@@ -273,6 +273,23 @@ struct JavaScriptRuleEvaluatorTests {
 
         #expect(value.value.stringValue == "lib:ok")
     }
+    @Test func sharedLibraryHasAnIndependentByteLimit() throws {
+        var source = BookSource(bookSourceUrl: "https://library.example.test", bookSourceName: "Large shared library")
+        source.jsLib = "/*" + String(repeating: "测", count: 25_000) + "*/ function value() { return 'ok'; }"
+        let context = RuleExecutionContext(source: source)
+        let evaluator = JavaScriptRuleEvaluator()
+        let output = try evaluator.evaluate(script: "value()", result: .null, executionContext: context)
+        #expect(output.value.stringValue == "ok")
+
+        #expect(throws: RuleEngineError.self) {
+            try JavaScriptRuleEvaluator(maximumLibraryLength: 64 * 1_024)
+                .evaluate(script: "value()", result: .null, executionContext: context)
+        }
+        #expect(throws: RuleEngineError.self) {
+            try evaluator.evaluate(script: source.jsLib ?? "", result: .null, executionContext: .init())
+        }
+    }
+
     @Test func providesAjaxAndConnectWithLegadoURLOptions() throws {
         var source = BookSource(bookSourceUrl: "https://js-network.example.test", bookSourceName: "JS 网络源")
         source.header = #"{"X-Source":"source"}"#
