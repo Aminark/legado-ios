@@ -148,6 +148,11 @@ struct SourceLoginView: View {
             }
         }
         cookies.forEach(HTTPCookieStorage.shared.setCookie)
+        if let url = URL(string: source.bookSourceUrl) {
+            let matching = HTTPCookieStorage.shared.cookies(for: url) ?? []
+            let header = HTTPCookie.requestHeaderFields(with: matching)["Cookie"] ?? ""
+            await SourceNetworkPolicy.shared.setCookieHeader(header, sourceID: source.id, url: url)
+        }
         actionRequest = nil
         await runAction("if (typeof login === 'function') login();")
     }
@@ -202,6 +207,7 @@ private struct SourceLoginWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.applicationNameForUserAgent = "Legado/iOS"
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.backgroundColor = UIColor(ReadingTheme.canvas)
