@@ -19,6 +19,7 @@ struct ReaderView: View {
     @StateObject private var speech = ReaderSpeechController()
     @State private var showsTableOfContents = false
     @State private var showsBookmarks = false
+    @State private var chapterCommentsTarget: ReaderChapterCommentsTarget?
     @State private var illustrationChapter: BookChapter?
     @State private var showsAutoReadControls = false
     @State private var showsStyleControls = false
@@ -289,6 +290,10 @@ struct ReaderView: View {
         }
         .sheet(isPresented: $showsTableOfContents) { tableOfContents }
         .sheet(isPresented: $showsBookmarks) { bookmarksSheet }
+        .sheet(item: $chapterCommentsTarget) { target in
+            ReaderChapterCommentsView(target: target)
+                .id(target.id)
+        }
         .sheet(item: $illustrationChapter) { chapter in
             EPUBIllustrationsView(book: book, chapter: chapter)
         }
@@ -486,7 +491,7 @@ struct ReaderView: View {
             VStack(spacing: 0) {
                 if headerVisible { readerTipBar(isHeader: true) }
                 readerSurface
-                if footerVisible { readerTipBar(isHeader: false) }
+                readerFooter
             }
             .frame(maxWidth: readingColumnMaxWidth)
             .frame(maxWidth: .infinity)
@@ -541,6 +546,39 @@ struct ReaderView: View {
         sourceSwitchBook = model.bookForSourceSwitch(position: readerPosition)
     }
 
+    private func openChapterComments(at index: Int) {
+        guard let target = model.commentsTarget(at: index) else { return }
+        showsReaderMenu = false
+        chapterCommentsTarget = target
+    }
+
+    @ViewBuilder private var readerFooter: some View {
+        if pageAnimation != 3, model.commentsTarget(at: model.currentIndex) != nil {
+            // A changing footer height would repaginate the text precisely when the last page appears.
+            HStack(spacing: 0) {
+                if footerVisible { readerTipBar(isHeader: false) }
+                Spacer(minLength: 0)
+                if !readerPageRanges.isEmpty, currentPage == totalPages {
+                    Button {
+                        openChapterComments(at: model.currentIndex)
+                    } label: {
+                        Label("本章评论", systemImage: "text.bubble")
+                            .font(.subheadline)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 44)
+                    }
+                    .foregroundStyle(foregroundColor)
+                    .accessibilityIdentifier("reader.chapterEndComments")
+                }
+            }
+            .frame(minHeight: 44)
+        } else if footerVisible {
+            readerTipBar(isHeader: false)
+        }
+    }
+
     @ViewBuilder private var readerSurface: some View {
         if model.hasImageContent, let chapter = model.currentChapter {
             VStack(spacing: 0) {
@@ -586,7 +624,8 @@ struct ReaderView: View {
                     let resolved = min(max(position, 0), model.content.utf16.count)
                     if readerPosition != resolved { readerPosition = resolved }
                 },
-                onRetainChapters: { model.retainContinuousChapters($0) }
+                onRetainChapters: { model.retainContinuousChapters($0) },
+                onOpenComments: openChapterComments
             )
         } else {
             readerTextConfiguration
@@ -760,6 +799,7 @@ struct ReaderView: View {
             || showsReaderMenu
             || showsTableOfContents
             || showsBookmarks
+            || chapterCommentsTarget != nil
             || illustrationChapter != nil
             || showsAutoReadControls
             || showsStyleControls
@@ -893,6 +933,12 @@ struct ReaderView: View {
 
     private var readerMoreMenu: some View {
         Menu {
+            if model.commentsTarget(at: model.currentIndex) != nil {
+                Button("本章评论", systemImage: "text.bubble") {
+                    openChapterComments(at: model.currentIndex)
+                }
+                .accessibilityIdentifier("reader.chapterComments")
+            }
             Button("搜索正文", systemImage: "magnifyingglass") {
                 showsReaderMenu = false
                 showsContentSearch = true

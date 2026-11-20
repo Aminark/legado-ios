@@ -5,6 +5,82 @@ import LegadoCore
 
 @MainActor
 struct ReaderRegressionTests {
+    @Test func commentPagesKeepOrderAndIgnoreDuplicatesLatePagesAndCursorLoops() {
+        let firstNext = URL(string: "https://comments.test/page/2")!
+        let secondNext = URL(string: "https://comments.test/page/3")!
+        func page(_ ids: [String], next: URL?) -> ChapterCommentPage {
+            .init(comments: ids.map { ChapterComment(id: $0, content: "相同内容") }, nextPageURL: next)
+        }
+        var pages = ReaderChapterCommentPages()
+        pages.append(page(["late"], next: nil), requestedURL: firstNext)
+        #expect(pages.comments.isEmpty)
+        pages.append(page(["a", "a", "b"], next: firstNext), requestedURL: nil)
+        #expect(pages.comments.map(\.id) == ["a", "b"])
+        pages.append(page(["wrong"], next: nil), requestedURL: secondNext)
+        pages.append(page(["late"], next: nil), requestedURL: nil)
+        #expect(pages.nextPageURL == firstNext)
+        pages.append(page(["b", "c"], next: secondNext), requestedURL: firstNext)
+        #expect(pages.nextPageURL == secondNext)
+        pages.append(page(["d"], next: firstNext), requestedURL: secondNext)
+        #expect(pages.comments.map(\.id) == ["a", "b", "c", "d"])
+        #expect(pages.nextPageURL == nil)
+        pages.append(page(["late"], next: firstNext), requestedURL: secondNext)
+        #expect(pages.comments.count == 4)
+        #expect(pages.nextPageURL == nil)
+    }
+
+    @Test func commentTargetsKeepTheirChapterAndSourceAcrossScrollingAndSourceSwitching() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var source = BookSource(bookSourceUrl: "https://source.test", bookSourceName: "评论源")
+        var rules = ReviewRule()
+        rules.reviewUrl = "/comments/{{chapter.index}}"
+        rules.contentRule = "$.comments[*].content"
+        source.ruleReview = rules
+        let book = Book(bookUrl: "https://source.test/book/42", name: "书", origin: source.id)
+        let chapters = (0..<3).map { BookChapter(url: "chapter/\($0)", title: "相同的标题", bookUrl: book.bookUrl, index: $0) }
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0, source: source,
+                                    service: SourceAwareReaderLoader(), cache: .init(directory: directory))
+        await model.load(rules: [], prefetchNextChapter: false)
+        await model.prepareContinuousReading(rules: [])
+        let selected = try #require(model.commentsTarget(at: 1))
+        #expect(model.scrollChapters.count == 3)
+        #expect(model.scrollChapters.allSatisfy { $0.hasComments })
+        #expect(model.currentIndex == 0)
+        #expect(selected.chapter.url == chapters[1].url)
+        #expect(model.updateContinuousPosition(chapter: 2))
+        #expect(model.commentsTarget(at: model.currentIndex)?.chapter == chapters[2])
+        #expect(selected.chapter == chapters[1])
+
+        var replacement = book
+        replacement.origin = "https://new-source.test"
+        model.applySourceSwitch(.init(book: replacement, chapters: chapters, exactChapterMatch: true),
+                                source: .init(bookSourceUrl: replacement.origin, bookSourceName: "无评论"))
+        #expect(model.commentsTarget(at: 1) == nil)
+        #expect(selected.book.origin == source.id)
+        #expect(selected.source.id == source.id)
+    }
+
+    @Test func commentTargetsRejectMismatchesAndExposeOnlyExactOfficialChaptersWithoutRules() {
+        let source = BookSource(bookSourceUrl: "https://source.test", bookSourceName: "书源")
+        let book = Book(bookUrl: "https://source.test/book/1", name: "书", origin: source.id)
+        let official = BookChapter(url: "https://fanqienovel.com/reader/123", title: "第一章", bookUrl: book.bookUrl, index: 0)
+        var volume = official
+        volume.isVolume = true
+        var otherBook = official
+        otherBook.bookUrl = "different"
+        var detail = official
+        detail.url = "https://fanqienovel.com/page/123"
+        let model = ReaderViewModel(book: book, chapters: [official, volume, otherBook, detail], initialIndex: 0, source: source)
+        #expect(model.commentsTarget(at: 0)?.official?.platform == .fanqie)
+        for index in [-1, 1, 2, 3, 4] { #expect(model.commentsTarget(at: index) == nil) }
+        let localModel = ReaderViewModel(book: book, chapters: [official], initialIndex: 0)
+        #expect(localModel.commentsTarget(at: 0) == nil)
+        let wrongSource = BookSource(bookSourceUrl: "https://other.test", bookSourceName: "其他源")
+        let wrongModel = ReaderViewModel(book: book, chapters: [official], initialIndex: 0, source: wrongSource)
+        #expect(wrongModel.commentsTarget(at: 0) == nil)
+    }
+
     @Test func resegmentationKeepsCachedImagesAcrossCurrentAdjacentAndContinuousContent() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -129,6 +129,10 @@ public struct ContentRule: Codable, Hashable, Sendable {
 
 public struct ReviewRule: Codable, Hashable, Sendable {
     public var reviewUrl: String?
+    public var reviewList: String?
+    public var nextReviewUrl: String?
+    public var idRule: String?
+    public var authorRule: String?
     public var avatarRule: String?
     public var contentRule: String?
     public var postTimeRule: String?
@@ -138,6 +142,17 @@ public struct ReviewRule: Codable, Hashable, Sendable {
     public var postReviewUrl: String?
     public var postQuoteUrl: String?
     public var deleteUrl: String?
+
+    public var supportsChapterComments: Bool {
+        [reviewUrl, contentRule].allSatisfy {
+            !($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    public var supportsChapterCommentsPage: Bool {
+        !(reviewUrl ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            (contentRule ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     public init() {}
 }

@@ -2,7 +2,7 @@ import Foundation
 import CryptoKit
 
 public enum DifferentialStage: String, Codable, Sendable {
-    case search, detail, toc, content, login, debug
+    case search, detail, toc, content, review, login, debug
 }
 
 public struct DifferentialRequestSnapshot: Codable, Sendable, Equatable {

@@ -67,6 +67,30 @@ struct HostsHTTPTransportTests {
         #expect(!response.decodedText.contains("PRIVATE"))
     }
 
+    @Test func commentPaginationStopsBeforeFollowingCrossOriginRedirect() async throws {
+        let server = try HostsLoopbackServer()
+        let port = try await server.start()
+        defer { server.stop() }
+        let suite = "legado.comments.redirect.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ApplicationSettingsStore(defaults: defaults)
+        var settings = ApplicationSettings()
+        settings.hosts = "127.0.0.1 books.invalid"
+        try store.save(settings)
+        let transport = URLSessionHTTPTransport(settingsStore: store)
+        var page = try LegadoURLBuilder().prepare("http://127.0.0.1:\(port)/redirect",
+                                                  defaultHeaders: ["X-Reader-Token": "private"])
+        page.redirectOrigin = page.url
+        do {
+            _ = try await transport.data(for: page.urlRequest(timeout: 3))
+            Issue.record("不应跟随跨域分页重定向")
+        } catch HTTPClientError.statusResponse(let redirect) {
+            #expect(redirect.statusCode == 302)
+            #expect(redirect.finalURL == page.url)
+        }
+    }
+
     @Test func databaseCompactionPreservesUserData() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

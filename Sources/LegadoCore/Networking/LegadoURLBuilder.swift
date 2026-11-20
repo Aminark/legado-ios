@@ -45,6 +45,7 @@ public struct URLTemplateContext: Sendable {
 }
 
 public struct PreparedRequest: Sendable {
+    var redirectOrigin: URL?
     public var suppressesUserAgent: Bool
     public var ruleURL: String
     /// Expanded URL rule including options, for replaying a detail page that
@@ -136,9 +137,14 @@ public struct PreparedRequest: Sendable {
         request.httpBody = method == .post ? body : nil
         request.httpShouldHandleCookies = handleCookies
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
-        if suppressesUserAgent {
+        if suppressesUserAgent || redirectOrigin != nil {
             let mutable = (request as NSURLRequest).mutableCopy() as! NSMutableURLRequest
-            URLProtocol.setProperty(true, forKey: "LegadoSuppressUserAgent", in: mutable)
+            if suppressesUserAgent {
+                URLProtocol.setProperty(true, forKey: "LegadoSuppressUserAgent", in: mutable)
+            }
+            if let redirectOrigin {
+                URLProtocol.setProperty(redirectOrigin.absoluteString, forKey: ReviewPageAddress.redirectOriginKey, in: mutable)
+            }
             return mutable as URLRequest
         }
         return request
@@ -175,12 +181,32 @@ public struct LegadoURLBuilder: Sendable {
         baseURL: URL? = nil,
         defaultHeaders: [String: String] = [:]
     ) throws -> PreparedRequest {
+        try prepare(template, context: context, baseURL: baseURL, defaultHeaders: defaultHeaders, destination: .source)
+    }
+
+    enum Destination { case source, comments, browser }
+
+    func prepare(
+        _ template: String, context: URLTemplateContext, baseURL: URL?,
+        defaultHeaders: [String: String], destination: Destination
+    ) throws -> PreparedRequest {
         var context = context
         let renderedResult = try renderResult(template, context: context, baseURL: baseURL)
         context.rssArticle = renderedResult.rssArticle
         let rendered = renderedResult.text
         let parsed = try parseOptions(rendered, rule: template)
         let options = parsed.options
+        if destination == .browser {
+            // A system browser accepts a URL, without access to the book source's
+            // request headers, response scripts or custom transport settings.
+            guard options.declaredMethod == nil || options.declaredMethod == "GET",
+                  options.body == nil, defaultHeaders.isEmpty, options.headers.isEmpty,
+                  !options.useWebView, options.webJavaScript == nil, options.bodyJavaScript == nil,
+                  options.dnsIP == nil, options.serverID == nil, options.responseType == nil,
+                  options.webViewDelayMilliseconds == 0, options.retry == 0 else {
+                throw RuleEngineError.invalidInput(rule: template, expected: "评论网页需要浏览器无法携带的书源请求参数")
+            }
+        }
         var urlText = parsed.url
         var variables = renderedResult.variables
         if let script = options.javaScript {
@@ -194,6 +220,9 @@ public struct LegadoURLBuilder: Sendable {
             urlText = evaluated.value.stringValue
             variables = evaluated.variables
             context.rssArticle = evaluated.rssArticle ?? context.rssArticle
+        }
+        if destination != .source, urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw RuleEngineError.invalidInput(rule: template, expected: "书源未提供当前章节的评论地址")
         }
         let charsetEncoding = options.charset.flatMap(HTTPTextDecoder.encoding(named:))
         let requestURLText = encodeQueryIfNeeded(urlText, encoding: charsetEncoding)
@@ -493,6 +522,7 @@ public struct LegadoURLBuilder: Sendable {
     private func makeOptions(_ object: [String: JSONValue], rule: String) throws -> Options {
         var options = Options()
         if let method = object["method"]?.stringValue.uppercased() {
+            options.declaredMethod = method
             options.method = HTTPMethod(rawValue: method) ?? .get
         }
         options.charset = object["charset"]?.stringValue.nilIfEmpty
@@ -676,6 +706,7 @@ public struct LegadoURLBuilder: Sendable {
 
     private struct Options {
         var method: HTTPMethod = .get
+        var declaredMethod: String?
         var charset: String?
         var headers: [String: String] = [:]
         var body: JSONValue?

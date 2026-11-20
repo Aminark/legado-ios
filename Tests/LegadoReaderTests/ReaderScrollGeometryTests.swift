@@ -256,6 +256,49 @@ final class ReaderBookmarkPersistenceTests: XCTestCase {
 
 @MainActor
 final class ReaderScrollGeometryTests: XCTestCase {
+    func testChapterCommentButtonAddsSpaceOnlyAfterTheLastTextBlock() throws {
+        var text = chapter(3)
+        let plain = ReaderScrollChapterLayout(chapter: text, configuration: configuration(), width: 390)
+        text.hasComments = true
+        let withComments = ReaderScrollChapterLayout(chapter: text, configuration: configuration(), width: 390)
+        XCTAssertGreaterThan(plain.blocks.count, 1)
+        XCTAssertEqual(plain.blocks.map(\.glyphRange), withComments.blocks.map(\.glyphRange))
+        XCTAssertEqual(plain.blocks.map(\.top), withComments.blocks.map(\.top))
+        XCTAssertEqual(plain.blocks.dropLast().map(\.height), withComments.blocks.dropLast().map(\.height))
+        XCTAssertFalse(plain.blocks.contains(where: \.endsWithComments))
+        XCTAssertFalse(withComments.blocks.dropLast().contains(where: \.endsWithComments))
+        let last = try XCTUnwrap(withComments.blocks.last)
+        XCTAssertTrue(last.endsWithComments)
+        let plainLast = try XCTUnwrap(plain.blocks.last)
+        XCTAssertEqual(last.height - plainLast.height, ReaderScrollChapterLayout.commentsHeight, accuracy: 0.01)
+    }
+
+    func testVisibleNeighborCommentButtonUsesItsOwnChapterAfterReload() throws {
+        var chapters = [0, 1].map { ReaderScrollChapter(id: $0, title: "第\($0)章", content: "相同正文") }
+        let fixture = host(chapters: chapters, active: 0)
+        defer { fixture.coordinator.displayLink?.invalidate(); fixture.window.isHidden = true }
+        var selected: [Int] = []
+        let cellPath = IndexPath(item: 1, section: 0)
+        func update(available: Bool) {
+            chapters[1].hasComments = available
+            fixture.coordinator.parent = surface(chapters: chapters, active: 0, onOpenComments: { selected.append($0) })
+            fixture.coordinator.update(fixture.view)
+            fixture.view.layoutIfNeeded()
+        }
+
+        update(available: true)
+        let cell = try XCTUnwrap(fixture.view.cellForItem(at: cellPath))
+        let button = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? UIButton }.first)
+        XCTAssertFalse(button.isHidden)
+        XCTAssertEqual(button.accessibilityValue, chapters[1].title)
+        button.sendActions(for: .touchUpInside)
+        XCTAssertEqual(selected, [1])
+        update(available: false)
+        XCTAssertTrue(button.isHidden)
+        button.sendActions(for: .touchUpInside)
+        XCTAssertEqual(selected, [1])
+    }
+
     func testPrependingAndRecyclingStayWithinOnePhysicalPixel() async throws {
         let chapters = (4...6).map { chapter($0) }
         let fixture = host(chapters: chapters, active: 5)
@@ -411,11 +454,12 @@ final class ReaderScrollGeometryTests: XCTestCase {
         return (window, view, coordinator)
     }
 
-    private func surface(chapters: [ReaderScrollChapter], active: Int, fontSize: Double = 20) -> ReaderScrollView {
+    private func surface(chapters: [ReaderScrollChapter], active: Int, fontSize: Double = 20,
+                         onOpenComments: @escaping (Int) -> Void = { _ in }) -> ReaderScrollView {
         .init(configuration: configuration(fontSize: fontSize), chapters: chapters,
               resetID: 0, activeIndex: active, loadingAhead: false, loadingBehind: false,
               onNeedChapters: { _ in }, onPositionChanged: { _, _ in },
-              onRetainChapters: { _ in })
+              onRetainChapters: { _ in }, onOpenComments: onOpenComments)
     }
 
     private func configuration(fontSize: Double = 20) -> ReaderTextView {

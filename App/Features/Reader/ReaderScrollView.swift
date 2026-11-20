@@ -11,6 +11,7 @@ struct ReaderScrollView: UIViewRepresentable {
     let onNeedChapters: (Int) -> Void
     let onPositionChanged: (Int, Int) -> Void
     let onRetainChapters: (Set<Int>) -> Void
+    let onOpenComments: (Int) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -166,7 +167,7 @@ struct ReaderScrollView: UIViewRepresentable {
                 for cell in view.visibleCells {
                     guard let cell = cell as? ReaderScrollCell,
                           let index = view.indexPath(for: cell)?.item, blocks.indices.contains(index) else { continue }
-                    cell.canvas.block = blocks[index]
+                    configure(cell, with: blocks[index])
                 }
                 reachedEnd = false
             }
@@ -188,8 +189,14 @@ struct ReaderScrollView: UIViewRepresentable {
 
         func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "text", for: indexPath) as! ReaderScrollCell
-            cell.canvas.block = blocks[indexPath.item]
+            configure(cell, with: blocks[indexPath.item])
             return cell
+        }
+
+        private func configure(_ cell: ReaderScrollCell, with block: ReaderScrollBlock) {
+            cell.configure(block, tint: parent.configuration.foregroundColor) { [weak self] index in
+                self?.parent.onOpenComments(index)
+            }
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -318,6 +325,15 @@ struct ReaderScrollView: UIViewRepresentable {
             guard let y = offset(for: anchor, blocks: blocks, frames: layout.frames) else { return }
             let maximum = max(layout.collectionViewContentSize.height - view.bounds.height, 0)
             view.setContentOffset(CGPoint(x: 0, y: min(max(y, 0), maximum)), animated: false)
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            var view = touch.view
+            while let current = view {
+                if current is UIControl { return false }
+                view = current.superview
+            }
+            return true
         }
 
         @objc private func tapped(_ gesture: UITapGestureRecognizer) {
@@ -451,6 +467,9 @@ struct ReaderScrollBlock {
     let glyphRange: NSRange
     let top: CGFloat
     let height: CGFloat
+    var endsWithComments: Bool {
+        chapter.chapter.hasComments && NSMaxRange(glyphRange) == chapter.manager.numberOfGlyphs
+    }
     var id: ID { .init(chapter: chapter.chapter.id, firstGlyph: glyphRange.location) }
 }
 
@@ -462,6 +481,7 @@ final class ReaderScrollChapterLayout {
     let container: NSTextContainer
     let bodyStart: Int
     let left: CGFloat
+    static let commentsHeight: CGFloat = 44
     private var fragments: [(range: NSRange, top: CGFloat, height: CGFloat)] = []
     var blocks: [ReaderScrollBlock] {
         fragments.map { .init(chapter: self, glyphRange: $0.range, top: $0.top, height: $0.height) }
@@ -497,22 +517,59 @@ final class ReaderScrollChapterLayout {
             }
         }
         let bottom = manager.usedRect(for: container).maxY + CGFloat(configuration.fontSize * 1.4)
+            + (chapter.hasComments ? Self.commentsHeight : 0)
         fragments.append((NSRange(location: startGlyph, length: count - startGlyph), top, max(bottom - top, 1)))
     }
 }
 
 @MainActor
 private final class ReaderScrollCell: UICollectionViewCell {
-    let canvas = ReaderScrollCanvas()
+    private let canvas = ReaderScrollCanvas()
+    private let comments = UIButton(type: .system)
+    private var onOpenComments: ((Int) -> Void)?
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
         contentView.backgroundColor = .clear
         contentView.addSubview(canvas)
+        var config = UIButton.Configuration.plain()
+        config.title = "本章评论"
+        config.image = UIImage(systemName: "text.bubble")
+        config.imagePadding = 6
+        comments.configuration = config
+        comments.accessibilityIdentifier = "reader.chapterEndComments"
+        comments.addTarget(self, action: #selector(openComments), for: .touchUpInside)
+        contentView.addSubview(comments)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func layoutSubviews() { super.layoutSubviews(); canvas.frame = contentView.bounds }
-    override func prepareForReuse() { super.prepareForReuse(); canvas.block = nil }
+    func configure(_ block: ReaderScrollBlock, tint: UIColor, onOpenComments: @escaping (Int) -> Void) {
+        canvas.block = block
+        self.onOpenComments = onOpenComments
+        comments.isHidden = !block.endsWithComments
+        comments.accessibilityValue = block.chapter.chapter.title
+        comments.tintColor = tint
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let height = comments.isHidden ? 0 : ReaderScrollChapterLayout.commentsHeight
+        let (buttonRect, textRect) = contentView.bounds.divided(atDistance: height, from: .maxYEdge)
+        comments.frame = buttonRect
+        canvas.frame = textRect
+    }
+
+    @objc private func openComments() {
+        if let block = canvas.block, block.endsWithComments { onOpenComments?(block.chapter.chapter.id) }
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        canvas.block = nil
+        onOpenComments = nil
+        comments.isHidden = true
+    }
 }
 
 @MainActor

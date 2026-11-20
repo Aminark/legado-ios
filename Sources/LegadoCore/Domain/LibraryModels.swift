@@ -292,6 +292,64 @@ public struct BookChapter: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+/// An exact publisher chapter link that can be opened without transferring book-source
+/// cookies, headers, or tracking parameters to the browser.
+public struct OfficialCommentChapter: Hashable, Sendable {
+    public enum Platform: Hashable, Sendable { case qidian, fanqie }
+
+    public let platform: Platform
+    public let url: URL
+    public let bookID: String?
+    public let chapterID: String
+    public var platformName: String { platform == .qidian ? "起点读书" : "番茄小说" }
+    public var discussionName: String { platform == .qidian ? "本章说" : "章末讨论" }
+
+    public static func resolve(book: Book, chapter: BookChapter) -> Self? {
+        guard !chapter.isVolume, chapter.bookUrl == book.bookUrl else { return nil }
+        let base = URL(string: chapter.baseUrl.isEmpty ? book.bookUrl : chapter.baseUrl)
+        guard !chapter.url.isEmpty,
+              let address = URL(string: chapter.url, relativeTo: base)?.absoluteURL,
+              let parts = URLComponents(url: address, resolvingAgainstBaseURL: false),
+              ["https", "http"].contains(parts.scheme?.lowercased() ?? ""),
+              parts.user == nil, parts.password == nil, parts.port == nil,
+              !parts.percentEncodedPath.contains("//") else { return nil }
+        let path = parts.percentEncodedPath.split(separator: "/")
+        let bookParts = URLComponents(string: book.bookUrl)
+        let bookPath = bookParts?.percentEncodedPath.split(separator: "/") ?? []
+        let bookPlatform = platform(for: bookParts?.host)
+        let chapterPlatform = platform(for: parts.host)
+        guard bookPlatform == nil || bookPlatform == chapterPlatform else { return nil }
+        switch chapterPlatform {
+        case .qidian:
+            guard path.count == 3, path[0] == "chapter", numericID(path[1]), numericID(path[2]),
+                  let url = URL(string: "https://www.qidian.com/chapter/\(path[1])/\(path[2])/") else { return nil }
+            if bookPlatform == .qidian, bookPath.count == 2, bookPath[0] == "book", numericID(bookPath[1]),
+               path[1] != bookPath[1] { return nil }
+            return Self(platform: .qidian, url: url, bookID: String(path[1]), chapterID: String(path[2]))
+        case .fanqie:
+            guard path.count == 2, path[0] == "reader", numericID(path[1]),
+                  let url = URL(string: "https://fanqienovel.com/reader/\(path[1])") else { return nil }
+            let bookID = bookPlatform == .fanqie && bookPath.count == 2 && bookPath[0] == "page" && numericID(bookPath[1])
+                ? String(bookPath[1]) : nil
+            return Self(platform: .fanqie, url: url, bookID: bookID, chapterID: String(path[1]))
+        case nil:
+            return nil
+        }
+    }
+
+    private static func numericID(_ value: Substring) -> Bool {
+        !value.isEmpty && value.utf8.allSatisfy { (48...57).contains($0) }
+    }
+
+    private static func platform(for host: String?) -> Platform? {
+        switch host?.lowercased() {
+        case "qidian.com", "www.qidian.com", "m.qidian.com": .qidian
+        case "fanqienovel.com", "www.fanqienovel.com": .fanqie
+        default: nil
+        }
+    }
+}
+
 public struct Bookmark: Codable, Hashable, Identifiable, Sendable {
     public var epubLocation: String?
     public var time: Int64

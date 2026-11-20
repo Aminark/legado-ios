@@ -134,6 +134,32 @@ public struct ChapterContentReport: Sendable {
     }
 }
 
+public struct ChapterComment: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let content: String
+    public let author: String?
+    public let avatarURL: URL?
+    public let postedAt: String?
+
+    public init(id: String, content: String, author: String? = nil, avatarURL: URL? = nil, postedAt: String? = nil) {
+        self.id = id
+        self.content = content
+        self.author = author
+        self.avatarURL = avatarURL
+        self.postedAt = postedAt
+    }
+}
+
+public struct ChapterCommentPage: Sendable {
+    public let comments: [ChapterComment]
+    public let nextPageURL: URL?
+
+    public init(comments: [ChapterComment], nextPageURL: URL? = nil) {
+        self.comments = comments
+        self.nextPageURL = nextPageURL
+    }
+}
+
 public struct NetworkBookService: Sendable {
     private let transport: any HTTPTransport
     private let urlBuilder: LegadoURLBuilder
@@ -646,6 +672,177 @@ public struct NetworkBookService: Sendable {
         )
     }
 
+    /// Read the comment list supplied by the active chapter's book source.
+    public func loadChapterComments(book: Book, chapter: BookChapter, source: BookSource) async throws -> [ChapterComment] {
+        try await loadChapterCommentsPage(book: book, chapter: chapter, source: source).comments
+    }
+
+    public func loadChapterCommentsPage(book: Book, chapter: BookChapter, source: BookSource,
+                                        nextPageURL: URL? = nil) async throws -> ChapterCommentPage {
+        guard let rules = source.ruleReview, rules.supportsChapterComments else {
+            throw RuleEngineError.invalidInput(rule: "ruleReview", expected: "书源缺少评论地址或内容规则")
+        }
+        var prepared = try prepareCommentsRequest(book: book, chapter: chapter, source: source, destination: .comments)
+        let firstURL = prepared.url
+        if let nextPageURL {
+            guard nonempty(rules.nextReviewUrl) != nil, let url = ReviewPageAddress.normalized(nextPageURL),
+                  ReviewPageAddress.sameOrigin(url, firstURL) else {
+                throw RuleEngineError.invalidInput(rule: "nextReviewUrl", expected: "评论分页地址与书源不匹配")
+            }
+            prepared.url = url
+            prepared.ruleURL = url.absoluteString
+            prepared.resolvedRuleURL = url.absoluteString
+            prepared.method = .get
+            prepared.body = nil
+            prepared.headers = prepared.headers.filter { !["content-length", "content-type"].contains($0.key.lowercased()) }
+            prepared.useWebView = false
+            prepared.webJavaScript = nil
+            prepared.redirectOrigin = firstURL
+        }
+        let response = try await execute(prepared, source: source, stage: .review)
+        try Task.checkCancellation()
+        guard response.statusCode != 202 else {
+            throw RuleEngineError.invalidInput(rule: "ruleReview", expected: "评论服务仍在处理请求，请稍后重试")
+        }
+        if response.statusCode == 204 { return .init(comments: []) }
+        guard !response.data.isEmpty else {
+            throw RuleEngineError.invalidInput(rule: prepared.ruleURL, expected: "书源返回了空响应")
+        }
+        let document = PageDocument(response: response)
+        var context = RuleExecutionContext(
+            variables: prepared.variables.merging(response.requestVariables) { _, current in current },
+            baseURL: document.baseURL, source: source, book: book, chapter: chapter
+        )
+
+        let rows: [JSONValue]
+        let evaluatesRows: Bool
+        if let listRule = nonempty(rules.reviewList)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            // Preserve an empty array as a successful match. Flattening the trailing
+            // wildcard too early makes an error envelope look like a valid empty list.
+            let simpleArrayPath = !document.isHTML &&
+                listRule.range(of: #"^\$(?:\.[\w-]+)*(?:\[\*\])?$"#, options: .regularExpression) != nil
+            let selector = simpleArrayPath && listRule.hasSuffix("[*]") ? String(listRule.dropLast(3)) : listRule
+            let list = try await evaluateReviewRule(selector, document: document, listMode: true, context: &context)
+            if simpleArrayPath {
+                guard case .array = list.values.first else {
+                    throw RuleEngineError.invalidInput(rule: listRule, expected: "评论列表与书源规则不匹配，预期返回数组")
+                }
+            }
+            rows = list.listItems(rule: selector)
+            evaluatesRows = true
+        } else if case .array(let items) = document.value {
+            rows = items
+            evaluatesRows = true
+        } else {
+            // Older sources select a column of bodies from the entire response.
+            rows = [document.value]
+            evaluatesRows = false
+        }
+
+        var comments: [ChapterComment] = []
+        var knownIDs = Set<String>()
+        for row in rows {
+            try Task.checkCancellation()
+            let fragment = evaluatesRows ? PageDocument(value: row, baseURL: document.baseURL, isFragment: true) : document
+            var local = context
+            func field(_ rule: String?, isID: Bool = false) async throws -> [String] {
+                let evaluation = try await evaluateReviewRule(rule, document: fragment, context: &local)
+                return try evaluation.listItems(rule: rule ?? "").map { value in
+                    switch value {
+                    case .number(let number) where isID && abs(number) >= 9_007_199_254_740_992:
+                        // JSONValue represents numbers as Double. Keep both comments when
+                        // different numeric IDs round to the same value.
+                        return ""
+                    case .string, .number, .bool, .null:
+                        return value.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    default:
+                        throw RuleEngineError.invalidInput(rule: rule ?? "", expected: "评论字段规则应返回文本")
+                    }
+                }
+            }
+            let texts = try await field(rules.contentRule)
+            let bodies = evaluatesRows ? [texts.filter { !$0.isEmpty }.joined(separator: "\n")] : texts
+            let ids = try await field(rules.idRule, isID: true)
+            let authors = try await field(rules.authorRule)
+            let avatars = try await field(rules.avatarRule)
+            let times = try await field(rules.postTimeRule)
+            for (index, body) in bodies.enumerated() where !body.isEmpty {
+                // A missing optional field in a flat selector can shorten its column.
+                // Only pair columns of equal length, so the next reader's name cannot shift up.
+                func paired(_ values: [String]) -> String? {
+                    values.count == bodies.count ? nonempty(values[index]) : nil
+                }
+                let id = paired(ids).map { "source:" + $0 } ?? "row:\(prepared.url.absoluteString):\(comments.count)"
+                guard knownIDs.insert(id).inserted else { continue }
+                let avatar = paired(avatars).flatMap { URL(string: $0, relativeTo: response.finalURL)?.absoluteURL }
+                comments.append(.init(id: id, content: body, author: paired(authors),
+                    avatarURL: avatar.flatMap { ["http", "https"].contains($0.scheme?.lowercased()) ? $0 : nil },
+                    postedAt: paired(times)))
+            }
+        }
+        try Task.checkCancellation()
+        if !rows.isEmpty, comments.isEmpty {
+            throw RuleEngineError.invalidInput(rule: rules.contentRule ?? "", expected: "未能从评论响应中解析到内容")
+        }
+        let next = try await evaluateReviewRule(rules.nextReviewUrl, document: document, context: &context)
+        var nextURL: URL?
+        if let raw = nonempty(next.firstString),
+           let target = URL(string: raw, relativeTo: response.finalURL)?.absoluteURL,
+           let url = ReviewPageAddress.normalized(target),
+           ReviewPageAddress.sameOrigin(url, firstURL), ReviewPageAddress.sameOrigin(url, response.finalURL),
+           ![firstURL, prepared.url, response.finalURL].compactMap(ReviewPageAddress.normalized).contains(url) {
+            nextURL = url
+        }
+        return .init(comments: comments, nextPageURL: nextURL)
+    }
+
+    /// Expand a source-supplied, display-ready comments page without fetching it.
+    public func chapterCommentsPageURL(book: Book, chapter: BookChapter, source: BookSource) async throws -> URL {
+        guard source.ruleReview?.supportsChapterCommentsPage == true else {
+            throw RuleEngineError.invalidInput(rule: "ruleReview", expected: "书源未提供可直接打开的评论网页")
+        }
+        let prepared = try prepareCommentsRequest(book: book, chapter: chapter, source: source, destination: .browser)
+        try Task.checkCancellation()
+        return prepared.url
+    }
+
+    private func prepareCommentsRequest(book: Book, chapter: BookChapter, source: BookSource,
+                                        destination: LegadoURLBuilder.Destination) throws -> PreparedRequest {
+        try Task.checkCancellation()
+        guard !chapter.isVolume, source.id == book.origin, chapter.bookUrl == book.bookUrl else {
+            throw RuleEngineError.invalidInput(rule: chapter.url, expected: "章节与当前书籍或书源不匹配")
+        }
+        var variables = decodeVariables(book.variable).merging(decodeVariables(chapter.variable)) { _, local in local }
+        if let official = OfficialCommentChapter.resolve(book: book, chapter: chapter) {
+            variables["reviewChapterId"] = official.chapterID
+            if let bookID = official.bookID { variables["reviewBookId"] = bookID }
+        }
+        // The browser uses its own login session. Source-wide HTTP credentials belong
+        // only to native requests. Explicit per-page headers are checked by the builder.
+        let headers = destination == .browser ? [:] : try BookSourceHeaderResolver().resolve(source)
+        let prepared = try urlBuilder.prepare(source.ruleReview?.reviewUrl ?? "",
+            context: .init(page: 1, variables: variables, source: source, book: book, chapter: chapter),
+            baseURL: URL(string: source.bookSourceUrl), defaultHeaders: headers,
+            destination: destination)
+        let url = prepared.url
+        guard ["http", "https"].contains(url.scheme?.lowercased()), nonempty(url.host) != nil,
+              url.user == nil, url.password == nil else {
+            throw RuleEngineError.invalidInput(rule: "ruleReview.reviewUrl", expected: "评论地址必须是有效的 HTTP 或 HTTPS 网址")
+        }
+        return prepared
+    }
+
+    private func evaluateReviewRule(_ rule: String?, document: PageDocument, listMode: Bool = false,
+                                    context: inout RuleExecutionContext) async throws -> RuleEvaluation {
+        let result = await evaluate(rule, in: document, listMode: listMode, context: context)
+        try Task.checkCancellation()
+        if let error = result.diagnostics.first(where: { $0.severity == .error }) {
+            throw RuleEngineError.invalidInput(rule: error.rule, expected: error.message)
+        }
+        context.variables = result.variables
+        return result
+    }
+
     private func request(
         _ value: String,
         source: BookSource,
@@ -664,6 +861,10 @@ public struct NetworkBookService: Sendable {
             if prepared.webJavaScript == nil { prepared.webJavaScript = contentRules?.webJs }
             prepared.sourceRegex = nonempty(contentRules?.sourceRegex)
         }
+        return try await execute(prepared, source: source, stage: stage)
+    }
+
+    private func execute(_ prepared: PreparedRequest, source: BookSource, stage: DifferentialStage) async throws -> HTTPResponse {
         let timeout = min(max(Double(source.respondTime) / 1_000, 5), 180)
         return try await networkPolicy.execute(
             prepared,

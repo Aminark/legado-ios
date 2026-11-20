@@ -123,8 +123,12 @@ public enum BookSourceEditorSchema {
             .init(path: "ruleContent.payAction", title: "购买脚本"),
             .init(path: "ruleContent.callBackJs", title: "事件回调脚本"),
         ]),
-        .init(id: "review", title: "段评", fields: [
-            .init(path: "ruleReview.reviewUrl", title: "段评地址"),
+        .init(id: "review", title: "评论", fields: [
+            .init(path: "ruleReview.reviewUrl", title: "评论地址"),
+            .init(path: "ruleReview.reviewList", title: "评论列表"),
+            .init(path: "ruleReview.nextReviewUrl", title: "下一页评论地址"),
+            .init(path: "ruleReview.idRule", title: "评论 ID"),
+            .init(path: "ruleReview.authorRule", title: "发布者"),
             .init(path: "ruleReview.avatarRule", title: "头像"),
             .init(path: "ruleReview.contentRule", title: "内容"),
             .init(path: "ruleReview.postTimeRule", title: "发布时间"),

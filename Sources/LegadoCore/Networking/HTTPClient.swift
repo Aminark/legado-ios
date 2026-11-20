@@ -108,6 +108,33 @@ public protocol HTTPTransport: Sendable {
     func data(for request: URLRequest) async throws -> HTTPResponse
 }
 
+enum ReviewPageAddress {
+    static let redirectOriginKey = "LegadoCommentPageRedirectOrigin"
+
+    static func normalized(_ url: URL) -> URL? {
+        guard var parts = URLComponents(url: url.standardized, resolvingAgainstBaseURL: true),
+              let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = parts.host?.lowercased(), !host.isEmpty, parts.user == nil, parts.password == nil else { return nil }
+        parts.scheme = scheme
+        parts.host = host
+        if parts.port == (scheme == "https" ? 443 : 80) { parts.port = nil }
+        if parts.path.isEmpty { parts.path = "/" }
+        parts.fragment = nil
+        return parts.url
+    }
+
+    static func sameOrigin(_ target: URL, _ base: URL) -> Bool {
+        guard let target = normalized(target), let base = normalized(base) else { return false }
+        return target.scheme == base.scheme && target.host == base.host && target.port == base.port
+    }
+
+    static func permitsRedirect(for request: URLRequest?, to url: URL?) -> Bool {
+        guard let request, let raw = URLProtocol.property(forKey: redirectOriginKey, in: request) as? String else { return true }
+        guard let base = URL(string: raw), let url else { return false }
+        return sameOrigin(url, base)
+    }
+}
+
 public final class LegadoUnsafeTrustDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     public static let shared = LegadoUnsafeTrustDelegate()
     private let settingsStore: ApplicationSettingsStore
@@ -133,6 +160,10 @@ public final class LegadoUnsafeTrustDelegate: NSObject, URLSessionTaskDelegate, 
         newRequest request: URLRequest,
         completionHandler: @escaping @Sendable (URLRequest?) -> Void
     ) {
+        guard ReviewPageAddress.permitsRedirect(for: task.originalRequest, to: request.url) else {
+            completionHandler(nil)
+            return
+        }
         let settings = settingsStore.settings
         let address = try? ApplicationSettings.parseHosts(settings.hosts)[request.url?.host?.lowercased() ?? ""]
         completionHandler(interceptHostsRedirects && settings.proxy.isEmpty && address != nil ? nil : request)
@@ -263,6 +294,7 @@ public final class URLSessionHTTPTransport: ProxyHTTPTransport, StreamingHTTPTra
                let location = response.headers.first(where: { $0.key.lowercased() == "location" })?.value,
                let target = URL(string: location, relativeTo: response.finalURL)?.absoluteURL {
                 guard redirectsRemaining > 0 else { throw URLError(.httpTooManyRedirects) }
+                guard ReviewPageAddress.permitsRedirect(for: request, to: target) else { throw HTTPClientError.statusResponse(response) }
                 var next = request
                 next.url = target
                 if response.statusCode == 303 || ([301, 302].contains(response.statusCode) && next.httpMethod == "POST") {

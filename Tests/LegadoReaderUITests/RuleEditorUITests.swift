@@ -3,6 +3,35 @@ import XCTest
 @MainActor
 final class RuleEditorUITests: XCTestCase {
     func testOnlineSourceImportAndSearchPaginationReachReader() throws {
+        let app = try openSearchFixtureBook(pageAnimation: "0")
+        let reader = app.textViews["reader.text"]
+        XCTAssertTrue(reader.waitForExistence(timeout: 15))
+        XCTAssertTrue((reader.value as? String ?? "").contains("这是搜索分页回归的合成正文"))
+        attach(app, name: "Online import, second search page, and chapter reading")
+        checkChapterComments(in: app, reader: reader)
+    }
+
+    func testContinuousReaderOpensCommentsForTappedChapter() throws {
+        let app = try openSearchFixtureBook(pageAnimation: "3")
+        XCTAssertTrue(app.collectionViews["reader.continuous"].waitForExistence(timeout: 15))
+        let comments = app.buttons.matching(identifier: "reader.chapterEndComments")
+        let first = comments.matching(NSPredicate(format: "value == %@", "分页回归第一章")).firstMatch
+        let second = comments.matching(NSPredicate(format: "value == %@", "渡口")).firstMatch
+        XCTAssertTrue(second.waitForExistence(timeout: 15))
+        XCTAssertTrue(first.isHittable && second.isHittable)
+        second.tap()
+        let retry = app.buttons["reader.comments.retry"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 10))
+        retry.tap()
+        XCTAssertTrue(app.staticTexts["船家的动作正好呼应了第一章。"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["开头埋下的伏笔是那枚铜钱。"].exists)
+        app.buttons["reader.comments.close"].tap()
+        first.tap()
+        XCTAssertTrue(app.staticTexts["开头埋下的伏笔是那枚铜钱。"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["船家的动作正好呼应了第一章。"].exists)
+    }
+
+    private func openSearchFixtureBook(pageAnimation: String) throws -> XCUIApplication {
         guard let fixture = ProcessInfo.processInfo.environment["LEGADO_SEARCH_FLOW_FIXTURE_URL"] else {
             throw XCTSkip("Use LegadoSearchFlowUITests with scripts/fixtures/search-flow-server.py")
         }
@@ -11,7 +40,7 @@ final class RuleEditorUITests: XCTestCase {
         deepLink.queryItems = [URLQueryItem(name: "src", value: fixture)]
         let app = XCUIApplication()
         app.launchArguments = ["-uiDemoTab", "search", "-uiLegacyCompatibility",
-                               "-themeMode", "1", "-precisionSearch", "0", "-pageAnim", "0",
+                               "-themeMode", "1", "-precisionSearch", "0", "-pageAnim", pageAnimation,
                                "-uiAutomationImportURL", deepLink.string!]
         app.launch()
         XCTAssertTrue(app.navigationBars["书源导入预检"].waitForExistence(timeout: 20))
@@ -28,6 +57,19 @@ final class RuleEditorUITests: XCTestCase {
         }, evaluatedWith: nil)
         wait(for: [imported], timeout: 10)
         if app.alerts.firstMatch.waitForExistence(timeout: 3) { app.alerts.buttons.firstMatch.tap() }
+        // Exercise both fixture sources without depending on the device's other subscriptions.
+        app.buttons["search.options"].tap()
+        app.buttons["分组或书源"].tap()
+        let scopeBar = app.navigationBars["分组或书源"]
+        XCTAssertTrue(scopeBar.waitForExistence(timeout: 10))
+        let group = app.buttons["00 阅读回归"]
+        for _ in 0..<30 {
+            if group.exists && group.isHittable { break }
+            app.swipeUp(velocity: .slow)
+        }
+        XCTAssertTrue(group.exists && group.isHittable)
+        group.tap()
+        scopeBar.buttons["确定"].tap()
         let search = app.textFields["书名或作者"]
         XCTAssertTrue(search.waitForExistence(timeout: 10))
         search.tap()
@@ -41,10 +83,75 @@ final class RuleEditorUITests: XCTestCase {
         second.tap()
         XCTAssertTrue(app.buttons["开始阅读"].waitForExistence(timeout: 15))
         app.buttons["开始阅读"].tap()
-        let reader = app.textViews["reader.text"]
-        XCTAssertTrue(reader.waitForExistence(timeout: 15))
-        XCTAssertTrue((reader.value as? String ?? "").contains("这是搜索分页回归的合成正文"))
-        attach(app, name: "Online import, second search page, and chapter reading")
+        return app
+    }
+
+    private func checkChapterComments(in app: XCUIApplication, reader: XCUIElement) {
+        let more = app.buttons["更多"]
+        let next = app.buttons["下一章"]
+        let close = app.buttons["reader.comments.close"]
+        let endComments = app.buttons["reader.chapterEndComments"]
+        let firstRows = app.staticTexts.matching(identifier: "开头埋下的伏笔是那枚铜钱。")
+        let first = firstRows.firstMatch
+        let firstNextPage = app.staticTexts["雨夜的细节让我记住了这个开头。"]
+        let second = app.staticTexts["船家的动作正好呼应了第一章。"]
+        let retry = app.buttons["reader.comments.retry"]
+        let empty = app.descendants(matching: .any)["reader.comments.empty"]
+
+        func showMenu() {
+            if !next.isHittable {
+                reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            }
+            XCTAssertTrue(next.waitForExistence(timeout: 5))
+        }
+        func advance(to body: String) {
+            showMenu()
+            next.tap()
+            let loaded = expectation(for: NSPredicate { _, _ in
+                reader.exists && (reader.value as? String)?.contains(body) == true
+            }, evaluatedWith: nil)
+            wait(for: [loaded], timeout: 12)
+        }
+
+        showMenu()
+        more.tap()
+        app.buttons["reader.chapterComments"].tap()
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertFalse(second.exists)
+        let moreComments = app.buttons["reader.comments.more"]
+        moreComments.tap()
+        let retryPage = app.buttons["reader.comments.retryMore"]
+        XCTAssertTrue(retryPage.waitForExistence(timeout: 10))
+        XCTAssertTrue(first.exists)
+        XCTAssertFalse(firstNextPage.exists)
+        retryPage.tap()
+        XCTAssertTrue(firstNextPage.waitForExistence(timeout: 10))
+        XCTAssertEqual(firstRows.count, 1)
+        XCTAssertFalse(moreComments.exists)
+        attach(app, name: "Read both pages of the first chapter's comments")
+        close.tap()
+
+        advance(to: "船家在渡口拾到了那枚铜钱。")
+        XCTAssertTrue(endComments.waitForExistence(timeout: 5))
+        endComments.tap()
+        XCTAssertTrue(retry.waitForExistence(timeout: 10))
+        XCTAssertFalse(empty.exists)
+        XCTAssertFalse(first.exists)
+        XCTAssertFalse(firstNextPage.exists)
+        retry.tap()
+        XCTAssertTrue(second.waitForExistence(timeout: 10))
+        XCTAssertFalse(first.exists)
+        attach(app, name: "Retry and read the second chapter's own comment")
+        close.tap()
+
+        advance(to: "旧渡口的太阳沉入了水中。")
+        endComments.tap()
+        XCTAssertTrue(empty.waitForExistence(timeout: 10))
+        XCTAssertFalse(first.exists)
+        XCTAssertFalse(second.exists)
+        XCTAssertFalse(retry.exists)
+        close.tap()
+        XCTAssertTrue(reader.waitForExistence(timeout: 5))
     }
 
     func testBookshelfGroupSortingSettingsAndOrderEditorAreReachable() throws {

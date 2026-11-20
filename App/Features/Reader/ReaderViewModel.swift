@@ -13,6 +13,37 @@ struct ReaderScrollChapter: Identifiable, Equatable {
     let title: String
     let content: String
     var error: String? = nil
+    var hasComments = false
+}
+
+struct ReaderChapterCommentsTarget: Identifiable {
+    let book: Book
+    let chapter: BookChapter
+    let source: BookSource
+    let official: OfficialCommentChapter?
+
+    var id: String { "\(source.id)\u{0}\(chapter.id)\u{0}\(chapter.index)" }
+}
+
+struct ReaderChapterCommentPages {
+    private(set) var comments: [ChapterComment] = []
+    private(set) var nextPageURL: URL?
+    private var receivedFirstPage = false
+    private var seenIDs: Set<String> = []
+    private var visited: Set<URL> = []
+
+    mutating func append(_ page: ChapterCommentPage, requestedURL: URL?) {
+        if let requestedURL {
+            guard receivedFirstPage, nextPageURL == requestedURL, visited.insert(requestedURL).inserted else { return }
+        } else {
+            guard !receivedFirstPage else { return }
+            receivedFirstPage = true
+        }
+        for comment in page.comments where seenIDs.insert(comment.id).inserted {
+            comments.append(comment)
+        }
+        nextPageURL = page.nextPageURL.flatMap { visited.contains($0) ? nil : $0 }
+    }
 }
 
 enum ReaderPositionResolver {
@@ -125,7 +156,8 @@ final class ReaderViewModel: ObservableObject {
             // in flight. Installing its result now would create a chapter gap.
             guard scrollChapters.contains(where: { $0.id == edge }) else { return }
             let chapter = ReaderScrollChapter(
-                id: index, title: value.title, content: value.content, error: value.error
+                id: index, title: value.title, content: value.content, error: value.error,
+                hasComments: commentsTarget(at: index) != nil
             )
             if !scrollChapters.contains(where: { $0.id == index }) {
                 scrollChapters.append(chapter)
@@ -142,7 +174,8 @@ final class ReaderViewModel: ObservableObject {
         let value = await loadAdjacentChapter(chapters[index], rules: rules, forceRefresh: true)
         guard revision == scrollRevision, !Task.isCancelled,
               let slot = scrollChapters.firstIndex(where: { $0.id == index }) else { return }
-        scrollChapters[slot] = .init(id: index, title: value.title, content: value.content, error: value.error)
+        scrollChapters[slot] = .init(id: index, title: value.title, content: value.content, error: value.error,
+                                     hasComments: commentsTarget(at: index) != nil)
         if currentIndex == index { setContinuousChapter(scrollChapters[slot]) }
     }
 
@@ -170,7 +203,7 @@ final class ReaderViewModel: ObservableObject {
 
     private func scrollChapterForCurrentContent() -> ReaderScrollChapter {
         .init(id: currentIndex, title: title, content: content,
-              error: currentChapterError)
+              error: currentChapterError, hasComments: commentsTarget(at: currentIndex) != nil)
     }
 
     private func clearContinuousReading() {
@@ -227,6 +260,17 @@ final class ReaderViewModel: ObservableObject {
     }
 
     var currentChapter: BookChapter? { chapters.indices.contains(currentIndex) ? chapters[currentIndex] : nil }
+
+    func commentsTarget(at index: Int) -> ReaderChapterCommentsTarget? {
+        guard let source, source.id == book.origin, chapters.indices.contains(index) else { return nil }
+        let chapter = chapters[index]
+        guard !chapter.isVolume, chapter.bookUrl == book.bookUrl else { return nil }
+        let official = OfficialCommentChapter.resolve(book: book, chapter: chapter)
+        guard official != nil || source.ruleReview?.supportsChapterComments == true ||
+                source.ruleReview?.supportsChapterCommentsPage == true else { return nil }
+        return .init(book: book, chapter: chapter, source: source, official: official)
+    }
+
     var nextChapter: BookChapter? { nextReadableChapter(after: currentIndex) }
     var canGoPrevious: Bool { navigationIndex(direction: -1) != nil }
     var canGoNext: Bool { navigationIndex(direction: 1) != nil }

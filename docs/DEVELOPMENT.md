@@ -22,6 +22,27 @@
 | `App/Resources/` | 默认 TXT 目录规则、HTTP TTS 配置和第三方许可证 |
 | `scripts/` | 自检与源码导出 |
 
+## 本章评论
+
+在书源编辑器的「评论」里填写当前章的评论地址和解析规则。下例适用于评论接口返回 `{"comments":[{"id":"c1","author":"读者","body":"留言"}],"next":"/comments?p=2"}` 的书源。
+
+```json
+{
+  "ruleReview": {
+    "reviewUrl": "{{chapter.url}}/comments",
+    "reviewList": "$.comments",
+    "idRule": "$.id",
+    "authorRule": "$.author",
+    "contentRule": "$.body",
+    "nextReviewUrl": "$.next"
+  }
+}
+```
+
+`reviewList` 在整个响应上执行，`contentRule`、`idRule`、`authorRule`、`avatarRule` 和 `postTimeRule` 在每一条评论内执行。接口返回空数组时，阅读器显示「本章暂无评论」。末页可省略 `next` 或返回 `null`。只有用户点「加载更多」时才请求下一页，翻页链接须与评论接口同源。
+
+地址模板可使用 `{{chapter.url}}` 和书源已保存的书籍、章节变量。识别到起点或番茄的官方章节链接时，可用 `{{reviewChapterId}}` 取得原始字符串章号。起点章节路径含书号，番茄可从官方书籍详情地址取得书号，均可用 `{{reviewBookId}}` 引用。单独提供 `reviewUrl` 时，阅读器可在应用内打开普通 HTTP(S) 评论网页，网页可使用浏览器自身的登录会话。
+
 ## 验证命令
 
 ```sh
