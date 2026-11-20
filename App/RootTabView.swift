@@ -1391,7 +1391,7 @@ private struct SettingsView: View {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
                     profileHeader(topInset: geometry.safeAreaInsets.top)
-                    VStack(alignment: .leading, spacing: 24) {
+                    LazyVStack(alignment: .leading, spacing: 24) {
                         appCard
                         readingSection
                         rulesSection
@@ -1492,7 +1492,6 @@ private struct SettingsView: View {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .strokeBorder(ProfileTheme.surface.opacity(0.9), lineWidth: 0.75)
             }
-            .shadow(color: .black.opacity(0.035), radius: 18, x: 0, y: 8)
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
@@ -1568,7 +1567,6 @@ private struct SettingsView: View {
                 .accessibilityAddTraits(.isHeader)
             VStack(spacing: 0, content: content)
                 .background(ProfileTheme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .shadow(color: .black.opacity(0.025), radius: 20, x: 0, y: 8)
         }
     }
 
@@ -1576,9 +1574,11 @@ private struct SettingsView: View {
         _ title: String,
         icon: String,
         showsSeparator: Bool = true,
-        @ViewBuilder destination: () -> Destination
+        @ViewBuilder destination: @escaping () -> Destination
     ) -> some View {
-        NavigationLink(destination: destination) {
+        NavigationLink {
+            ProfileDestination(content: destination)
+        } label: {
             settingRow(title, icon: icon, showsSeparator: showsSeparator)
         }
         .buttonStyle(.plain)
@@ -1637,6 +1637,13 @@ private struct SettingsView: View {
         }
         .accessibilityElement(children: .combine)
     }
+}
+
+// NavigationView on iOS 15 constructs link destinations while laying out the rows.
+// Defer their models and settings reads until the destination is displayed.
+private struct ProfileDestination<Content: View>: View {
+    let content: () -> Content
+    var body: some View { content() }
 }
 
 private enum ProfileTheme {
@@ -2122,6 +2129,7 @@ private struct SearchScopeSheet: View {
 }
 
 private struct ReadingPreferencesView: View {
+    @AppStorage(EPUBReadingMode.preferenceKey) private var defaultEPUBMode = EPUBReadingMode.original
     @AppStorage("textSize") private var fontSize = 20.0
     @AppStorage("letterSpacing") private var letterSpacing = 0.1
     @AppStorage("lineSpacingExtra") private var lineSpacing = 12.0
@@ -2144,6 +2152,13 @@ private struct ReadingPreferencesView: View {
 
     var body: some View {
         Form {
+            Section("EPUB") {
+                Picker("默认 EPUB 阅读模式", selection: $defaultEPUBMode) {
+                    ForEach(EPUBReadingMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+            }
             Section("排版") {
                 ReadingLabeledContent("字号", value: String(format: "%.0f", fontSize))
                 Slider(value: $fontSize, in: 5...50, step: 1)

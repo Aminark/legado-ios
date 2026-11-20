@@ -19,16 +19,23 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         await model.open(preferences: .init(publisherStyles: true))
         XCTAssertNil(model.errorMessage)
         let navigator = try XCTUnwrap(model.navigator)
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
         window.rootViewController = navigator
         window.makeKeyAndVisible()
         defer { window.isHidden = true }
         window.layoutIfNeeded()
-        try await waitForJavaScript("!!document.querySelector('svg image')", in: navigator)
-        XCTAssertEqual(model.tableOfContents.map { $0.link.title }, ["封面", "图文正文"])
+        try await waitForJavaScript("innerWidth > 0 && !!document.querySelector('svg image')", in: navigator)
+        try await waitForLocation("cover.xhtml", in: model)
+        XCTAssertEqual(model.tableOfContents.map { $0.link.title }, ["封面", "图文正文", "脚注"])
+        XCTAssertEqual(model.visibleTableOfContents(collapsing: [1]).map { $0.link.title }, ["封面", "图文正文"])
         await model.go(to: ReadiumShared.Link(href: "Text/chapter.xhtml#body", mediaType: .xhtml))
         try await waitForJavaScript("document.querySelector('#illustration')?.complete && document.querySelector('#illustration').naturalWidth > 0 && getComputedStyle(document.querySelector('table')).borderTopStyle === 'solid' && document.querySelectorAll('td').length === 2", in: navigator)
         try await waitForLocation("Text/chapter.xhtml", in: model)
+        let note = try XCTUnwrap(model.tableOfContents.last?.link)
+        await model.go(to: note)
+        XCTAssertEqual(model.currentChapter?.startFragmentId, "note")
         let locator = try XCTUnwrap(model.location)
         XCTAssertEqual(EPUBReaderModel.path(locator.href.string), "Text/chapter.xhtml")
         var saved = report.book
@@ -42,6 +49,48 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         try await waitForJavaScript("!!document.querySelector('#body') && !!document.querySelector('table')", in: reopened)
         try await waitForLocation("Text/chapter.xhtml", in: restored)
         XCTAssertEqual(EPUBReaderModel.path(try XCTUnwrap(restored.location).href.string), "Text/chapter.xhtml")
+        XCTAssertEqual(restored.currentChapter?.startFragmentId, "note")
+    }
+
+    func testPagingBackFromNestedTOCAnchorUpdatesTextChapter() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".epub")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try makeEPUB(at: url, paragraphsBeforeNote: 80)
+        let report = try LocalBookService().openFile(at: url)
+        let model = EPUBReaderModel(book: report.book, chapters: report.chapters, initialIndex: 0)
+        await model.open(preferences: .init())
+        let navigator = try XCTUnwrap(model.navigator)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.rootViewController = navigator
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        window.layoutIfNeeded()
+        try await waitForJavaScript("innerWidth > 0 && !!document.querySelector('svg image')", in: navigator)
+        try await waitForLocation("cover.xhtml", in: model)
+        await model.go(to: try XCTUnwrap(model.tableOfContents.last?.link))
+        try await waitForLocation("Text/chapter.xhtml", in: model)
+        try await waitForJavaScript("""
+            (() => {
+                const rect = document.getElementById('note')?.getBoundingClientRect();
+                return innerWidth > 0 && document.documentElement.scrollWidth > innerWidth
+                    && !!rect && rect.left < innerWidth && rect.right > 0;
+            })()
+            """, in: navigator)
+        XCTAssertEqual(model.currentChapter?.startFragmentId, "note")
+        for _ in 0..<50 {
+            if (model.location?.locations.progression ?? 0) > 0 { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertGreaterThan(model.location?.locations.progression ?? 0, 0)
+        let moved = await navigator.goBackward(options: .init(animated: false))
+        XCTAssertTrue(moved)
+        for _ in 0..<50 {
+            if model.currentChapter?.startFragmentId == "body" { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertEqual(model.currentChapter?.startFragmentId, "body")
     }
 
     private func waitForLocation(_ path: String, in model: EPUBReaderModel) async throws {
@@ -61,7 +110,8 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         XCTFail("EPUB content did not render: \(expression)")
     }
 
-    private func makeEPUB(at url: URL) throws {
+    private func makeEPUB(at url: URL, paragraphsBeforeNote: Int = 0) throws {
+        let paragraphs = String(repeating: "<p>图文正文。上一节还有内容。</p>", count: paragraphsBeforeNote)
         let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAEAAAABgCAIAAAAip+O/AAABxklEQVR4nNXCA3YjAABF0becsW12bNdIGptt7Nq2bXeMjc06/j2XI8UG6RwtMUrnWGmtdI6XmaRzotwsnZMVFumcqrRK53SVTTpnqu3SOVvjkM45g1M6540u6VyodUvnoskjnUtmr3QuW3zSuWL1S+eqLSCda/agdK47QtK54QxL56arTjq33PXSue2JSOeONyqdu76YdO7549K5H0hI50EwKZ2HoZR0isJp6Tyqy0jncX1WOk8iOek8jeal8yxWkM7zeIN0XiQapfMy2SSdV6lm6bxOt0jnTaZVOm+zbdJ5l2uXzvt8h3Q+FDql87GhSzqfGrul87mpRzpfmnulU9zSJ52S1n7plLYNSKesfVA65R1D0qnoHJZOZdeIdKq6R6VT3TMmnZrecekY+iakY+yflE7twJR0TIPT0jEPzUjHMjwrHevInHRso/PSsY8tSMcxvigd58SSdFyTy9JxT61IxzO9Kh3vzJp0fLPr0vHPbUgnML8pneDClnRCi9vSCS/tSKdueVc69St70oms7ksnunYgndj6oXTiG1+lk9j8Jp3k1nfppLZ/SCe981M6md1f0snu/ZZObv+PdPIHf6VTOPwn/T/zbe3/96qaXAAAAABJRU5ErkJggg==")!
         let files: [(String, Data)] = [
             ("mimetype", Data("application/epub+zip".utf8)),
@@ -77,8 +127,8 @@ final class EPUBReaderIntegrationTests: XCTestCase {
             <spine><itemref idref="cover"/><itemref idref="body"/></spine></package>
             """.utf8)),
             ("cover.xhtml", Data(##"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>封面</title></head><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 140"><image xlink:href="Images/cover.png" width="100" height="140"/></svg></body></html>"##.utf8)),
-            ("Text/chapter.xhtml", Data(##"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>图文正文</title><link rel="stylesheet" href="../Styles/book.css"/></head><body><h1 id="body">图文正文</h1><p>图片与表格保留在原位置。</p><img id="illustration" src="../Images/cover.png" alt="内嵌插图"/><table><tr><td>项目</td><td>数值</td></tr></table><p><a href="#note">脚注</a></p><aside id="note">脚注内容</aside></body></html>"##.utf8)),
-            ("nav.xhtml", Data(##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head><body><nav epub:type="toc"><ol><li><a href="cover.xhtml">封面</a></li><li><a href="Text/chapter.xhtml#body">图文正文</a></li></ol></nav></body></html>"##.utf8)),
+            ("Text/chapter.xhtml", Data(##"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>图文正文</title><link rel="stylesheet" href="../Styles/book.css"/></head><body><h1 id="body">图文正文</h1><p>图片与表格保留在原位置。</p><img id="illustration" src="../Images/cover.png" alt="内嵌插图"/><table><tr><td>项目</td><td>数值</td></tr></table>\##(paragraphs)<p><a href="#note">脚注</a></p><aside id="note">脚注内容</aside></body></html>"##.utf8)),
+            ("nav.xhtml", Data(##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head><body><nav epub:type="toc"><ol><li><a href="cover.xhtml">封面</a></li><li><a href="Text/chapter.xhtml#body">图文正文</a><ol><li><a href="Text/chapter.xhtml#note">脚注</a></li></ol></li></ol></nav></body></html>"##.utf8)),
             ("Styles/book.css", Data("table { border: 3px solid #123456; } img { max-width: 80%; }".utf8)),
             ("Images/cover.png", png)
         ]

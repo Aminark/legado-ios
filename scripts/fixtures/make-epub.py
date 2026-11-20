@@ -15,7 +15,7 @@ with zipfile.ZipFile(output, "w") as archive:
           <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">legado-ui-epub</dc:identifier><dc:title>EPUB 导入测试</dc:title><dc:creator>测试作者</dc:creator><dc:language>zh</dc:language><meta property="dcterms:modified">2026-10-23T00:00:00Z</meta></metadata>
           <manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="body" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="image" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
           <spine><itemref idref="body"/></spine></package>''',
-        "OPS/nav.xhtml": '''<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head><body><nav epub:type="toc"><ol><li><a href="chapter.xhtml#one">第一章 EPUB</a></li><li><a href="chapter.xhtml#two">第二章 EPUB</a></li></ol></nav></body></html>''',
+        "OPS/nav.xhtml": '''<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head><body><nav epub:type="toc"><ol><li><span>上卷</span><ol><li><span>正文篇</span><ol><li><a href="chapter.xhtml#one">第一章 EPUB</a></li><li><a href="chapter.xhtml#two">第二章 EPUB</a></li></ol></li></ol></li></ol></nav></body></html>''',
         "OPS/chapter.xhtml": '''<html xmlns="http://www.w3.org/1999/xhtml"><head><title>EPUB 正文</title></head><body><section><h1 id="one">第一章 EPUB</h1><p>这是 EPUB 导入后的第一章正文。</p><img src="cover.png" alt="测试插图"/></section><section><h1 id="two">第二章 EPUB</h1><p>这是 EPUB 的第二章正文，目录锚点跳转成功。</p></section></body></html>''',
     }
     for name, contents in files.items():

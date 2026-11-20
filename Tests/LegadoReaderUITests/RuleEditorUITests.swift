@@ -146,8 +146,14 @@ final class RuleEditorUITests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-uiDemo", "-themeMode", "1", "-bookshelfLayout", "grid3", "-pageAnim", "0"]
-        if fromFileManagement { app.launchArguments += ["-uiDemoTab", "settings", "-uiDemoFiles"] }
+        if fromFileManagement {
+            app.launchArguments += ["-uiDemoTab", "settings", "-uiDemoFiles", "-defaultEPUBReadingMode", "original"]
+        }
         app.launch()
+        if !fromFileManagement {
+            setEPUBMode("EPUB 原书排版", in: app)
+            app.tabBars.buttons["书架"].tap()
+        }
         let importTitle = fromFileManagement ? "导入 TXT / EPUB" : "本地书"
         let more = fromFileManagement
             ? app.navigationBars["文件管理"].buttons["更多"].firstMatch
@@ -166,25 +172,7 @@ final class RuleEditorUITests: XCTestCase {
 
         let pickerFiles = app.collectionViews["File View"].cells
         let txt = pickerFiles.matching(NSPredicate(format: "label BEGINSWITH %@", "TXT-Book")).firstMatch
-        let fixtureJSON = pickerFiles.matching(NSPredicate(format: "label BEGINSWITH %@", "JSON-Source")).firstMatch
-        let fixtures = pickerFiles.matching(NSPredicate(format: "label BEGINSWITH %@", "书源导入测试")).firstMatch
-        // The file-management page underneath the picker can also contain TXT.
-        // JSON exists only inside our fixture folder in the actual picker.
-        if !fixtureJSON.waitForExistence(timeout: 3) {
-            if !fixtures.exists {
-                let browse = app.buttons.matching(NSPredicate(format: "label IN %@", ["Browse", "浏览", "Locations", "位置"])).firstMatch
-                if browse.exists { browse.tap() }
-                if !fixtures.waitForExistence(timeout: 2) {
-                    let local = app.descendants(matching: .any).matching(NSPredicate(
-                        format: "label CONTAINS %@ OR label CONTAINS %@ OR label == %@", "我的 iPhone", "我的iPhone", "On My iPhone"
-                    )).firstMatch
-                    XCTAssertTrue(local.waitForExistence(timeout: 5))
-                    local.tap()
-                }
-            }
-            XCTAssertTrue(fixtures.waitForExistence(timeout: 10), "Run sh scripts/prepare-source-import-fixture.sh <simulator-UUID>")
-            fixtures.tap()
-        }
+        openImportFixtureFolder(in: app)
         XCTAssertTrue(txt.waitForExistence(timeout: 10))
         let open = app.buttons.matching(NSPredicate(format: "label IN %@", ["Open", "打开", "Import", "导入"])).firstMatch
         for name in ["JSON-Source", "JSON-Uppercase"] {
@@ -250,10 +238,53 @@ final class RuleEditorUITests: XCTestCase {
         XCTAssertTrue(reader.images["测试插图"].waitForExistence(timeout: 10))
         attach(app, name: "EPUB original layout with inline illustration")
         app.buttons["目录"].tap()
+        app.buttons["折叠正文篇"].tap()
+        XCTAssertFalse(app.buttons["第二章 EPUB"].exists)
+        app.buttons["折叠上卷"].tap()
+        app.buttons["完成"].tap()
+        app.buttons["目录"].tap()
+        XCTAssertFalse(app.buttons["展开正文篇"].exists)
+        app.buttons["展开上卷"].tap()
+        XCTAssertFalse(app.buttons["第二章 EPUB"].exists)
+        app.buttons["展开正文篇"].tap()
         app.buttons["第二章 EPUB"].firstMatch.tap()
         let secondChapter = reader.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "目录锚点跳转成功")).firstMatch
         XCTAssertTrue(secondChapter.waitForExistence(timeout: 10))
         attach(app, name: "EPUB original layout after TOC navigation")
+        if !fromFileManagement {
+            app.buttons["返回书架"].tap()
+            setEPUBMode("文字阅读与朗读", in: app)
+            app.tabBars.buttons["书架"].tap()
+            epubBook.tap()
+            let text = app.textViews["reader.text"]
+            XCTAssertTrue(text.waitForExistence(timeout: 15))
+            XCTAssertTrue((text.value as? String)?.contains("目录锚点跳转成功") == true)
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            app.buttons["更多"].tap()
+            app.buttons["EPUB 原书排版"].tap()
+            XCTAssertTrue(reader.waitForExistence(timeout: 15))
+            app.buttons["EPUB 更多"].tap()
+            app.buttons["文字阅读与朗读"].tap()
+            XCTAssertTrue(text.waitForExistence(timeout: 15))
+            XCTAssertTrue((text.value as? String)?.contains("目录锚点跳转成功") == true)
+            app.terminate()
+            app.launch()
+            // A manual switch affects only the open book. Verify the saved preference after relaunch.
+            setEPUBMode("EPUB 原书排版", in: app, expectedCurrent: "文字阅读与朗读")
+        }
+    }
+
+    private func setEPUBMode(_ title: String, in app: XCUIApplication, expectedCurrent: String? = nil) {
+        app.tabBars.buttons["我的"].tap()
+        app.buttons["profile.textformat.size"].tap()
+        let picker = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "默认 EPUB 阅读模式")).firstMatch
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        if let expectedCurrent {
+            XCTAssertTrue(picker.label.contains(expectedCurrent) || picker.value as? String == expectedCurrent)
+        }
+        picker.tap()
+        app.buttons[title].firstMatch.tap()
+        app.navigationBars["阅读设置"].buttons.element(boundBy: 0).tap()
     }
 
     func testJSONFilePickerOffersOpenAndImportsSelectedFiles() throws {
@@ -442,5 +473,27 @@ final class RuleEditorUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+}
+
+@MainActor
+func openImportFixtureFolder(in app: XCUIApplication) {
+    let pickerFiles = app.collectionViews["File View"].cells
+    let fixtureJSON = pickerFiles.matching(NSPredicate(format: "label BEGINSWITH %@", "JSON-Source")).firstMatch
+    let fixtures = pickerFiles.matching(NSPredicate(format: "label BEGINSWITH %@", "书源导入测试")).firstMatch
+    if !fixtureJSON.waitForExistence(timeout: 3) {
+        if !fixtures.exists {
+            let browse = app.buttons.matching(NSPredicate(format: "label IN %@", ["Browse", "浏览", "Locations", "位置"])).firstMatch
+            if browse.exists { browse.tap() }
+            if !fixtures.waitForExistence(timeout: 2) {
+                let local = app.descendants(matching: .any).matching(NSPredicate(
+                    format: "label CONTAINS %@ OR label CONTAINS %@ OR label == %@", "我的 iPhone", "我的iPhone", "On My iPhone"
+                )).firstMatch
+                XCTAssertTrue(local.waitForExistence(timeout: 5))
+                local.tap()
+            }
+        }
+        XCTAssertTrue(fixtures.waitForExistence(timeout: 10), "Run sh scripts/prepare-source-import-fixture.sh <simulator-UUID>")
+        fixtures.tap()
     }
 }

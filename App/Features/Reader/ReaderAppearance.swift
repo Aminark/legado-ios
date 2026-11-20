@@ -114,21 +114,22 @@ enum ReaderFontStore {
         if target != source {
             try data.write(to: target, options: .atomic)
         }
-        return target.path
+        return target.lastPathComponent
     }
 
     static func font(at path: String, size: CGFloat, weight: Int) -> UIFont? {
-        guard !path.isEmpty,
-              let provider = CGDataProvider(url: URL(fileURLWithPath: path) as CFURL) else { return nil }
+        guard !path.isEmpty else { return nil }
+        // Older versions saved the absolute sandbox path. Resolve managed fonts
+        // against the current container, including after an app update or restore.
+        let url = directory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
+        guard let provider = CGDataProvider(url: url as CFURL) else { return nil }
         return font(provider: provider, size: size, weight: weight)
     }
 
     private static func font(provider: CGDataProvider, size: CGFloat, weight: Int) -> UIFont? {
         guard let graphicsFont = CGFont(provider) else { return nil }
-        CTFontManagerRegisterGraphicsFont(graphicsFont, nil)
-        guard let postScriptName = graphicsFont.postScriptName else { return nil }
-        let name = postScriptName as String
-        guard let base = UIFont(name: name, size: size) else { return nil }
+        // Use the selected face even when its PostScript name matches an installed font.
+        let base = CTFontCreateWithGraphicsFont(graphicsFont, size, nil, nil) as UIFont
         if weight == 1,
            let descriptor = base.fontDescriptor.withSymbolicTraits(.traitBold) {
             return UIFont(descriptor: descriptor, size: size)

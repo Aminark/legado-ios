@@ -3,6 +3,26 @@ import XCTest
 
 @MainActor
 final class DarkModeUITests: XCTestCase {
+    func testLegacyProfileScrollsBetweenHeaderAndSupport() {
+        continueAfterFailure = false
+        let app = launch(["-uiDemoTab", "settings", "-themeMode", "2", "-uiLegacyCompatibility"])
+        let scroll = app.scrollViews["profile.scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 10))
+        var metrics: [XCTMetric] = [XCTOSSignpostMetric.scrollingAndDecelerationMetric, XCTCPUMetric(application: app)]
+        if #available(iOS 26.0, *) { metrics.append(XCTHitchMetric(application: app)) }
+        measure(metrics: metrics) {
+            scroll.swipeUp(velocity: .fast)
+            XCTAssertTrue(app.buttons["profile.info.circle"].isHittable)
+            scroll.swipeDown(velocity: .fast)
+            XCTAssertTrue(app.buttons["profile.about"].isHittable)
+        }
+        scroll.swipeUp(velocity: .fast)
+        app.buttons["profile.gearshape"].tap()
+        XCTAssertTrue(app.navigationBars["其他设置"].waitForExistence(timeout: 5))
+        app.navigationBars.firstMatch.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(scroll.waitForExistence(timeout: 5))
+    }
+
     func testPrimaryActionsKeepDarkFillInBothAppearances() throws {
         continueAfterFailure = false
         for theme in ["2", "1"] {
