@@ -8,7 +8,7 @@ public struct ApplicationSettings: Codable, Equatable, Sendable {
     public var timeoutSeconds = 0
     public var concurrentSources = 32
     public var chapterCacheMB = 256
-    public var prefetchChapters = 1
+    public var prefetchChapters = 5
     public var recordLog = false
     public var ignoreCertificateErrors = true
 
@@ -99,16 +99,21 @@ public enum SettingsError: Error, LocalizedError {
 
 public final class ApplicationSettingsStore: @unchecked Sendable {
     public static let shared = ApplicationSettingsStore()
-    public static let key = "legado.applicationSettings.v1"
+    public static let key = "legado.applicationSettings.v2"
+    private static let legacyKey = "legado.applicationSettings.v1"
     private let defaults: UserDefaults
 
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
     public var settings: ApplicationSettings {
-        guard let data = defaults.data(forKey: Self.key),
+        let current = defaults.data(forKey: Self.key)
+        guard let data = current ?? defaults.data(forKey: Self.legacyKey),
               let value = try? JSONDecoder().decode(ApplicationSettings.self, from: data),
-              let validated = try? value.validated() else { return .init() }
-        return validated
+              var settings = try? value.validated() else { return .init() }
+        if current == nil, settings.prefetchChapters == 1 {
+            settings.prefetchChapters = ApplicationSettings().prefetchChapters
+        }
+        return settings
     }
 
     public func save(_ settings: ApplicationSettings) throws {

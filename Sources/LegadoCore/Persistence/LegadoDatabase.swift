@@ -25,6 +25,7 @@ public actor LegadoDatabase {
     nonisolated(unsafe) private let handle: OpaquePointer
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private var lastDirectory: (bookURL: String, version: Int32, chapters: [BookChapter])?
 
     public init(url: URL) throws {
         try FileManager.default.createDirectory(
@@ -114,7 +115,19 @@ public actor LegadoDatabase {
         try transaction { try writeBooks(values) }
     }
 
+    func updateProgress(_ book: Book, in shelf: [Book]) throws {
+        let statement = try prepare("UPDATE books SET payload = ? WHERE book_url = ?")
+        defer { sqlite3_finalize(statement) }
+        try bind(try encoder.encode(book), to: statement, at: 1)
+        try bind(book.bookUrl, to: statement, at: 2)
+        try stepDone(statement)
+        if sqlite3_changes(handle) == 0 { try replaceBooks(shelf) }
+    }
+
     private func writeBooks(_ values: [Book]) throws {
+        if let cachedURL = lastDirectory?.bookURL, !values.contains(where: { $0.bookUrl == cachedURL }) {
+            lastDirectory = nil // Removing a shelf row also deletes its chapters via the foreign key.
+        }
         if values.isEmpty {
             try Self.execute(handle, "DELETE FROM books")
         } else {
@@ -148,10 +161,17 @@ public actor LegadoDatabase {
     }
 
     public func loadChapters(bookURL: String) throws -> [BookChapter] {
+        // Other repositories may write through another SQLite connection.
+        let version = try Self.scalarInt32(handle, "PRAGMA data_version")
+        if let lastDirectory, lastDirectory.bookURL == bookURL, lastDirectory.version == version {
+            return lastDirectory.chapters
+        }
         let statement = try prepare("SELECT payload FROM chapters WHERE book_url = ? ORDER BY chapter_index")
         defer { sqlite3_finalize(statement) }
         try bind(bookURL, to: statement, at: 1)
-        return try decodeRows(statement, as: BookChapter.self)
+        let chapters = try decodeRows(statement, as: BookChapter.self)
+        lastDirectory = (bookURL, version, chapters)
+        return chapters
     }
 
     public func replaceChapters(_ chapters: [BookChapter], bookURL: String) throws {
@@ -159,6 +179,7 @@ public actor LegadoDatabase {
     }
 
     private func writeChapters(_ chapters: [BookChapter], bookURL: String) throws {
+        if lastDirectory?.bookURL == bookURL { lastDirectory = nil }
         let delete = try prepare("DELETE FROM chapters WHERE book_url = ?")
         defer { sqlite3_finalize(delete) }
         try bind(bookURL, to: delete, at: 1)
@@ -183,6 +204,7 @@ public actor LegadoDatabase {
     }
 
     public func removeChapters(bookURL: String) throws {
+        if lastDirectory?.bookURL == bookURL { lastDirectory = nil }
         let statement = try prepare("DELETE FROM chapters WHERE book_url = ?")
         defer { sqlite3_finalize(statement) }
         try bind(bookURL, to: statement, at: 1)
@@ -809,13 +831,11 @@ public actor LegadoDatabase {
         bookmarksURL: URL? = nil,
         readRecordsURL: URL? = nil
     ) throws {
-        if try count("book_sources") == 0,
-           let bookSourcesURL,
+        if let bookSourcesURL, try count("book_sources") == 0,
            FileManager.default.fileExists(atPath: bookSourcesURL.path) {
             try replaceBookSources(decoder.decode([BookSource].self, from: Data(contentsOf: bookSourcesURL)))
         }
-        if try count("books") == 0,
-           let booksURL,
+        if let booksURL, try count("books") == 0,
            FileManager.default.fileExists(atPath: booksURL.path) {
             try replaceBooks(decoder.decode([Book].self, from: Data(contentsOf: booksURL)))
         }
@@ -832,18 +852,15 @@ public actor LegadoDatabase {
             }
             try Self.execute(handle, "INSERT OR IGNORE INTO legacy_imports(key) VALUES('chapters')")
         }
-        if try count("bookmarks") == 0,
-           let bookmarksURL,
+        if let bookmarksURL, try count("bookmarks") == 0,
            FileManager.default.fileExists(atPath: bookmarksURL.path) {
             try replaceBookmarks(decoder.decode([Bookmark].self, from: Data(contentsOf: bookmarksURL)))
         }
-        if try count("book_groups") == 0,
-           let bookGroupsURL,
+        if let bookGroupsURL, try count("book_groups") == 0,
            FileManager.default.fileExists(atPath: bookGroupsURL.path) {
             try replaceBookGroups(decoder.decode([BookGroup].self, from: Data(contentsOf: bookGroupsURL)))
         }
-        if try count("read_records") == 0,
-           let readRecordsURL,
+        if let readRecordsURL, try count("read_records") == 0,
            FileManager.default.fileExists(atPath: readRecordsURL.path) {
             try replaceReadRecords(decoder.decode([ReadRecord].self, from: Data(contentsOf: readRecordsURL)))
         }
@@ -1272,6 +1289,9 @@ public actor SQLiteBookRepository: SourceSwitchBookRepository {
         return try await database.loadBooks()
     }
     public func save(_ books: [Book]) async throws { try await database.replaceBooks(books) }
+    public func saveProgress(_ book: Book, in shelf: [Book]) async throws {
+        try await database.updateProgress(book, in: shelf)
+    }
     public func saveSourceSwitch(_ books: [Book], chapters: [BookChapter], bookURL: String) async throws {
         try await database.replaceBooksAndChapters(books, chapters: chapters, bookURL: bookURL)
     }

@@ -3,6 +3,13 @@ import Foundation
 public protocol BookRepository: Sendable {
     func load() async throws -> [Book]
     func save(_ books: [Book]) async throws
+    func saveProgress(_ book: Book, in shelf: [Book]) async throws
+}
+
+public extension BookRepository {
+    func saveProgress(_ book: Book, in shelf: [Book]) async throws {
+        try await save(shelf)
+    }
 }
 
 /// Stores the shelf and its replacement directory in one transaction. The

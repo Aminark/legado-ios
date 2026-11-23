@@ -3,6 +3,23 @@ import Testing
 @testable import LegadoCore
 
 struct LegadoDatabaseTests {
+    @Test func openedDirectoryReflectsLocalAndExternalCommits() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("reader.sqlite")
+        let first = try LegadoDatabase(url: url)
+        let second = try LegadoDatabase(url: url)
+        let one = BookChapter(url: "one", title: "一", bookUrl: "book", index: 0)
+        let two = BookChapter(url: "two", title: "二", bookUrl: "book", index: 1)
+        try await first.replaceBooks([Book(bookUrl: "book", name: "书")])
+        try await first.replaceChapters([one], bookURL: "book")
+        #expect(try await first.loadChapters(bookURL: "book") == [one])
+        try await second.replaceChapters([one, two], bookURL: "book")
+        #expect(try await first.loadChapters(bookURL: "book") == [one, two])
+        try await first.removeChapters(bookURL: "book")
+        #expect(try await first.loadChapters(bookURL: "book").isEmpty)
+    }
+
     @Test(arguments: [false, true]) func sourceSwitchTransactionRollsBackBothTablesWhenDirectoryFails(sameURL: Bool) async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

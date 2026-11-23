@@ -3,6 +3,58 @@ import Testing
 @testable import LegadoCore
 
 struct ChapterContentCacheTests {
+    @Test func directoryAvailabilityTracksDiskAndDoesNotCountAsReading() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ChapterContentCache(directory: directory)
+        let changes = await cache.availability(bookURL: "book", chapterURL: "chapter", sourceID: "source")
+        var values = changes.makeAsyncIterator()
+        #expect(await values.next() == false)
+        var entry = CachedChapterContent(bookURL: "book", chapterURL: "chapter", content: "正文", sourceID: "other")
+        try await cache.save(entry)
+        #expect(await values.next() == false)
+        entry.sourceID = nil
+        try await cache.save(entry)
+        #expect(await values.next() == true)
+        let file = try #require(FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).first)
+        let date = Date(timeIntervalSince1970: 100)
+        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: file.path)
+        let reopened = ChapterContentCache(directory: directory)
+        let restored = await reopened.availability(bookURL: "book", chapterURL: "chapter", sourceID: "source")
+        var afterRestart = restored.makeAsyncIterator()
+        #expect(await afterRestart.next() == true)
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        #expect(attributes[.modificationDate] as? Date == date)
+        try await cache.remove(bookURL: "book", chapterURL: "chapter")
+        #expect(await values.next() == false)
+        entry.sourceID = "source"
+        try await cache.save(entry)
+        #expect(await values.next() == true)
+        try await cache.removeAll()
+        #expect(await values.next() == false)
+    }
+
+    @Test(arguments: [false, true]) func durableCacheMigratesExistingDownloadsAndSurvivesReopening(partial: Bool) async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let old = base.appendingPathComponent("Caches/Chapters")
+        let support = base.appendingPathComponent("Application Support/ChapterContent")
+        let legacy = ChapterContentCache(directory: old)
+        try await legacy.save(.init(bookURL: "book", chapterURL: "one", content: "旧版已下载"))
+        try await legacy.save(.init(bookURL: "book", chapterURL: "two", content: "第二章", savedAt: 1))
+        if partial {
+            try await ChapterContentCache(directory: support).save(.init(bookURL: "book", chapterURL: "two", content: "已编辑", savedAt: 2))
+        }
+        let migrated = ChapterContentCache(liveDirectory: support, legacyDirectory: old)
+        #expect(try await migrated.statistics().entries == 2)
+        #expect(!FileManager.default.fileExists(atPath: old.path))
+        let reopened = ChapterContentCache(liveDirectory: support, legacyDirectory: old)
+        #expect(try await reopened.load(bookURL: "book", chapterURL: "one")?.content == "旧版已下载")
+        #expect(try await reopened.load(bookURL: "book", chapterURL: "two")?.content == (partial ? "已编辑" : "第二章"))
+        try await reopened.removeAll()
+        #expect(try await ChapterContentCache(liveDirectory: support, legacyDirectory: old).statistics().entries == 0)
+    }
+
     @Test func rekeyCopiesOnlySafeMatchesAndPreservesOriginalEntries() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

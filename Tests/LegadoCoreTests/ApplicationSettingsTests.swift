@@ -22,6 +22,22 @@ struct ApplicationSettingsTests {
         #expect(store.settings.userAgent == "Test Browser")
     }
 
+    @Test(arguments: [0, 1, 7]) func prefetchUpgradeKeepsOtherNetworkSettings(oldCount: Int) throws {
+        let suite = UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var old = ApplicationSettings()
+        old.prefetchChapters = oldCount
+        old.timeoutSeconds = 45
+        defaults.set(try JSONEncoder().encode(old), forKey: "legado.applicationSettings.v1")
+        let store = ApplicationSettingsStore(defaults: defaults)
+        #expect(store.settings.prefetchChapters == (oldCount == 1 ? 5 : oldCount))
+        #expect(store.settings.timeoutSeconds == 45)
+        old.prefetchChapters = 1
+        try store.save(old)
+        #expect(store.settings.prefetchChapters == 1)
+    }
+
     @Test func parsesIPv4IPv6CommentsAndMultipleDomains() throws {
         let hosts = try ApplicationSettings.parseHosts("""
         # local mirror
