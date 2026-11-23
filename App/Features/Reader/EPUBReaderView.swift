@@ -40,6 +40,7 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
 
     @Published private(set) var navigator: EPUBNavigatorViewController?
     @Published private(set) var location: Locator?
+    private var isJumping = false
     @Published private(set) var currentChapter: BookChapter?
     private var visibleChapterTask: Task<Void, Never>?
     @Published private(set) var tableOfContents: [TOCEntry] = []
@@ -121,6 +122,13 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
             errorMessage = "无法跳转到这段内容"
             return
         }
+        await jump(to: target)
+    }
+
+    private func jump(to target: Locator) async {
+        guard let navigator, !isJumping else { return }
+        isJumping = true
+        defer { isJumping = false }
         let changesResource = location?.href != target.href
         guard await navigator.go(to: target, options: .init(animated: changesResource)) else {
             errorMessage = "无法跳转到这段内容"
@@ -135,7 +143,7 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
 
     func go(to bookmark: Bookmark) async {
         if let json = bookmark.epubLocation, let locator = try? Locator(jsonString: json) {
-            _ = await navigator?.go(to: locator)
+            await jump(to: locator)
         } else if let index = bookmark.resolvedChapterIndex(in: chapters), let link = link(for: chapters[index]) {
             await go(to: link)
         }
@@ -143,7 +151,7 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
 
     func go(toProgress progress: Double) async {
         guard let navigator, let locator = await navigator.publication.locate(progression: progress) else { return }
-        _ = await navigator.go(to: locator)
+        await jump(to: locator)
     }
 
     func navigator(_ navigator: Navigator, locationDidChange locator: Locator) {
@@ -292,7 +300,7 @@ struct EPUBReaderView: View {
                 }
             }
             activity.beginReading(model.book)
-            await model.open(preferences: preferences)
+            if model.navigator == nil { await model.open(preferences: preferences) }
         }
         .onChange(of: preferences) { model.apply($0) }
         .onChange(of: scenePhase) { phase in
@@ -300,13 +308,14 @@ struct EPUBReaderView: View {
             else { activity.beginReading(model.book) }
         }
         .onDisappear {
+            guard !showsTOC else { return }
             model.onLocationChanged = nil
             if !switchingToText {
                 saveProgress()
                 Task { await activity.endReading(model.book) }
             }
         }
-        .sheet(isPresented: $showsTOC) { tocSheet }
+        .fullScreenCover(isPresented: $showsTOC) { tocSheet }
         .sheet(isPresented: $showsSettings) { settingsSheet }
         .sheet(isPresented: $showsBookmarks) { bookmarksSheet }
         .alert("EPUB 阅读", isPresented: Binding(get: { model.navigator != nil && model.errorMessage != nil }, set: { if !$0 { model.clearError() } })) {
@@ -349,11 +358,15 @@ struct EPUBReaderView: View {
             HStack {
                 Slider(value: $sliderProgress, in: 0...1) { editing in
                     isScrubbing = editing
-                    if !editing { Task { await model.go(toProgress: sliderProgress) } }
+                    if !editing {
+                        let target = sliderProgress
+                        Task { await model.go(toProgress: target) }
+                    }
                 }.accessibilityLabel("阅读进度")
                 Text("\(Int(sliderProgress * 100))%")
                     .font(.caption.monospacedDigit()).frame(width: 42)
             }
+            .frame(minHeight: 44)
             HStack {
                 Button { Task { _ = await model.navigator?.goBackward() } } label: { Image(systemName: "chevron.left") }
                     .accessibilityLabel("上一页")

@@ -117,7 +117,7 @@ struct LocalBookDetailView: View {
         }
         .task(id: book) { await model.load(book: book) }
         .sheet(isPresented: $showsTocRule) { LocalBookTocRuleView(book: book) }
-        .sheet(isPresented: $showsTableOfContents) {
+        .fullScreenCover(isPresented: $showsTableOfContents) {
             LocalBookTableOfContentsView(book: book, chapters: model.chapters)
         }
         .confirmationDialog("从书架移除《\(book.name)》？", isPresented: $showsRemoveConfirmation) {

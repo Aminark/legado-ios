@@ -153,6 +153,15 @@ private struct BookshelfView: View {
     @State private var showsLocalImporter = false
     @State private var pendingLocalFiles: [LocalBookImportFile] = []
     @State private var selectedGroupID = BookGroup.idAll
+    @EnvironmentObject private var replaceRules: ReplaceRuleLibraryModel
+    @State private var opening: Task<Void, Never>?
+    @State private var warmedReader: ReaderViewModel?
+    @State private var readerDestination: ShelfReaderDestination?
+
+    private enum ShelfReaderDestination {
+        case prepared(ReaderViewModel)
+        case book(Book, BookSource?)
+    }
     @State private var showsGroupManager = false
     @State private var showsBookOrder = false
     @AppStorage("bookshelfLayout") private var bookshelfLayout = "grid3"
@@ -196,9 +205,7 @@ private struct BookshelfView: View {
                                     Text("继续阅读")
                                         .font(.subheadline.weight(.medium))
                                         .foregroundStyle(.secondary)
-                                    NavigationLink {
-                                        BookshelfBookDestination(book: book, source: sources.sources.first { $0.bookSourceUrl == book.origin })
-                                    } label: {
+                                    Button { open(book) } label: {
                                         ContinueReadingCard(book: book)
                                     }
                                     .buttonStyle(.plain)
@@ -211,12 +218,12 @@ private struct BookshelfView: View {
                             if bookshelfLayout.hasPrefix("grid") {
                                 LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
                                     ForEach(displayedBooks) { book in
-                                        BookshelfBookLink(book: book, compact: false, grid: true)
+                                        BookshelfBookLink(book: book, compact: false, grid: true) { open(book) }
                                     }
                                 }
                             } else {
                                 ForEach(displayedBooks) { book in
-                                    BookshelfBookLink(book: book, compact: bookshelfLayout == "compact", grid: false)
+                                    BookshelfBookLink(book: book, compact: bookshelfLayout == "compact", grid: false) { open(book) }
                                     if book.id != displayedBooks.last?.id {
                                         Rectangle().fill(ReadingTheme.separator).frame(height: 0.5)
                                             .padding(.leading, bookshelfLayout == "compact" ? 54 : 66)
@@ -233,6 +240,27 @@ private struct BookshelfView: View {
         }
         .background(ReadingTheme.canvas)
         .navigationBarHidden(true)
+        .readingNavigationDestination(isPresented: Binding(
+            get: { readerDestination != nil }, set: { if !$0 { readerDestination = nil } }
+        )) {
+            switch readerDestination {
+            case let .prepared(reader): ReaderView(prepared: reader)
+            case let .book(book, source): BookshelfBookDestination(book: book, source: source)
+            case nil: EmptyView()
+            }
+        }
+        .onDisappear { opening?.cancel(); warmedReader = nil }
+        .task(id: recentBook) {
+            warmedReader = nil
+            guard let book = recentBook, book.origin != "local",
+                  let source = sources.sources.first(where: { $0.id == book.origin }),
+                  !ProcessInfo.processInfo.arguments.contains("-uiDemo") else { return }
+            let chapters = await library.updateCoordinator.storedChapters(bookURL: book.bookUrl)
+            guard !Task.isCancelled, let restored = BookshelfReadViewModel.restoredBook(book, chapters: chapters) else { return }
+            let reader = await ReaderViewModel.cachedOpening(book: restored, chapters: chapters, source: source,
+                                                             rules: replaceRules.rules, speculative: true)
+            if !Task.isCancelled, reader.hasLoadedCurrentChapter { warmedReader = reader }
+        }
         .refreshable {
             guard selectedGroup.enableRefresh else { return }
             await library.checkForUpdates(sources: sources.sources, group: selectedGroup)
@@ -273,6 +301,30 @@ private struct BookshelfView: View {
             Button("好") { library.clearUpdateMessage() }
         } message: {
             Text(library.updateMessage ?? "")
+        }
+    }
+
+    private func open(_ book: Book) {
+        opening?.cancel()
+        let source = sources.sources.first { $0.id == book.origin }
+        guard book.origin != "local", let source, !ProcessInfo.processInfo.arguments.contains("-uiDemo") else {
+            readerDestination = .book(book, source)
+            return
+        }
+        opening = Task {
+            let chapters = await library.updateCoordinator.storedChapters(bookURL: book.bookUrl)
+            guard !Task.isCancelled else { return }
+            if let restored = BookshelfReadViewModel.restoredBook(book, chapters: chapters) {
+                let reader = await ReaderViewModel.cachedOpening(book: restored, chapters: chapters, source: source,
+                                                                 rules: replaceRules.rules, reusing: warmedReader)
+                guard !Task.isCancelled else { return }
+                var transaction = Transaction()
+                transaction.disablesAnimations = reader.hasLoadedCurrentChapter
+                withTransaction(transaction) { readerDestination = .prepared(reader) }
+            } else {
+                readerDestination = .book(book, source)
+            }
+            opening = nil
         }
     }
 
@@ -445,14 +497,13 @@ private struct BookshelfBookLink: View {
     let book: Book
     let compact: Bool
     let grid: Bool
+    let open: () -> Void
     @State private var showsGroupSelector = false
 
     private var source: BookSource? { sources.sources.first { $0.bookSourceUrl == book.origin } }
 
     var body: some View {
-        NavigationLink {
-            BookshelfBookDestination(book: book, source: source)
-        } label: {
+        Button(action: open) {
             if grid { BookshelfGridItem(book: book) }
             else { BookshelfRow(book: book, compact: compact) }
         }
@@ -519,6 +570,7 @@ private struct BookshelfGridItem: View {
 }
 
 private struct BookshelfBookDestination: View {
+    @EnvironmentObject private var library: BookLibraryModel
     let book: Book
     let source: BookSource?
 
@@ -526,7 +578,7 @@ private struct BookshelfBookDestination: View {
         if ProcessInfo.processInfo.arguments.contains("-uiDemo"), book.origin != "local" {
             ReaderView(demoBook: book, chapters: DemoContent.readerChapters, initialIndex: 0, content: DemoContent.readerText)
         } else {
-            BookshelfReadView(book: book, source: source)
+            BookshelfReadView(book: book, source: source, coordinator: library.updateCoordinator)
         }
     }
 }
@@ -843,7 +895,13 @@ struct BookshelfReadView: View {
     let book: Book
     let source: BookSource?
     @EnvironmentObject private var library: BookLibraryModel
-    @StateObject private var model = BookshelfReadViewModel()
+    @StateObject private var model: BookshelfReadViewModel
+
+    init(book: Book, source: BookSource?, coordinator: BookUpdateCoordinator) {
+        self.book = book
+        self.source = source
+        _model = StateObject(wrappedValue: BookshelfReadViewModel(updateCoordinator: coordinator))
+    }
 
     var body: some View {
         Group {
@@ -2143,7 +2201,7 @@ private struct ReadingPreferencesView: View {
     @AppStorage("titleMode") private var titleMode = 0
     @AppStorage("titleSize") private var titleSize = 0.0
     @AppStorage("titleTopSpacing") private var titleTopSpacing = 0.0
-    @AppStorage("titleBottomSpacing") private var titleBottomSpacing = 0.0
+    @AppStorage("titleBottomSpacing") private var titleBottomSpacing = ReaderTypography.defaultTitleBottomSpacing
     @AppStorage("underlineMode") private var underlineMode = 0
     @AppStorage("readerTheme") private var theme = "wechat"
     @AppStorage("pageAnim") private var pageAnimation = 0

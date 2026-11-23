@@ -69,7 +69,7 @@ final class BookLibraryModel: ObservableObject {
     let localFiles: LocalFileService
     private let localService = LocalBookService.live()
     private let txtTocRuleRepository: SQLiteConfigurationRepository?
-    private let updateCoordinator: BookUpdateCoordinator
+    let updateCoordinator: BookUpdateCoordinator
     private let chapterRepository: any BookChapterRepository
     private let chapterCache: ChapterContentCache
     private let groupRepository: any BookGroupRepository
@@ -201,8 +201,19 @@ final class BookLibraryModel: ObservableObject {
     }
 
     @discardableResult
-    func addOrUpdate(_ book: Book) async -> Bool {
+    func addOrUpdate(_ book: Book, chapters: [BookChapter] = []) async -> Bool {
         await waitForSourceSwitch()
+        if chapters.isEmpty { return await saveBook(book, chapters: []) }
+        let save = Task { @MainActor in
+            defer { sourceSwitchSaveTask = nil }
+            _ = await bookSaveTask?.value
+            return await saveBook(book, chapters: chapters)
+        }
+        sourceSwitchSaveTask = save
+        return await save.value
+    }
+
+    private func saveBook(_ book: Book, chapters: [BookChapter]) async -> Bool {
         var book = book
         if let existing = books.first(where: { $0.bookUrl == book.bookUrl }),
            existing.durChapterTime > book.durChapterTime {
@@ -220,7 +231,17 @@ final class BookLibraryModel: ObservableObject {
         } else {
             updated.append(book)
         }
-        let succeeded = await persist(updated)
+        let succeeded: Bool
+        if chapters.isEmpty {
+            succeeded = await persist(updated)
+        } else {
+            let snapshot = updated
+            let bookURL = book.bookUrl
+            succeeded = await persist(snapshot) { [repository, chapterRepository] in
+                try await Self.writeBooksAndChapters(snapshot, chapters: chapters, bookURL: bookURL,
+                                                     repository: repository, chapterRepository: chapterRepository)
+            }
+        }
         if succeeded, let pending, pendingProgress[book.bookUrl] == pending {
             pendingProgress[book.bookUrl] = nil
             persistPendingProgress()
@@ -320,7 +341,7 @@ final class BookLibraryModel: ObservableObject {
         updated[index].durChapterTime = Int64(Date().timeIntervalSince1970 * 1_000)
         updated[index].lastCheckCount = 0
         updated[index].totalChapterNum = max(updated[index].totalChapterNum, chapter.index + 1)
-        await persist(updated)
+        await persist(updated, progressBook: updated[index])
     }
 
     private func applyProgress(_ progress: BookProgress, to book: inout Book) {
@@ -764,7 +785,7 @@ final class BookLibraryModel: ObservableObject {
     func reportError(_ error: Error) { errorMessage = error.localizedDescription }
 
     @discardableResult
-    private func persist(_ updated: [Book], write: (@Sendable () async throws -> Void)? = nil) async -> Bool {
+    private func persist(_ updated: [Book], progressBook: Book? = nil, write: (@Sendable () async throws -> Void)? = nil) async -> Bool {
         // Publish before suspending so the next mutation sees the latest
         // shelf. Serialize disk writes to keep their order identical to it.
         books = updated
@@ -772,9 +793,10 @@ final class BookLibraryModel: ObservableObject {
         let generation = bookSaveGeneration
         let previousSave = bookSaveTask
         let save = Task { @MainActor [weak self, repository] in
-            _ = await previousSave?.value
+            let previousSucceeded = await previousSave?.value ?? true
             do {
                 if let write { try await write() }
+                else if let progressBook, previousSucceeded { try await repository.saveProgress(progressBook, in: updated) }
                 else { try await repository.save(updated) }
                 self?.persistedBooks = updated
                 if self?.bookSaveGeneration == generation { self?.errorMessage = nil }

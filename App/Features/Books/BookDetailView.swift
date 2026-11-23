@@ -3,11 +3,15 @@ import SwiftUI
 struct BookDetailView: View {
     @EnvironmentObject private var library: BookLibraryModel
     @EnvironmentObject private var sourceLibrary: SourceLibraryModel
+    @EnvironmentObject private var replaceRules: ReplaceRuleLibraryModel
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @StateObject private var model: BookDetailViewModel
     @State private var showsSourceSwitch = false
     @State private var showsRemoveConfirmation = false
     @State private var showsTableOfContents = false
+    @State private var warmedReader: ReaderViewModel?
+    @State private var openedReader: ReaderViewModel?
+    @State private var opening: Task<Void, Never>?
 
     init(searchBook: SearchBook, source: BookSource) {
         _model = StateObject(wrappedValue: BookDetailViewModel(searchBook: searchBook, source: source))
@@ -100,6 +104,7 @@ struct BookDetailView: View {
                 model.restoreLibraryBook(from: stored, sources: sourceLibrary.sources)
             }
             let requestedBook = model.book
+            let startsLoad = model.state == .idle
             await model.load(sources: sourceLibrary.sources, persistDirectory: false, runPreUpdateScript: shouldPersistUpdate, commitSourceSwitch: { report in
                 guard shouldPersistUpdate else { return true }
                 return await library.commitSourceSwitch(oldBookURL: oldURL, report: report)
@@ -107,15 +112,28 @@ struct BookDetailView: View {
                 guard shouldPersistUpdate else { return true }
                 return await library.commitPreparedUpdate(requestedBook: requestedBook, report: report)
             })
-            if shouldPersistUpdate {
+            if library.contains(model.book) {
                 if let stored = library.books.first(where: { $0.bookUrl == model.book.bookUrl }) {
                     model.restoreUserSettings(from: stored)
                     model.restoreReadingProgress(from: stored)
                 }
-                if oldURL == model.book.bookUrl, model.state == .ready {
+                if startsLoad, !model.usedStoredDirectory, oldURL == model.book.bookUrl, model.state == .ready {
                     await saveLoadedDirectory()
                 }
             }
+        }
+        .task(id: model.chapters.isEmpty ? nil : model.book) {
+            warmedReader = nil
+            guard !model.chapters.isEmpty, !ProcessInfo.processInfo.arguments.contains("-uiDemo") else { return }
+            let reader = await ReaderViewModel.cachedOpening(book: model.book, chapters: model.chapters, source: model.source,
+                                                             rules: replaceRules.rules, speculative: true)
+            if !Task.isCancelled, reader.hasLoadedCurrentChapter { warmedReader = reader }
+        }
+        .onDisappear { opening?.cancel(); warmedReader = nil }
+        .readingNavigationDestination(isPresented: Binding(
+            get: { openedReader != nil }, set: { if !$0 { openedReader = nil } }
+        )) {
+            if let openedReader { ReaderView(prepared: openedReader) }
         }
         .sheet(isPresented: $showsSourceSwitch) {
             ReadingNavigationStack {
@@ -129,7 +147,7 @@ struct BookDetailView: View {
                 }
             }
         }
-        .sheet(isPresented: $showsTableOfContents) {
+        .fullScreenCover(isPresented: $showsTableOfContents) {
             BookTableOfContentsView(book: model.book, chapters: model.chapters, source: model.source)
         }
         .confirmationDialog("从书架移除《\(model.book.name)》？", isPresented: $showsRemoveConfirmation) {
@@ -200,12 +218,14 @@ struct BookDetailView: View {
 
     @ViewBuilder
     private var readingActions: some View {
-        NavigationLink {
-            readingDestination
-        } label: {
-            Text(model.book.durChapterIndex > 0 || model.book.durChapterPos > 0 ? "继续阅读" : "开始阅读")
-                .font(.body.weight(.medium))
-                .frame(maxWidth: .infinity, minHeight: 28)
+        Group {
+            if ProcessInfo.processInfo.arguments.contains("-uiDemo") {
+                NavigationLink {
+                    ReaderView(demoBook: model.book, chapters: model.chapters, initialIndex: model.book.durChapterIndex, content: DemoContent.readerText)
+                } label: { readingLabel }
+            } else {
+                Button(action: openReader) { readingLabel }
+            }
         }
         .readingProminentButtonStyle()
         .disabled(model.chapters.isEmpty)
@@ -226,18 +246,26 @@ struct BookDetailView: View {
         .readingSecondaryButtonStyle()
     }
 
-    @ViewBuilder
-    private var readingDestination: some View {
-        let index = min(max(model.book.durChapterIndex, 0), max(model.chapters.count - 1, 0))
-        if ProcessInfo.processInfo.arguments.contains("-uiDemo") {
-            ReaderView(demoBook: model.book, chapters: model.chapters, initialIndex: index, content: DemoContent.readerText)
-        } else {
-            ReaderView(book: model.book, chapters: model.chapters, initialIndex: index, source: model.source)
+    private var readingLabel: some View {
+        Text(model.book.durChapterIndex > 0 || model.book.durChapterPos > 0 ? "继续阅读" : "开始阅读")
+            .font(.body.weight(.medium))
+            .frame(maxWidth: .infinity, minHeight: 28)
+    }
+
+    private func openReader() {
+        opening?.cancel()
+        opening = Task {
+            let reader = await ReaderViewModel.cachedOpening(book: model.book, chapters: model.chapters, source: model.source,
+                                                             rules: replaceRules.rules, reusing: warmedReader)
+            guard !Task.isCancelled else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = reader.hasLoadedCurrentChapter
+            withTransaction(transaction) { openedReader = reader }
         }
     }
 
     private func saveCurrentBook() async {
-        await library.addOrUpdate(model.book)
+        await library.addOrUpdate(model.book, chapters: model.chapters)
         if let stored = library.books.first(where: { $0.bookUrl == model.book.bookUrl }) {
             model.restoreReadingProgress(from: stored)
         }
@@ -320,6 +348,7 @@ private struct BookTableOfContentsView: View {
     let source: BookSource
     @State private var searchText = ""
     @State private var descending = false
+    @State private var selectedChapter: BookChapter?
 
     private var displayedChapters: [BookChapter] {
         let filtered = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -334,20 +363,26 @@ private struct BookTableOfContentsView: View {
                 if chapter.isVolume {
                     Text(chapter.title).font(.headline).foregroundStyle(ReadingTheme.accent)
                 } else {
-                    NavigationLink {
-                        ReaderView(book: book, chapters: chapters, initialIndex: chapter.index, source: source)
-                    } label: {
+                    Button { selectedChapter = chapter } label: {
                         HStack(spacing: 12) {
                             Text("\(chapter.index + 1)")
-                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 42, alignment: .trailing)
+                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 36, alignment: .trailing)
                             Text(chapter.title).lineLimit(2)
+                                .foregroundStyle(chapter.index == book.durChapterIndex ? ReadingTheme.accent : .primary)
+                            if chapter.isVip { Image(systemName: "lock.fill").font(.caption).foregroundStyle(.orange) }
                             Spacer()
-                            if chapter.index == book.durChapterIndex {
-                                Image(systemName: "location.fill").foregroundStyle(ReadingTheme.accent)
-                            }
-                            if chapter.isVip { Image(systemName: "lock.fill").foregroundStyle(.orange) }
+                            ChapterAvailabilityIcon(bookURL: book.bookUrl, chapterURL: chapter.url, sourceID: source.id)
                         }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                }
+            }
+            .readingNavigationDestination(isPresented: Binding(
+                get: { selectedChapter != nil }, set: { if !$0 { selectedChapter = nil } }
+            )) {
+                if let chapter = selectedChapter {
+                    ReaderView(book: book, chapters: chapters, initialIndex: chapter.index, source: source)
                 }
             }
             .searchable(text: $searchText, prompt: "搜索目录")

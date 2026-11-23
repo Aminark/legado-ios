@@ -5,6 +5,323 @@ import LegadoCore
 
 @MainActor
 struct ReaderRegressionTests {
+    @Test func reopenedShelfBookReadsDirectoryAndVisitedChaptersWithNetworkOffline() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dbURL = dir.appendingPathComponent("books.sqlite")
+        let cacheURL = dir.appendingPathComponent("cache")
+        let db = try LegadoDatabase(url: dbURL)
+        let store = SQLiteBookRepository(database: db)
+        let directory = SQLiteBookChapterRepository(database: db)
+        let library = BookLibraryModel(repository: store, chapterRepository: directory)
+        let source = BookSource(bookSourceUrl: "https://fixture.test", bookSourceName: "源")
+        var book = Book(bookUrl: "book", name: "书", origin: source.id)
+        book.totalChapterNum = 2
+        let chapters = (0..<2).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        let service = CacheRegressionSource()
+        let reader = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0, source: source,
+                                     service: service, cache: .init(directory: cacheURL))
+        await reader.load(rules: [], prefetchNextChapter: false)
+        reader.goNext()
+        await reader.load(rules: [], prefetchNextChapter: false)
+        #expect(await library.addOrUpdate(book, chapters: chapters))
+        await library.updateProgress(for: book, chapter: chapters[1], position: 2)
+        await service.disconnect()
+
+        let reopenedDB = try LegadoDatabase(url: dbURL)
+        let restored = try #require(try await reopenedDB.loadBooks().first)
+        let opener = BookshelfReadViewModel(updateCoordinator: .init(repository: SQLiteBookChapterRepository(database: reopenedDB),
+                                                                    loader: service))
+        await opener.load(book: restored, source: source)
+        #expect(opener.chapters == chapters)
+        let reopened = ReaderViewModel(book: restored, chapters: opener.chapters, initialIndex: restored.durChapterIndex,
+                                       source: source, service: service, cache: .init(directory: cacheURL))
+        #expect(reopened.requestedPosition == 2)
+        for index in [1, 0, 1] {
+            reopened.select(index: index)
+            await reopened.load(rules: [], prefetchNextChapter: false)
+            #expect(reopened.content == "正文\(index)")
+            #expect(reopened.loadedFromCache)
+        }
+        #expect(await service.contentRequests == [0, 1])
+        #expect(await service.directoryRequests == 0)
+    }
+
+    @Test func coldShelfAndPreparedNextChapterAreReadableBeforeTheirViewTasksStart() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cache = ChapterContentCache(directory: dir)
+        let loader = CacheRegressionSource()
+        let source = BookSource(bookSourceUrl: "source", bookSourceName: "源")
+        var book = Book(bookUrl: "book", name: "书", origin: source.id)
+        book.durChapterPos = 2
+        let chapters = (0..<7).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        try await cache.save(.init(bookURL: "book", chapterURL: "c0", content: "第0章\n第一段", sourceID: source.id))
+        try await cache.save(.init(bookURL: "book", chapterURL: "c1", content: "第1章\n下一段", sourceID: source.id))
+        let reader = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0, source: source, service: loader, cache: cache)
+        defer { reader.stopBackgroundReading() }
+        await reader.prepareCachedOpening(rules: [])
+        #expect(reader.content == "第一段")
+        #expect(reader.visibleScrollChapters.first?.id == 0)
+        #expect(reader.requestedPosition == 2 && reader.hasLoadedCurrentChapter && !reader.isWaitingForSource)
+        #expect(await loader.contentRequests.isEmpty)
+        #expect(reader.canResumePrepared(book: book, chapters: chapters, source: source, rules: []))
+        var revised = chapters
+        revised[1].url = "replaced"
+        #expect(!reader.canResumePrepared(book: book, chapters: revised, source: source, rules: []))
+
+        await reader.load(rules: [])
+        for _ in 0..<150 {
+            if try await cache.load(bookURL: "book", chapterURL: "c4") != nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        reader.goNext()
+        #expect(reader.currentIndex == 1 && reader.content == "下一段")
+        #expect(reader.hasLoadedCurrentChapter && !reader.isWaitingForSource)
+        #expect(reader.visibleScrollChapters.first?.content == "下一段")
+        reader.goPrevious()
+        #expect(reader.hasLoadedCurrentChapter && reader.content == "第一段")
+        reader.goNext()
+        // A later edit must supersede any display-ready copy of chapter two.
+        try await cache.save(.init(bookURL: "book", chapterURL: "c2", content: "修改后的正文", sourceID: source.id))
+        reader.goNext()
+        #expect(!reader.hasLoadedCurrentChapter)
+        await reader.load(rules: [], prefetchNextChapter: false)
+        #expect(reader.content == "修改后的正文" && reader.loadedFromCache)
+        #expect(await loader.contentRequests.filter { $0 < 2 }.isEmpty)
+    }
+
+    @Test func cachedChapterButtonsKeepTheContinuousWindowAndRecheckEditedContent() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cache = ChapterContentCache(directory: dir)
+        let loader = CacheRegressionSource()
+        await loader.disconnect()
+        let source = BookSource(bookSourceUrl: "source", bookSourceName: "源")
+        var book = Book(bookUrl: "book", name: "书", origin: source.id)
+        book.durChapterIndex = 1
+        let chapters = (0..<3).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        for chapter in chapters {
+            try await cache.save(.init(bookURL: book.bookUrl, chapterURL: chapter.url, content: "正文\(chapter.index)", sourceID: source.id))
+        }
+        let reader = ReaderViewModel(book: book, chapters: chapters, initialIndex: 1, source: source, service: loader, cache: cache)
+        defer { reader.stopBackgroundReading() }
+        await reader.prepareCachedOpening(rules: [], speculative: true)
+        await reader.load(rules: [], prefetchNextChapter: false)
+        await reader.prepareContinuousReading(rules: [])
+        let window = reader.scrollChapters
+        #expect(window.map(\.id) == [0, 1, 2])
+        reader.goPrevious()
+        #expect(reader.content == "正文0" && reader.scrollChapters == window)
+        reader.goNext()
+        #expect(reader.content == "正文1" && reader.scrollChapters == window)
+        try await cache.save(.init(bookURL: book.bookUrl, chapterURL: "c2", content: "本地修订", sourceID: source.id))
+        reader.goNext()
+        #expect(!reader.hasLoadedCurrentChapter && reader.scrollChapters.isEmpty)
+        await reader.load(rules: [], prefetchNextChapter: false)
+        #expect(reader.content == "本地修订")
+        #expect(await loader.contentRequests.isEmpty)
+    }
+
+    @Test func cachedPageStartsNextPreloadAndImmediateForwardTapSharesIt() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cache = ChapterContentCache(directory: dir)
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapters = (0..<2).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        try await cache.save(.init(bookURL: book.bookUrl, chapterURL: chapters[0].url, content: "已读正文", sourceID: book.origin))
+        let source = CacheRegressionSource()
+        let model = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0,
+                                    source: .init(bookSourceUrl: book.origin, bookSourceName: "源"),
+                                    service: source, cache: cache)
+        await model.load(rules: [])
+        for _ in 0..<100 where await source.contentRequests.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try #require(await source.contentRequests == [1])
+        model.goNext()
+        await model.load(rules: [])
+        #expect(model.content == "正文1")
+        #expect(await source.contentRequests == [1])
+    }
+
+    @Test(arguments: [false, true])
+    func jumpingBackWhileASlowUpcomingChapterOccupiesTheSource(targetCached: Bool) async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cache = ChapterContentCache(directory: dir)
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapters = (0..<6).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        for index in targetCached ? [1, 2] : [2] {
+            try await cache.save(.init(bookURL: book.bookUrl, chapterURL: chapters[index].url, content: "缓存\(index)"))
+        }
+        let service = SlowPrefetchReaderSource()
+        let reader = ReaderViewModel(book: book, chapters: chapters, initialIndex: 2,
+                                     source: .init(bookSourceUrl: book.origin, bookSourceName: "源"),
+                                     service: service, cache: cache)
+        defer { reader.stopBackgroundReading() }
+        await reader.load(rules: [])
+        for _ in 0..<100 where !(await service.slotOccupied) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try #require(await service.slotOccupied)
+        reader.goPrevious()
+        await reader.load(rules: [])
+        #expect(reader.content == (targetCached ? "缓存1" : "正文1"))
+        #expect(await service.prefetchCancelled == !targetCached)
+        #expect(await service.foregroundRequests == (targetCached ? 0 : 1))
+        reader.goNext()
+        #expect(reader.hasLoadedCurrentChapter && reader.content == "缓存2")
+    }
+
+    @Test(arguments: [false, true])
+    func silentPrefetchPersistsFiveReadableChaptersAndAdvancesWithTheReader(continuous: Bool) async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let suite = UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ApplicationSettingsStore(defaults: defaults)
+        let cache = ChapterContentCache(directory: dir)
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        var chapters = (0..<9).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        chapters[1].isVolume = true
+        try await cache.save(.init(bookURL: book.bookUrl, chapterURL: "c3", content: "已有正文", sourceID: book.origin))
+        let loader = CacheRegressionSource()
+        let source = BookSource(bookSourceUrl: book.origin, bookSourceName: "源")
+        let reader = ReaderViewModel(book: book, chapters: chapters, initialIndex: 0, source: source,
+                                     service: loader, cache: cache, settingsStore: store)
+        defer { reader.cancelPreload() }
+        func waitForChapter(_ index: Int) async throws {
+            for _ in 0..<150 {
+                if try await cache.load(bookURL: book.bookUrl, chapterURL: chapters[index].url) != nil { return }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            Issue.record("预读未保存第 \(index) 章")
+        }
+
+        await reader.load(rules: [])
+        if continuous { await reader.prepareContinuousReading(rules: []) }
+        try await waitForChapter(6)
+        #expect(reader.currentIndex == 0)
+        #expect(reader.content == "正文0")
+        #expect(reader.diagnostics.isEmpty)
+        #expect(await loader.contentRequests.sorted() == [0, 2, 4, 5, 6])
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: "c7") == nil)
+
+        if continuous {
+            #expect(reader.updateContinuousPosition(chapter: 2))
+        } else {
+            reader.goNext()
+            await reader.load(rules: [])
+        }
+        try await waitForChapter(7)
+        #expect(await loader.contentRequests.sorted() == [0, 2, 4, 5, 6, 7])
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: "c8") == nil)
+        reader.cancelPreload()
+        await loader.disconnect()
+
+        let reopened = ReaderViewModel(book: book, chapters: chapters, initialIndex: 2, source: source,
+                                       service: loader, cache: .init(directory: dir), settingsStore: store)
+        for index in [2, 3, 4, 5, 6, 7] {
+            reopened.select(index: index)
+            await reopened.load(rules: [], prefetchNextChapter: false)
+            #expect(reopened.loadedFromCache)
+            #expect(reopened.content == (index == 3 ? "已有正文" : "正文\(index)"))
+        }
+        #expect(await loader.contentRequests.sorted() == [0, 2, 4, 5, 6, 7])
+    }
+
+    @Test(arguments: [0, 1, 5])
+    func savedPrefetchCountAndBookEndLimitSilentRequests(count: Int) async throws {
+        let suite = UUID().uuidString
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ApplicationSettingsStore(defaults: defaults)
+        var settings = store.settings
+        settings.prefetchChapters = count
+        try store.save(settings)
+        let source = CacheRegressionSource()
+        await source.disconnect()
+        let cache = ChapterContentCache(directory: dir)
+        let book = Book(bookUrl: "book", name: "书", origin: "source")
+        let chapters = (0..<4).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        try await cache.save(.init(bookURL: book.bookUrl, chapterURL: "c1", content: "读到这里", sourceID: book.origin))
+        let reader = ReaderViewModel(book: book, chapters: chapters, initialIndex: 1,
+                                     source: .init(bookSourceUrl: book.origin, bookSourceName: "源"),
+                                     service: source, cache: cache, settingsStore: store)
+        await reader.load(rules: [])
+        let expected = Array([2, 3].prefix(count))
+        for _ in 0..<100 where await source.contentRequests.count < expected.count {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(await source.contentRequests == expected)
+        #expect(reader.currentIndex == 1)
+        #expect(reader.content == "读到这里")
+        #expect(reader.diagnostics.isEmpty)
+        #expect(reader.currentChapterError == nil)
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: "c2") == nil)
+    }
+
+    @Test func readingNearTheEndAppendsAndCachesNewlyPublishedChapters() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let shelf = InMemoryBookRepository()
+        let directory = InMemoryBookChapterRepository()
+        let source = BookSource(bookSourceUrl: "source", bookSourceName: "源")
+        var book = Book(bookUrl: "book", name: "连载", origin: source.id)
+        book.totalChapterNum = 7
+        let chapters = (0..<9).map { BookChapter(url: "c\($0)", title: "第\($0)章", bookUrl: book.bookUrl, index: $0) }
+        let initial = Array(chapters.prefix(7))
+        let loader = CacheRegressionSource()
+        let coordinator = BookUpdateCoordinator(repository: directory, loader: loader)
+        let library = BookLibraryModel(repository: shelf, updateCoordinator: coordinator, chapterRepository: directory)
+        #expect(await library.addOrUpdate(book, chapters: initial))
+        let cache = ChapterContentCache(directory: dir)
+        let reader = ReaderViewModel(book: book, chapters: initial, initialIndex: 0, source: source, service: loader, cache: cache)
+        defer { reader.stopBackgroundReading() }
+        await reader.load(rules: [])
+        #expect(reader.checkForNewChapters(using: library) { 0 } == nil)
+        reader.goNext()
+        await reader.load(rules: [])
+        await library.updateProgress(for: book, chapter: chapters[1], position: 2)
+        await loader.publish(chapters)
+        let check = try #require(reader.checkForNewChapters(using: library) { 2 })
+        await check.value
+        #expect(reader.content == "正文1")
+        #expect(reader.currentIndex == 1)
+        #expect(reader.chapters == chapters)
+        #expect(library.books.first?.durChapterPos == 2)
+        #expect(await coordinator.storedChapters(bookURL: book.bookUrl) == chapters)
+        reader.goNext()
+        await reader.load(rules: [])
+        #expect(reader.checkForNewChapters(using: library) { 0 } == nil)
+        for _ in 0..<150 {
+            if try await cache.load(bookURL: book.bookUrl, chapterURL: "c7") != nil { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: "c7")?.content == "正文7")
+        #expect(try await cache.load(bookURL: book.bookUrl, chapterURL: "c8") == nil)
+        #expect(await loader.directoryRequests == 1)
+    }
+
+    @Test func chapterDirectoryNumbersAndSearchStayInReadingOrderAcrossVolumeHeadings() {
+        let chapters = ["上卷", "归来", "下卷", "归来", "天明"].enumerated().map { index, title in
+            var chapter = BookChapter(url: "chapter", title: title, bookUrl: "book", index: index + 10)
+            chapter.isVolume = index == 0 || index == 2
+            return chapter
+        }
+        let directory = ReaderChapterDirectory(chapters)
+        #expect(directory.readableIndices == [1, 3, 4])
+        #expect(directory.rows.map(\.number) == [nil, 1, nil, 2, 3])
+        #expect(directory.rows(matching: "归来", descending: true).map(\.id) == [3, 1])
+        #expect(directory.rows(matching: " 2 ", descending: false).map(\.id) == [3])
+        #expect(directory.rows(matching: "无此章", descending: true).isEmpty)
+    }
+
     @Test func commentPagesKeepOrderAndIgnoreDuplicatesLatePagesAndCursorLoops() {
         let firstNext = URL(string: "https://comments.test/page/2")!
         let secondNext = URL(string: "https://comments.test/page/3")!
@@ -595,5 +912,48 @@ private actor SuspendedReaderChapterLoader: ChapterContentLoading {
     func release() {
         pending?.resume(returning: .init(title: "旧章节", content: "迟到的正文"))
         pending = nil
+    }
+}
+
+
+private actor SlowPrefetchReaderSource: ChapterContentLoading {
+    private(set) var slotOccupied = false
+    private(set) var prefetchCancelled = false
+    private(set) var foregroundRequests = 0
+
+    func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
+        if chapter.index == 3, !prefetchCancelled {
+            slotOccupied = true
+            defer { slotOccupied = false }
+            do { try await Task.sleep(nanoseconds: 4_000_000_000) }
+            catch { prefetchCancelled = true }
+        } else if chapter.index == 1 {
+            foregroundRequests += 1
+            for _ in 0..<100 where slotOccupied { try? await Task.sleep(nanoseconds: 5_000_000) }
+            if slotOccupied { return .init(content: "书源仍被预读占用") }
+        }
+        return .init(content: "正文\(chapter.index)")
+    }
+}
+
+private actor CacheRegressionSource: ChapterListLoading, ChapterContentLoading {
+    private(set) var contentRequests: [Int] = []
+    private(set) var directoryRequests = 0
+    private var offline = false
+    private var published: [BookChapter] = []
+
+    func publish(_ chapters: [BookChapter]) { published = chapters }
+    func disconnect() { offline = true }
+
+    func loadChapters(book: Book, source: BookSource, maxPages: Int) async -> ChapterListReport {
+        directoryRequests += 1
+        return .init(chapters: published)
+    }
+
+    func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
+        contentRequests.append(chapter.index)
+        if offline { return .init(diagnostics: [.init(severity: .error, code: "offline", message: "无网络", rule: chapter.url)]) }
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        return .init(content: "正文\(chapter.index)")
     }
 }

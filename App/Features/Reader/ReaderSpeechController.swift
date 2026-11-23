@@ -111,7 +111,8 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
     @Published private(set) var errorMessage: String?
     @Published private(set) var completionCount = 0
     @Published private(set) var currentSegmentIndex = 0
-    private let synthesizer = AVSpeechSynthesizer()
+    private var synthesizer: AVSpeechSynthesizer?
+    private var audioSessionActive = false
     private let httpService = HttpTTSService()
     private var audioPlayer: AVAudioPlayer?
     private var streamPlayer: AVPlayer?
@@ -145,13 +146,6 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
     var onPreviousChapter: (() -> Void)?
     var onRemoteStop: (() -> Void)?
 
-    override init() {
-        super.init()
-        synthesizer.delegate = self
-        observeAudioSession()
-        installRemoteCommands()
-    }
-
     deinit {
         notificationTokens.forEach(NotificationCenter.default.removeObserver)
         remoteCommandTargets.forEach { command, target in command.removeTarget(target) }
@@ -174,7 +168,8 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
     }
 
     func stop() {
-        synthesizer.stopSpeaking(at: .word)
+        guard audioSessionActive || !httpPrefetchTasks.isEmpty else { return }
+        synthesizer?.stopSpeaking(at: .word)
         audioPlayer?.stop()
         audioPlayer = nil
         streamPlayer?.pause()
@@ -199,7 +194,10 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
         isSpeaking = false
         isPaused = false
         updateNowPlaying()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if audioSessionActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            audioSessionActive = false
+        }
     }
 
     func configure(
@@ -233,7 +231,7 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
         errorMessage = nil
         activateAudioSession()
         self.continuesAcrossChapters = continuesAcrossChapters
-        if synthesizer.isSpeaking || synthesizer.isPaused {
+        if let synthesizer, synthesizer.isSpeaking || synthesizer.isPaused {
             synthesizer.stopSpeaking(at: .immediate)
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -301,6 +299,11 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
     }
 
     private func activateAudioSession() {
+        if notificationTokens.isEmpty {
+            observeAudioSession()
+            installRemoteCommands()
+        }
+        audioSessionActive = true
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .spokenAudio, options: ignoresAudioFocus ? [.mixWithOthers] : [])
         try? session.setActive(true)
@@ -311,7 +314,7 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
             audioPlayer.pause()
         } else if let streamPlayer {
             streamPlayer.pause()
-        } else if synthesizer.isSpeaking {
+        } else if let synthesizer, synthesizer.isSpeaking {
             synthesizer.pauseSpeaking(at: .word)
         } else if httpTask != nil {
             httpTask?.cancel()
@@ -331,7 +334,7 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
         } else if let streamPlayer {
             streamPlayer.play()
             isSpeaking = true
-        } else if synthesizer.isPaused {
+        } else if let synthesizer, synthesizer.isPaused {
             synthesizer.continueSpeaking()
             isSpeaking = true
         } else if httpEngine != nil, httpSegments.indices.contains(httpSegmentIndex) {
@@ -446,7 +449,11 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
             AVSpeechUtteranceMaximumSpeechRate
         )
         utterance.pitchMultiplier = 1
-        synthesizer.speak(utterance)
+        if synthesizer == nil {
+            synthesizer = AVSpeechSynthesizer()
+            synthesizer?.delegate = self
+        }
+        synthesizer?.speak(utterance)
         currentSegmentIndex = segmentIndexOffset + systemSegmentIndex
         isSpeaking = true
         isPaused = false
@@ -498,7 +505,7 @@ final class ReaderSpeechController: NSObject, ObservableObject, @preconcurrency 
 
     private func changeSystemSegment(to index: Int) {
         isChangingSystemSegment = true
-        synthesizer.stopSpeaking(at: .immediate)
+        synthesizer?.stopSpeaking(at: .immediate)
         systemSegmentIndex = index
         playCurrentSystemSegment()
         DispatchQueue.main.async { [weak self] in self?.isChangingSystemSegment = false }

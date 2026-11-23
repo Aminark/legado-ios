@@ -30,6 +30,9 @@ final class FixtureAppDelegate: UIResponder, UIApplicationDelegate {
             try? writeFixture(Data("第一章 开始\n这是用于验证本地 TXT 导入的小说正文。\n第二章 后续\n正文继续。".utf8),
                               to: documents.appendingPathComponent(name))
         }
+        let paragraphs = String(repeating: "潮水退去，灯塔下面露出了通向岸边的小路。\n", count: 60)
+        let chapters = ["第一章 雨夜", "第二章 灯塔", "第三章 天明"].map { $0 + "\n" + paragraphs }
+        try? writeFixture(Data(chapters.joined(separator: "\n").utf8), to: documents.appendingPathComponent("TXT-Paging.txt"))
         for name in ["EPUB-Book.epub", "Reader-Test.ttf"] {
             if let url = Bundle.main.url(forResource: name, withExtension: nil),
                let data = try? Data(contentsOf: url) {

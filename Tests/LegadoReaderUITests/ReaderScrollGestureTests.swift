@@ -1,5 +1,6 @@
 import XCTest
 import UIKit
+import Vision
 
 @MainActor
 final class ReaderScrollGestureTests: XCTestCase {
@@ -330,6 +331,63 @@ final class ReaderScrollGestureTests: XCTestCase {
         try exercisePagedReading(mode: "0", fontSize: "40")
     }
 
+    func testCoverTapAcrossChapterBoundaryShowsHeadingOnFirstPage() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-uiDemoFiles",
+                               "-pageAnim", "0", "-themeMode", "1", "-titleMode", "0", "-tipFooterRight", "4", "-textSize", "20"]
+        app.launch()
+        app.navigationBars["文件管理"].buttons["更多"].tap()
+        app.buttons["导入 TXT / EPUB"].firstMatch.tap()
+        let browse = app.tabBars.buttons.matching(NSPredicate(format: "label IN %@", ["Browse", "浏览"])).firstMatch
+        if browse.exists && !browse.isSelected { browse.tap() }
+        openImportFixtureFolder(in: app)
+        let file = app.collectionViews["File View"].cells.matching(NSPredicate(format: "label BEGINSWITH %@", "TXT-Paging")).firstMatch
+        file.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        let open = app.buttons.matching(NSPredicate(format: "label IN %@", ["Open", "打开", "Import", "导入"])).firstMatch
+        if open.exists { open.tap() }
+        let book = app.buttons.matching(NSPredicate(
+            format: "label BEGINSWITH %@ AND label CONTAINS %@", "TXT-Paging", "书架："
+        )).firstMatch
+        XCTAssertTrue(book.waitForExistence(timeout: 10))
+        book.tap()
+        let body = app.textViews["reader.text"]
+        XCTAssertTrue(body.waitForExistence(timeout: 20))
+        let footer = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+/[0-9]+")).firstMatch
+        XCTAssertTrue(footer.waitForExistence(timeout: 5))
+        let total = try XCTUnwrap(footer.label.split(separator: "/").last.flatMap { Int($0) })
+        XCTAssertGreaterThan(total, 1)
+        let next = body.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+        func waitForPage(_ number: Int) {
+            expectation(for: NSPredicate(format: "label BEGINSWITH %@", "\(number)/"), evaluatedWith: footer)
+            waitForExpectations(timeout: 5)
+        }
+        func checkChapterHeading() throws {
+            waitForPage(1)
+            let screenshot = try XCTUnwrap(body.screenshot().image.cgImage)
+            let request = VNRecognizeTextRequest()
+            request.recognitionLanguages = ["zh-Hans"]
+            request.regionOfInterest = CGRect(x: 0, y: 0.75, width: 1, height: 0.25)
+            try VNImageRequestHandler(cgImage: screenshot).perform([request])
+            let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+            XCTAssertTrue(lines.joined().filter { !$0.isWhitespace }.contains("第二章灯塔"), lines.description)
+        }
+        for number in 2...total {
+            next.tap()
+            waitForPage(number)
+        }
+        next.tap()
+        try checkChapterHeading()
+        body.swipeRight()
+        waitForPage(total)
+        next.tap()
+        try checkChapterHeading()
+        next.tap()
+        waitForPage(2)
+        body.swipeRight()
+        try checkChapterHeading()
+    }
+
     private func exercisePagedReading(mode: String, fontSize: String) throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -359,6 +417,44 @@ final class ReaderScrollGestureTests: XCTestCase {
         let previous = expectation(for: NSPredicate { _, _ in page.label.hasPrefix("1/") }, evaluatedWith: nil)
         wait(for: [previous], timeout: 5)
         XCTAssertEqual(body.value as? String, chapter)
+        attachScreenshot(app)
+    }
+
+    func testDirectoryKeepsCurrentPageAndSliderJumpsToLastChapter() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiScrollRegression", "-pageAnim", "0",
+                               "-themeMode", "1", "-tipFooterRight", "6", "-textSize", "24"]
+        app.launch()
+        let body = app.textViews["reader.text"]
+        XCTAssertTrue(body.waitForExistence(timeout: 20))
+        let pageTwo = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "2/")).firstMatch
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        XCTAssertTrue(pageTwo.waitForExistence(timeout: 5))
+        func showMenu() { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+        showMenu()
+        app.buttons["目录"].tap()
+        let currentRow = app.buttons["reader.toc.20"]
+        XCTAssertTrue(currentRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(currentRow.isHittable)
+        XCTAssertFalse(currentRow.label.contains("本章"))
+        XCTAssertLessThan(app.navigationBars["目录"].frame.minY, app.frame.height * 0.12)
+        attachScreenshot(app)
+        app.buttons["倒序"].tap()
+        XCTAssertTrue(currentRow.isHittable)
+        currentRow.tap()
+        XCTAssertTrue(pageTwo.exists)
+
+        showMenu()
+        let slider = app.sliders["reader.chapterSlider"]
+        XCTAssertTrue(slider.waitForExistence(timeout: 5))
+        slider.adjust(toNormalizedSliderPosition: 1)
+        let moved = expectation(for: NSPredicate { _, _ in
+            (body.value as? String ?? "").contains("第80章")
+        }, evaluatedWith: nil)
+        wait(for: [moved], timeout: 10)
+        XCTAssertTrue(slider.isHittable)
+        XCTAssertFalse(app.buttons["reader.returnToPosition"].exists)
         attachScreenshot(app)
     }
 
@@ -446,6 +542,31 @@ final class ReaderScrollGestureTests: XCTestCase {
         app.buttons["完成"].tap()
         waitForChapter("第五章 · 天明")
         attachScreenshot(app)
+    }
+
+    func testContinuousDirectoryJumpsToSelectedChapter() throws {
+        let (app, reader) = launchReader(shortChapters: false)
+        let start = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.72))
+        let end = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.40))
+        start.press(forDuration: 0.15, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.3)
+        func showMenu() { reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+        showMenu()
+        let origin = try value("position", in: reader)
+        XCTAssertGreaterThan(origin, 0)
+        app.buttons["目录"].tap()
+        let search = app.searchFields["搜索章节"]
+        search.tap()
+        search.typeText("70")
+        let target = app.buttons["reader.toc.69"]
+        XCTAssertTrue(target.waitForExistence(timeout: 5))
+        target.tap()
+        let moved = expectation(for: NSPredicate { _, _ in
+            (reader.value as? String ?? "").contains("chapter=69 ")
+        }, evaluatedWith: nil)
+        wait(for: [moved], timeout: 10)
+        showMenu()
+        XCTAssertTrue(app.buttons["目录"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["reader.returnToPosition"].exists)
     }
 
     func testForwardAndReverseFlicksKeepMomentumAcrossChapterInsertion() throws {

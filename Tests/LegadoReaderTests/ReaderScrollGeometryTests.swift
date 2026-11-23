@@ -44,22 +44,10 @@ final class ReaderPagingGeometryTests: XCTestCase {
         var ranges: [NSRange] = []
         var currentPage = 1
         var totalPages = 1
-        let reader = ReaderTextView(
-            text: text, title: "第一章 分页边界", previousTitle: nil, previousText: "", isPreviousReady: false,
-            continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
-            fontSize: 32, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
-            paragraphIndent: "　　", paddingLeft: 18, paddingRight: 18, paddingTop: 16, paddingBottom: 16,
-            headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
-            titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
-            fullJustify: true, pageAnimation: 4, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
-            backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
-            renderRevision: 0, readerPosition: .constant(0), pageRanges: Binding(get: { ranges }, set: { ranges = $0 }),
-            currentPage: Binding(get: { currentPage }, set: { currentPage = $0 }),
-            totalPages: Binding(get: { totalPages }, set: { totalPages = $0 }), isAutoReading: false,
-            isAutoReadPaused: false, isLoadingNextChapter: false, secondsPerScreen: 10,
-            onReachedEnd: { _ in }, onReachedStart: { _ in }, onEnteredPrevious: { _ in },
-            onEnteredContinuation: { _ in }, onDeferredRender: {}, onCancelNextLoading: {},
-            onPageChanged: {}, onTapAction: { _ in })
+        let reader = pagedReader(text: text, title: "第一章 分页边界",
+                                 ranges: Binding(get: { ranges }, set: { ranges = $0 }),
+                                 currentPage: Binding(get: { currentPage }, set: { currentPage = $0 }),
+                                 totalPages: Binding(get: { totalPages }, set: { totalPages = $0 }))
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 850))
         let host = UIHostingController(rootView: reader)
         window.rootViewController = host
@@ -67,9 +55,6 @@ final class ReaderPagingGeometryTests: XCTestCase {
         host.view.layoutIfNeeded()
         defer { window.isHidden = true }
         try await Task.sleep(nanoseconds: 100_000_000)
-        func findTextView(_ view: UIView) -> UITextView? {
-            (view as? UITextView) ?? view.subviews.lazy.compactMap(findTextView).first
-        }
         let view = try XCTUnwrap(findTextView(host.view))
         let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
         defer { coordinator.invalidate() }
@@ -99,6 +84,71 @@ final class ReaderPagingGeometryTests: XCTestCase {
         try await Task.sleep(nanoseconds: 10_000_000)
         XCTAssertEqual(currentPage, pages.count - 1)
         XCTAssertEqual(view.contentOffset.y, pages[pages.count - 2].offset, accuracy: 0.5)
+    }
+
+    func testCoverTurnKeepsNewChapterHeadingVisibleDuringReflow() async throws {
+        let text = String(repeating: "这是一段用来测试覆盖翻页的正文。\n", count: 100)
+        let first = pagedReader(text: text, title: "第一章 雨夜", animation: 0)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let host = UIHostingController(rootView: first)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        host.view.layoutIfNeeded()
+        await Task.yield()
+        let view = try XCTUnwrap(findTextView(host.view))
+        let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+        defer { coordinator.invalidate() }
+        let pages = ReaderTextPage.layout(in: view, height: view.bounds.height - 32)
+        let last = try XCTUnwrap(pages.last)
+        XCTAssertGreaterThan(last.offset, 0)
+        view.setContentOffset(CGPoint(x: 0, y: last.offset), animated: false)
+
+        var next = pagedReader(text: text, title: "第二章 灯塔", animation: 0)
+        host.rootView = next
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        XCTAssertTrue(view.text.hasPrefix(next.title))
+        // A second layout can arrive in the same run loop as the chapter change.
+        next.fontRevision += 1
+        host.rootView = next
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(view.contentOffset.y, 0, accuracy: 0.5)
+        let glyphs = view.layoutManager.glyphRange(forCharacterRange: NSRange(location: 0, length: next.title.utf16.count),
+                                                   actualCharacterRange: nil)
+        let heading = view.layoutManager.boundingRect(forGlyphRange: glyphs, in: view.textContainer)
+            .offsetBy(dx: view.textContainerInset.left, dy: view.textContainerInset.top)
+        let mask = try XCTUnwrap((view.layer.mask as? CAShapeLayer)?.path?.boundingBoxOfPath)
+        XCTAssertTrue(mask.intersection(view.bounds).contains(heading))
+    }
+
+    private func findTextView(_ view: UIView) -> UITextView? {
+        (view as? UITextView) ?? view.subviews.lazy.compactMap(findTextView).first
+    }
+
+    private func pagedReader(text: String, title: String, animation: Int = 4,
+                             ranges: Binding<[NSRange]> = .constant([]),
+                             currentPage: Binding<Int> = .constant(1),
+                             totalPages: Binding<Int> = .constant(1)) -> ReaderTextView {
+        ReaderTextView(
+            text: text, title: title, previousTitle: nil, previousText: "", isPreviousReady: false,
+            continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
+            fontSize: 32, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
+            paragraphIndent: "　　", paddingLeft: 18, paddingRight: 18, paddingTop: 16, paddingBottom: 16,
+            headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
+            titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
+            fullJustify: true, pageAnimation: animation, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
+            backgroundColor: .white, foregroundColor: .black, requestedPosition: 0, jumpPosition: nil,
+            renderRevision: 0, readerPosition: .constant(0), pageRanges: ranges,
+            currentPage: currentPage,
+            totalPages: totalPages, isAutoReading: false,
+            isAutoReadPaused: false, isLoadingNextChapter: false, secondsPerScreen: 10,
+            onReachedEnd: { _ in }, onReachedStart: { _ in }, onEnteredPrevious: { _ in },
+            onEnteredContinuation: { _ in }, onDeferredRender: {}, onCancelNextLoading: {},
+            onPageChanged: {}, onTapAction: { _ in })
     }
 }
 

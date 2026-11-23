@@ -246,7 +246,7 @@ struct FileManagementView: View {
                 Group {
                     if selecting { fileLabel(file) }
                     else if let book = book(for: file.url) {
-                        NavigationLink { BookshelfReadView(book: book, source: nil) } label: { fileLabel(file) }
+                        NavigationLink { BookshelfReadView(book: book, source: nil, coordinator: library.updateCoordinator) } label: { fileLabel(file) }
                     } else {
                         Button { Task { await model.run(library) { try await library.addLocalFile(at: file.url) } } } label: { fileLabel(file) }
                     }

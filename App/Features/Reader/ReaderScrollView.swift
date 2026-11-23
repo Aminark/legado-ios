@@ -86,7 +86,7 @@ struct ReaderScrollView: UIViewRepresentable {
         }
 
         func update(_ view: ReaderScrollCollectionView) {
-            guard !applying, view.bounds.width > 0, view.bounds.height > 0 else { return }
+            guard !parent.configuration.holdsDisplayedPage, !applying, view.bounds.width > 0, view.bounds.height > 0 else { return }
             applying = true
             defer { applying = false }
             let config = parent.configuration
@@ -95,26 +95,22 @@ struct ReaderScrollView: UIViewRepresentable {
             wasLoadingAhead = parent.loadingAhead
             wasLoadingBehind = parent.loadingBehind
             view.backgroundColor = config.backgroundColor
-            view.loadingLabel.textColor = config.foregroundColor.withAlphaComponent(0.6)
-            view.loadingLabel.text = parent.chapters.isEmpty ? "正在加载正文…"
-                : (parent.loadingAhead || parent.loadingBehind ? "正在加载后续章节…" : nil)
-            view.positionLoadingLabel()
             let reset = revision != parent.resetID
             if reset {
                 revision = parent.resetID
                 restored = false
+                view.contentInset.bottom = 0
                 jumpKey = nil
                 requestedAhead = nil
                 requestedBehind = nil
                 lastPageKey = ""
-                chapterLayouts = [:]
             }
             let anchor = reset ? nil : captureAnchor()
             let newStyleKey = config.scrollTypographyKey + "|\(view.bounds.width)"
             let styleChanged = styleKey != newStyleKey
             let contentChanged = styleChanged || viewportHeight != view.bounds.height || parent.chapters.count != chapterLayouts.count
                 || parent.chapters.contains { chapterLayouts[$0.id]?.chapter != $0 }
-            if contentChanged || reset {
+            if contentChanged {
                 let oldIDs = blocks.map(\.id)
                 var layouts: [Int: ReaderScrollChapterLayout] = [:]
                 for chapter in parent.chapters {
@@ -156,6 +152,10 @@ struct ReaderScrollView: UIViewRepresentable {
                         layout.install(frames: geometry.frames, size: geometry.size, correction: correction)
                     }
                     view.layoutIfNeeded()
+                }
+                if view.contentInset.bottom > 0 {
+                    let beyondContent = max(view.bounds.maxY - geometry.size.height, 0)
+                    view.contentInset.bottom = min(view.contentInset.bottom, beyondContent)
                 }
                 #if DEBUG
                 if wasDecelerating, !insertions.isEmpty {
@@ -208,7 +208,6 @@ struct ReaderScrollView: UIViewRepresentable {
                 awaitingDecelerationOffset = nil
             }
             #endif
-            view?.positionLoadingLabel()
             scheduleReport()
         }
 
@@ -231,7 +230,7 @@ struct ReaderScrollView: UIViewRepresentable {
         }
 
         private func reportViewport() {
-            guard let view, restored, let anchor = captureAnchor(),
+            guard !parent.configuration.holdsDisplayedPage, let view, restored, let anchor = captureAnchor(),
                   let chapter = chapterLayouts[anchor.chapter] else { return }
             parent.onPositionChanged(anchor.chapter, anchor.position)
             let config = parent.configuration
@@ -321,10 +320,13 @@ struct ReaderScrollView: UIViewRepresentable {
         private func seek(chapter: Int, position: Int, includeHeading: Bool) {
             guard let view else { return }
             let layout = view.collectionViewLayout as! ReaderContinuousLayout
-            let anchor = Anchor(chapter: chapter, position: max(position, 0), inHeading: includeHeading, screenY: 0)
+            let top = includeHeading ? 0 : CGFloat(max(parent.configuration.paddingTop, 0))
+            let anchor = Anchor(chapter: chapter, position: max(position, 0), inHeading: includeHeading, screenY: top)
             guard let y = offset(for: anchor, blocks: blocks, frames: layout.frames) else { return }
-            let maximum = max(layout.collectionViewContentSize.height - view.bounds.height, 0)
-            view.setContentOffset(CGPoint(x: 0, y: min(max(y, 0), maximum)), animated: false)
+            // The following chapter may still be loading. Give the requested line
+            // room to reach the top until the actual content fills the viewport.
+            view.contentInset.bottom = max(y + view.bounds.height - layout.collectionViewContentSize.height, 0)
+            view.setContentOffset(CGPoint(x: 0, y: max(y, 0)), animated: false)
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -355,7 +357,7 @@ struct ReaderScrollView: UIViewRepresentable {
 
         @objc private func step(_ link: CADisplayLink) {
             defer { lastTimestamp = link.timestamp }
-            guard let view, lastTimestamp > 0, parent.configuration.isAutoReading,
+            guard !parent.configuration.holdsDisplayedPage, let view, lastTimestamp > 0, parent.configuration.isAutoReading,
                   !parent.configuration.isAutoReadPaused, !view.isDragging, !view.isDecelerating else { return }
             let elapsed = min(link.timestamp - lastTimestamp, 0.1)
             let maximum = max(view.contentSize.height - view.bounds.height, 0)
@@ -372,32 +374,17 @@ struct ReaderScrollView: UIViewRepresentable {
 @MainActor
 final class ReaderScrollCollectionView: UICollectionView {
     var viewportChanged: (() -> Void)?
-    let loadingLabel = UILabel()
     private var viewportSize = CGSize.zero
-
-    override init(frame: CGRect, collectionViewLayout layout: UICollectionViewLayout) {
-        super.init(frame: frame, collectionViewLayout: layout)
-        loadingLabel.font = .systemFont(ofSize: 12)
-        loadingLabel.textAlignment = .center
-        loadingLabel.isUserInteractionEnabled = false
-        addSubview(loadingLabel)
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        positionLoadingLabel()
         if viewportSize != bounds.size {
             viewportSize = bounds.size
             viewportChanged?()
         }
     }
 
-    func positionLoadingLabel() {
-        loadingLabel.frame = CGRect(x: 0, y: bounds.maxY - 28, width: bounds.width, height: 24)
-        bringSubviewToFront(loadingLabel)
-    }
+
 }
 
 @MainActor
@@ -602,10 +589,17 @@ private final class ReaderScrollCanvas: UIView {
 
 @MainActor
 struct ReaderTypography {
+    static let defaultTitleBottomSpacing = 16.0
+    private static var lastStyle: (key: String, value: Self)?
     let bodyAttributes: [NSAttributedString.Key: Any]
     let headingAttributes: [NSAttributedString.Key: Any]
 
     init(configuration c: ReaderTextView) {
+        let key = c.scrollTypographyKey
+        if let cached = Self.lastStyle, cached.key == key {
+            self = cached.value
+            return
+        }
         let weight: UIFont.Weight = switch c.fontWeight { case 1: .bold; case 2: .light; default: .regular }
         let font = ReaderFontStore.font(at: c.fontPath, size: CGFloat(c.fontSize), weight: c.fontWeight)
             ?? (c.fontWeight == 0 ? (UIFont(name: "STSongti-SC-Regular", size: CGFloat(c.fontSize))
@@ -635,6 +629,7 @@ struct ReaderTypography {
         heading.paragraphSpacingBefore = CGFloat(c.titleTopSpacing)
         heading.paragraphSpacing = CGFloat(c.titleBottomSpacing)
         headingAttributes = [.font: headingFont, .foregroundColor: c.foregroundColor, .paragraphStyle: heading]
+        Self.lastStyle = (key, self)
     }
 }
 

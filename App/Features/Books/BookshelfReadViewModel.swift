@@ -37,9 +37,9 @@ final class BookshelfReadViewModel: ObservableObject {
             return
         }
         let stored = await updateCoordinator.storedChapters(bookURL: book.bookUrl)
-        if !stored.isEmpty, matchesReadingProgress(book, chapters: stored) {
+        if let restored = Self.restoredBook(book, chapters: stored) {
             chapters = stored
-            resolvedBook = book
+            resolvedBook = restored
             return
         }
         guard let source else {
@@ -47,7 +47,7 @@ final class BookshelfReadViewModel: ObservableObject {
             return
         }
         let report = await updateCoordinator.refresh(book: book, source: source, persistDirectory: commitUpdate == nil)
-        if report.refreshed, matchesReadingProgress(report.book, chapters: report.chapters) {
+        if report.refreshed, Self.matchesReadingProgress(report.book, chapters: report.chapters) {
             if let commitUpdate, !(await commitUpdate(report)) {
                 errorMessage = "更新后的书籍保存失败，已保留原书籍和阅读位置。"
                 return
@@ -59,10 +59,22 @@ final class BookshelfReadViewModel: ObservableObject {
         }
     }
 
-    private func matchesReadingProgress(_ book: Book, chapters: [BookChapter]) -> Bool {
-        guard book.totalChapterNum == 0 || book.totalChapterNum == chapters.count else { return false }
-        guard let title = book.durChapterTitle, !title.isEmpty else { return true }
-        return chapters.indices.contains(book.durChapterIndex)
-            && chapters[book.durChapterIndex].title == title
+    static func restoredBook(_ book: Book, chapters: [BookChapter]) -> Book? {
+        if matchesReadingProgress(book, chapters: chapters) { return book }
+        guard let title = book.durChapterTitle, !title.isEmpty else { return nil }
+        let matches = chapters.indices.filter { !chapters[$0].isVolume && chapters[$0].title == title }
+        guard matches.count == 1, let index = matches.first else { return nil }
+        var restored = book
+        restored.durChapterIndex = index
+        restored.totalChapterNum = chapters.count
+        return restored
+    }
+
+    static func matchesReadingProgress(_ book: Book, chapters: [BookChapter]) -> Bool {
+        guard chapters.indices.contains(book.durChapterIndex) else { return false }
+        if let title = book.durChapterTitle, !title.isEmpty {
+            return chapters[book.durChapterIndex].title == title
+        }
+        return book.totalChapterNum == 0 || book.totalChapterNum == chapters.count
     }
 }

@@ -144,7 +144,7 @@ struct NetworkSettingsView: View {
                         Text($0 >= 1024 ? "\($0 / 1024) GB" : "\($0) MB").tag($0)
                     }
                 }
-                Stepper(settings.prefetchChapters == 0 ? "关闭章节预加载" : "预加载 \(settings.prefetchChapters) 章", value: $settings.prefetchChapters, in: 0...20)
+                Stepper(settings.prefetchChapters == 0 ? "已关闭自动预读" : "向后自动预读 \(settings.prefetchChapters) 章", value: $settings.prefetchChapters, in: 0...20)
                 Text("超出上限时清理最久未读取的章节；容量调整在保存时生效。")
                     .font(.footnote).foregroundStyle(.secondary)
             }

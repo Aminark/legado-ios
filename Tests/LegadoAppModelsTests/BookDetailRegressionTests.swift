@@ -5,6 +5,33 @@ import LegadoCore
 
 @MainActor
 struct BookDetailRegressionTests {
+    @Test func shelvedSearchResultUsesStoredDirectoryUntilExplicitRefresh() async throws {
+        var source = BookSource(bookSourceUrl: "https://detail-regression.test", bookSourceName: "源")
+        var info = BookInfoRule()
+        info.tocUrl = "@CSS:a.toc@href"
+        source.ruleBookInfo = info
+        var toc = TocRule()
+        toc.chapterList = "@CSS:li"
+        toc.chapterName = "@CSS:a@text"
+        toc.chapterUrl = "@CSS:a@href"
+        source.ruleToc = toc
+        let search = SearchBook(bookURL: source.id + "/book", origin: source.id, originName: "源", type: 0, name: "书")
+        let book = Book(bookUrl: search.bookURL, name: search.name, origin: source.id)
+        let chapters = [BookChapter(url: source.id + "/1", title: "第一章", bookUrl: book.bookUrl, index: 0)]
+        let directory = InMemoryBookChapterRepository()
+        await directory.save(chapters, bookURL: book.bookUrl)
+        let transport = CountingDetailTransport()
+        let model = BookDetailViewModel(searchBook: search, source: source, service: .init(transport: transport),
+                                        chapterRepository: directory)
+        model.restoreLibraryBook(from: book)
+        await model.load()
+        #expect(model.chapters == chapters)
+        #expect(await transport.requestedPaths.isEmpty)
+        await model.refresh()
+        #expect(model.chapters.count == 2)
+        #expect(await transport.requestedPaths.contains("/toc"))
+    }
+
     @Test(arguments: [false, true]) func changedBookAddressIsPublishedOnlyAfterSuccessfulShelfCommit(succeeds: Bool) async {
         var source = BookSource(bookSourceUrl: "https://detail-regression.test", bookSourceName: "源")
         var info = BookInfoRule(); info.tocUrl = "@CSS:a.toc@href"; source.ruleBookInfo = info

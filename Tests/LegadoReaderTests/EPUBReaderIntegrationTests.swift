@@ -41,6 +41,8 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         var saved = report.book
         saved.readConfig?.epubLocation = locator.jsonString
         saved.durChapterIndex = try XCTUnwrap(model.currentChapter).index
+        await model.go(toProgress: 0)
+        try await waitForLocation("cover.xhtml", in: model)
         let restored = EPUBReaderModel(book: saved, chapters: report.chapters, initialIndex: saved.durChapterIndex)
         await restored.open(preferences: .init(fontSize: 1.4, publisherStyles: true))
         let reopened = try XCTUnwrap(restored.navigator)
@@ -91,6 +93,7 @@ final class EPUBReaderIntegrationTests: XCTestCase {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         XCTAssertEqual(model.currentChapter?.startFragmentId, "body")
+
     }
 
     private func waitForLocation(_ path: String, in model: EPUBReaderModel) async throws {

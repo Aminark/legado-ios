@@ -25,6 +25,8 @@ final class BookDetailViewModel: ObservableObject {
     private let sourceSwitchService: BookSourceSwitchService
     private var cacheTask: Task<Void, Never>?
     private var loadGeneration = 0
+    private var restoredShelfBook = false
+    private(set) var usedStoredDirectory = false
 
     init(
         searchBook: SearchBook,
@@ -87,18 +89,23 @@ final class BookDetailViewModel: ObservableObject {
         cacheTotal = chapters.filter { !$0.isVolume }.count
     }
 
-    func load(sources: [BookSource] = [], persistDirectory: Bool = true, runPreUpdateScript: Bool? = nil,
+    func load(sources: [BookSource] = [], persistDirectory: Bool = true, runPreUpdateScript: Bool? = nil, forceRefresh: Bool = false,
               commitSourceSwitch: SourceSwitchCommit? = nil, commitPreparedUpdate: PreparedUpdateCommit? = nil) async {
         guard state == .idle else { return }
         loadGeneration &+= 1
         let generation = loadGeneration
         state = .loading
-        if searchBook == nil {
+        usedStoredDirectory = false
+        if searchBook == nil || restoredShelfBook {
             let stored = await updateCoordinator.storedChapters(bookURL: book.bookUrl)
             guard acceptsLoad(generation) else { return }
             if !stored.isEmpty {
                 chapters = stored
                 state = .ready
+                if !forceRefresh, BookshelfReadViewModel.matchesReadingProgress(book, chapters: stored) {
+                    usedStoredDirectory = true
+                    return
+                }
             }
         }
         if let searchBook {
@@ -199,6 +206,7 @@ final class BookDetailViewModel: ObservableObject {
             source = resolved
             searchBook = nil
         }
+        restoredShelfBook = stored.origin == source.id
         book = stored
         book.origin = source.id
         book.originName = source.bookSourceName
@@ -250,7 +258,7 @@ final class BookDetailViewModel: ObservableObject {
         chapters = []
         diagnostics = []
         state = .idle
-        await load(sources: sources, persistDirectory: persistDirectory, runPreUpdateScript: true,
+        await load(sources: sources, persistDirectory: persistDirectory, runPreUpdateScript: true, forceRefresh: true,
                    commitSourceSwitch: commitSourceSwitch, commitPreparedUpdate: commitPreparedUpdate)
     }
 
