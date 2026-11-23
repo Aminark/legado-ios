@@ -4,7 +4,8 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct ReaderView: View {
-    private var usesEPUBLayout = true
+    @AppStorage(EPUBReadingMode.preferenceKey) private var defaultEPUBMode = EPUBReadingMode.original
+    @State private var sessionEPUBMode: EPUBReadingMode?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -73,6 +74,7 @@ struct ReaderView: View {
     @AppStorage("paddingBottom") private var paddingBottom = 6.0
     @AppStorage("textBold") private var fontWeight = 0
     @AppStorage("textFont") private var fontPath = ""
+    @AppStorage("readerFontRevision") private var fontRevision = 0
     @AppStorage("titleMode") private var titleMode = 0
     @AppStorage("titleSize") private var titleSize = 0.0
     @AppStorage("titleTopSpacing") private var titleTopSpacing = 0.0
@@ -142,8 +144,7 @@ struct ReaderView: View {
         ))
     }
 
-    init(book: Book, chapters: [BookChapter], initialIndex: Int, usesEPUBLayout: Bool = true) {
-        self.usesEPUBLayout = usesEPUBLayout
+    init(book: Book, chapters: [BookChapter], initialIndex: Int) {
         _pageAnimation = State(initialValue: book.readConfig?.pageAnim.flatMap { $0 >= 0 ? $0 : nil }
             ?? Self.globalPageAnimation())
         _model = StateObject(wrappedValue: ReaderViewModel(
@@ -205,9 +206,17 @@ struct ReaderView: View {
     }
 
 
+    private var isLocalEPUB: Bool {
+        book.origin == "local" && URL(string: book.bookUrl)?.pathExtension.lowercased() == "epub"
+    }
+
     var body: some View {
-        if usesEPUBLayout, book.origin == "local", URL(string: book.bookUrl)?.pathExtension.lowercased() == "epub" {
-            EPUBReaderView(book: book, chapters: model.chapters, initialIndex: model.currentIndex)
+        if isLocalEPUB, (sessionEPUBMode ?? defaultEPUBMode) == .original {
+            EPUBReaderView(book: book, chapters: model.chapters, initialIndex: model.currentIndex,
+                           restoresSavedLocation: sessionEPUBMode == nil) { chapterIndex in
+                model.select(index: chapterIndex)
+                sessionEPUBMode = .text
+            }
         } else {
             textReaderBody
         }
@@ -271,7 +280,7 @@ struct ReaderView: View {
             if speech.isSpeaking || speech.isPaused { speech.toggle(text: "") }
             saveProgress(immediate: true)
             ReaderScreenOrientation.restoreApplicationDefault()
-            activity.cancelReading(book)
+            if sessionEPUBMode != .original { activity.cancelReading(book) }
             UIDevice.current.isBatteryMonitoringEnabled = false
             if !followsSystemBrightness {
                 UIScreen.main.brightness = CGFloat(brightnessBeforeReading)
@@ -645,6 +654,7 @@ struct ReaderView: View {
             isVolume: model.currentChapter?.isVolume == true,
             fontSize: fontSize,
             fontPath: fontPath,
+            fontRevision: fontRevision,
             letterSpacing: letterSpacing,
             lineSpacing: lineSpacing,
             paragraphSpacing: paragraphSpacing,
@@ -943,7 +953,11 @@ struct ReaderView: View {
                 showsReaderMenu = false
                 showsContentSearch = true
             }
-            if book.origin == "local", URL(string: book.bookUrl)?.pathExtension.lowercased() == "epub" {
+            if isLocalEPUB {
+                Button(EPUBReadingMode.original.title, systemImage: "book") {
+                    showsReaderMenu = false
+                    sessionEPUBMode = .original
+                }
                 Button("本章插图", systemImage: "photo.on.rectangle") {
                     showsReaderMenu = false
                     illustrationChapter = model.currentChapter
@@ -1485,18 +1499,19 @@ struct ReaderView: View {
         } onError: { error in
             backgroundError = error.localizedDescription
         }
-        .fileImporter(
-            isPresented: $showsFontImporter,
-            allowedContentTypes: [.font, .data],
-            allowsMultipleSelection: false
-        ) { result in
-            fontError = nil
-            do {
-                guard let source = try result.get().first else { return }
-                fontPath = try ReaderFontStore.install(from: source)
-            } catch {
-                fontError = error.localizedDescription
-            }
+        .sheet(isPresented: $showsFontImporter) {
+            // Some Files providers report fonts as generic data. The installer validates the font itself.
+            ReadingImportPicker(contentTypes: [.font, .data], allowsMultipleSelection: false) { urls in
+                showsFontImporter = false
+                guard let source = urls.first else { return }
+                do {
+                    fontPath = try ReaderFontStore.install(from: source)
+                    fontRevision &+= 1
+                    fontError = nil
+                } catch {
+                    fontError = error.localizedDescription
+                }
+            } onCancel: { showsFontImporter = false }
         }
         .readingPresentationDetents([.medium])
         .readingPresentationDragIndicator()

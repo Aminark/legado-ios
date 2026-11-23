@@ -6,6 +6,29 @@ import XCTest
 
 @MainActor
 final class ReaderFontStoreTests: XCTestCase {
+    func testSameFilenameUsesNewFontAndLegacyContainerPathStillLoads() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent(UUID().uuidString + ".ttf")
+        let file = ReaderFontStore.directory.appendingPathComponent(source.lastPathComponent)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: file)
+        }
+        let bundle = try XCTUnwrap(Bundle.main.url(forResource: "Readium_ReadiumNavigator", withExtension: "bundle"))
+        let assets = bundle.appendingPathComponent("Assets/Static")
+        let oldPath = "/previous-container/Library/Application Support/Legado/fonts/" + source.lastPathComponent
+        var names: [String] = []
+        for sample in ["readium-css/fonts/iAWriterDuospace-Regular.ttf", "fonts/OpenDyslexic-Regular.otf"] {
+            try Data(contentsOf: assets.appendingPathComponent(sample)).write(to: source)
+            let key = try ReaderFontStore.install(from: source)
+            let font = try XCTUnwrap(ReaderFontStore.font(at: key, size: 20, weight: 0))
+            names.append(font.fontName)
+            XCTAssertEqual(ReaderFontStore.font(at: oldPath, size: 20, weight: 0)?.fontName, font.fontName)
+        }
+        XCTAssertNotEqual(names.first, names.last)
+    }
+
     func testInvalidFontDoesNotOverwriteExistingFileOrLeaveNewFile() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

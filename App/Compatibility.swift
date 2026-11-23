@@ -219,8 +219,9 @@ private struct ReadingLocalBookFileImporterModifier: ViewModifier {
             pickerHasDismissed = true
             deliverFilesWhenReady()
         }) {
-            ReadingLocalBookFilePicker { files in
-                pickedFiles = files
+            let epub = UTType(filenameExtension: "epub") ?? UTType(importedAs: "org.idpf.epub-container")
+            ReadingImportPicker(contentTypes: [.plainText, epub], allowsMultipleSelection: true) { urls in
+                pickedFiles = urls.map { LocalBookImportFile(url: $0) }
                 isPresented = false
                 deliverFilesWhenReady()
             } onCancel: {
@@ -247,17 +248,17 @@ private struct ReadingLocalBookFileImporterModifier: ViewModifier {
     }
 }
 
-private struct ReadingLocalBookFilePicker: UIViewControllerRepresentable {
-    let onPick: @MainActor ([LocalBookImportFile]) -> Void
+struct ReadingImportPicker: UIViewControllerRepresentable {
+    let contentTypes: [UTType]
+    let allowsMultipleSelection: Bool
+    let onPick: @MainActor ([URL]) -> Void
     let onCancel: @MainActor () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // Keep source JSON out of the local-book picker.
-        let epub = UTType(filenameExtension: "epub") ?? UTType(importedAs: "org.idpf.epub-container")
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.plainText, epub], asCopy: true)
-        picker.allowsMultipleSelection = true
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: true)
+        picker.allowsMultipleSelection = allowsMultipleSelection
         picker.shouldShowFileExtensions = true
         picker.delegate = context.coordinator
         return picker
@@ -267,14 +268,14 @@ private struct ReadingLocalBookFilePicker: UIViewControllerRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        let parent: ReadingLocalBookFilePicker
+        let parent: ReadingImportPicker
 
-        init(parent: ReadingLocalBookFilePicker) { self.parent = parent }
+        init(parent: ReadingImportPicker) { self.parent = parent }
 
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { parent.onCancel() }
 
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            parent.onPick(urls.map { LocalBookImportFile(url: $0) })
+            parent.onPick(urls)
         }
     }
 }

@@ -194,7 +194,7 @@ final class ReaderScrollGestureTests: XCTestCase {
         continueAfterFailure = false
         let app = launchAppearance()
         for _ in 0..<2 {
-            let choose = app.buttons["选择字体文件"]
+            let choose = app.buttons.matching(NSPredicate(format: "label IN %@", ["选择字体文件", "更换字体文件"])).firstMatch
             scrollToAppearanceElement(choose, in: app)
             XCTAssertTrue(app.staticTexts["段落缩进"].exists)
             choose.tap()
@@ -205,6 +205,35 @@ final class ReaderScrollGestureTests: XCTestCase {
             cancel.tap()
             XCTAssertTrue(app.navigationBars["阅读样式"].waitForExistence(timeout: 5))
         }
+    }
+
+    func testFontPickerInstallsSelectedTrueTypeFile() {
+        continueAfterFailure = false
+        let app = launchAppearance()
+        let choose = app.buttons.matching(NSPredicate(format: "label IN %@", ["选择字体文件", "更换字体文件"])).firstMatch
+        scrollToAppearanceElement(choose, in: app)
+        if choose.label == "更换字体文件" {
+            let reset = app.buttons["恢复默认字体"]
+            scrollToAppearanceElement(reset, in: app)
+            reset.tap()
+        }
+        XCTAssertEqual(choose.label, "选择字体文件")
+        choose.tap()
+        openImportFixtureFolder(in: app)
+        let font = app.collectionViews["File View"].cells.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Reader-Test")
+        ).firstMatch
+        XCTAssertTrue(font.waitForExistence(timeout: 5))
+        XCTAssertTrue(font.isEnabled)
+        font.tap()
+        XCTAssertTrue(app.buttons["更换字体文件"].waitForExistence(timeout: 10))
+        let installed = app.staticTexts["Reader-Test.ttf"]
+        scrollToAppearanceElement(installed, in: app)
+        XCTAssertTrue(installed.isHittable)
+        let reset = app.buttons["恢复默认字体"]
+        scrollToAppearanceElement(reset, in: app)
+        reset.tap()
+        XCTAssertEqual(choose.label, "选择字体文件")
     }
 
     func testBookmarkSelectionSurvivesLeavingAndReenteringReader() throws {
@@ -236,7 +265,7 @@ final class ReaderScrollGestureTests: XCTestCase {
 
     private func launchAppearance(readingMode: String = "0", usesLegacyUI: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiDemoReaderStyle", "-pageAnim", readingMode, "-themeMode", "1", "-textFont", ""]
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiDemoReaderStyle", "-pageAnim", readingMode, "-themeMode", "1"]
         if usesLegacyUI { app.launchArguments.append("-uiLegacyCompatibility") }
         app.launch()
         XCTAssertTrue(app.navigationBars["阅读样式"].waitForExistence(timeout: 20))
