@@ -7,6 +7,28 @@ struct SourceLoginView: View {
     @State private var reloadID = UUID()
     @State private var status = "打开登录页后，Cookie 会自动同步给搜索与阅读请求。"
     @State private var isChecking = false
+    @State private var isFinishing = false
+    @State private var actionRequest: URLRequest?
+    @State private var actions: [LoginAction] = []
+    @State private var values: [String: JSONValue] = [:]
+
+    private var loginScript: String? {
+        let rule = source.loginUrl?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if rule.lowercased().hasPrefix("@js:") { return String(rule.dropFirst(4)) }
+        if rule.lowercased().hasPrefix("<js>"), rule.lowercased().hasSuffix("</js>") {
+            return String(rule.dropFirst(4).dropLast(5))
+        }
+        return nil
+    }
+
+    private struct LoginAction: Identifiable {
+        var id: String { name }
+        let name: String
+        let type: String
+        let script: String?
+        let choices: [String]
+        let initial: String
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,7 +41,7 @@ struct SourceLoginView: View {
             .padding(.horizontal, 14).padding(.vertical, 10)
             .background(Color(uiColor: .secondarySystemBackground))
 
-            if let request = loginRequest {
+            if let request = actionRequest ?? loginRequest {
                 SourceLoginWebView(
                     request: request,
                     sourceURL: source.bookSourceUrl,
@@ -29,21 +51,114 @@ struct SourceLoginView: View {
                     status: $status,
                     isChecking: $isChecking
                 )
+                .id(request.url)
+            } else if loginScript != nil {
+                Form {
+                    ForEach(actions) { action in
+                        if action.type == "button", let script = action.script {
+                            Button(action.name) { Task { await runAction(script) } }
+                        } else if action.type == "toggle", !action.choices.isEmpty {
+                            Picker(action.name, selection: binding(for: action)) {
+                                ForEach(action.choices, id: \.self) { Text($0).tag($0) }
+                            }
+                        } else if action.type == "text" {
+                            TextField(action.name, text: binding(for: action))
+                        }
+                    }
+                }
+                .disabled(isChecking || isFinishing)
             } else {
                 ReadingUnavailableView("登录地址无效", systemImage: "link.badge.plus", description: Text(source.loginUrl ?? "书源没有配置登录地址"))
             }
         }
+        .task { await loadActions() }
         .navigationTitle("登录 · \(source.bookSourceName)")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("重新载入", systemImage: "arrow.clockwise") { reloadID = UUID() }
+                if actionRequest != nil {
+                    Button("完成") { Task { await finishAction() } }
+                        .disabled(isFinishing)
+                } else {
+                    Button("重新载入", systemImage: "arrow.clockwise") { reloadID = UUID() }
+                }
             }
         }
     }
 
+    private func binding(for action: LoginAction) -> Binding<String> {
+        Binding(get: { values[action.name]?.stringValue ?? action.initial }, set: { value in
+            values[action.name] = .string(value)
+            if let script = action.script {
+                Task { await runAction(script) }
+            } else {
+                BookSourceRuntimeStore.shared.put(sourceID: source.bookSourceUrl, key: action.name, value: value)
+            }
+        })
+    }
+
+    private func loadActions() async {
+        guard loginScript != nil, let layout = source.loginUi, actions.isEmpty else { return }
+        do {
+            let output = try await JavaScriptRuleEvaluator().evaluateAsync(
+                script: "(" + layout + ")", result: .null,
+                executionContext: .init(baseURL: source.bookSourceUrl, source: source)
+            )
+            guard case .array(let rows) = output.value else { return }
+            actions = rows.compactMap { row in
+                guard case .object(let fields) = row, let name = fields["name"]?.stringValue else { return nil }
+                var choices: [String] = []
+                if case .array(let chars) = fields["chars"] { choices = chars.map(\.stringValue) }
+                return LoginAction(name: name, type: fields["type"]?.stringValue ?? "",
+                                   script: fields["action"]?.stringValue, choices: choices,
+                                   initial: fields["default"]?.stringValue ?? choices.first ?? "")
+            }
+            for action in actions where values[action.name] == nil {
+                let stored = BookSourceRuntimeStore.shared.get(sourceID: source.bookSourceUrl, key: action.name)
+                values[action.name] = .string(stored.isEmpty ? action.initial : stored)
+            }
+        } catch {
+            status = "无法加载书源登录界面"
+        }
+    }
+
+    private func runAction(_ action: String) async {
+        guard let loginScript, !isChecking else { return }
+        isChecking = true
+        defer { isChecking = false }
+        let browser = LoginBrowserRequest()
+        do {
+            _ = try await JavaScriptRuleEvaluator().evaluateSourceAction(
+                script: loginScript + "\n" + action, result: .object(values), source: source,
+                requestBrowser: browser.open
+            )
+            if let request = browser.request { actionRequest = request }
+        } catch {
+            status = "书源登录操作执行失败"
+        }
+    }
+
+    private func finishAction() async {
+        guard actionRequest != nil, !isFinishing else { return }
+        isFinishing = true
+        defer { isFinishing = false }
+        let cookies: [HTTPCookie] = await withCheckedContinuation { continuation in
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies {
+                continuation.resume(returning: $0)
+            }
+        }
+        cookies.forEach(HTTPCookieStorage.shared.setCookie)
+        if let url = URL(string: source.bookSourceUrl) {
+            let matching = HTTPCookieStorage.shared.cookies(for: url) ?? []
+            let header = HTTPCookie.requestHeaderFields(with: matching)["Cookie"] ?? ""
+            await SourceNetworkPolicy.shared.setCookieHeader(header, sourceID: source.id, url: url)
+        }
+        actionRequest = nil
+        await runAction("if (typeof login === 'function') login();")
+    }
+
     private var loginRequest: URLRequest? {
-        guard let value = source.loginUrl,
+        guard loginScript == nil, let value = source.loginUrl,
               let prepared = try? LegadoURLBuilder().prepare(
                 value,
                 baseURL: URL(string: source.bookSourceUrl),
@@ -57,6 +172,24 @@ struct SourceLoginView: View {
               let data = value.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
         return object.mapValues { String(describing: $0) }
+    }
+}
+
+private final class LoginBrowserRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: URLRequest?
+
+    var request: URLRequest? { lock.withLock { pending } }
+
+    func open(_ address: String, _: String) -> Bool {
+        guard let url = URL(string: address), let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme), url.host != nil,
+              url.user == nil, url.password == nil else { return false }
+        return lock.withLock {
+            guard pending == nil else { return false }
+            pending = URLRequest(url: url)
+            return true
+        }
     }
 }
 
@@ -74,6 +207,7 @@ private struct SourceLoginWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.applicationNameForUserAgent = "Legado/iOS"
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.backgroundColor = UIColor(ReadingTheme.canvas)
