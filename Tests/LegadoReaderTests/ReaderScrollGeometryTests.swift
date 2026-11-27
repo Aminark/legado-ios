@@ -153,7 +153,8 @@ final class ReaderPagingGeometryTests: XCTestCase {
         host.rootView = next
         host.view.setNeedsLayout()
         host.view.layoutIfNeeded()
-        XCTAssertTrue(view.text.hasPrefix(next.title))
+        let headingLoaded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in view.text.hasPrefix(next.title) }, object: nil)
+        await fulfillment(of: [headingLoaded], timeout: 3)
         // A second layout can arrive in the same run loop as the chapter change.
         next.fontRevision += 1
         host.rootView = next

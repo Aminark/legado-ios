@@ -175,6 +175,9 @@ private struct ScriptBrowser: UIViewControllerRepresentable {
             title = page.title
             navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self,
                                                                 action: #selector(done))
+            browser.isOpaque = false
+            browser.backgroundColor = ReadingTheme.canvasColor
+            browser.scrollView.backgroundColor = ReadingTheme.canvasColor
             browser.navigationDelegate = self
             browser.uiDelegate = self
             Task {

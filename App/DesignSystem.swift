@@ -176,14 +176,19 @@ enum ReadingTheme {
     static let coral = Color(red: 0.76, green: 0.48, blue: 0.27)
     static let paper = Color(red: 0.965, green: 0.945, blue: 0.895)
     static let ink = Color.primary
-    static let canvas = adaptive(0xFCFCFC, dark: 0x111113)
+    static let canvasColor = adaptiveUIColor(0xFCFCFC, dark: 0x111113)
+    static let canvas = Color(uiColor: canvasColor)
     static let groupedCanvas = adaptive(0xF3F3F4, dark: 0x1C1C1F)
     static let surface = adaptive(0xFFFFFF, dark: 0x232326)
     static let separator = adaptive(0xE6E6E8, dark: 0x363639)
     static let onAccent = Color.white
 
     private static func adaptive(_ light: UInt32, dark: UInt32) -> Color {
-        Color(uiColor: UIColor { traits in
+        Color(uiColor: adaptiveUIColor(light, dark: dark))
+    }
+
+    private static func adaptiveUIColor(_ light: UInt32, dark: UInt32) -> UIColor {
+        UIColor { traits in
             let hex = traits.userInterfaceStyle == .dark ? dark : light
             return UIColor(
                 red: CGFloat((hex >> 16) & 0xff) / 255,
@@ -191,7 +196,7 @@ enum ReadingTheme {
                 blue: CGFloat(hex & 0xff) / 255,
                 alpha: 1
             )
-        })
+        }
     }
 }
 

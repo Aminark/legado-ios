@@ -88,8 +88,8 @@ private struct SourceLoginWebView: UIViewRepresentable {
         configuration.websiteDataStore = .nonPersistent()
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
-        webView.backgroundColor = UIColor(ReadingTheme.canvas)
-        webView.scrollView.backgroundColor = UIColor(ReadingTheme.canvas)
+        webView.backgroundColor = ReadingTheme.canvasColor
+        webView.scrollView.backgroundColor = ReadingTheme.canvasColor
         webView.navigationDelegate = context.coordinator
         context.coordinator.installExistingCookies(in: webView) { webView.load(request) }
         return webView
