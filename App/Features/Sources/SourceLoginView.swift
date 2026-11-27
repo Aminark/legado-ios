@@ -1,6 +1,28 @@
+import SafariServices
 @preconcurrency import WebKit
 import SwiftUI
 import UIKit
+
+struct ReadingWebBrowser: UIViewControllerRepresentable {
+    let url: URL
+    let close: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(close: close) }
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let controller = SFSafariViewController(url: url)
+        controller.delegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
+
+    final class Coordinator: NSObject, SFSafariViewControllerDelegate {
+        let close: () -> Void
+        init(close: @escaping () -> Void) { self.close = close }
+        func safariViewControllerDidFinish(_ controller: SFSafariViewController) { close() }
+    }
+}
 
 struct SourceLoginView: View {
     let source: BookSource

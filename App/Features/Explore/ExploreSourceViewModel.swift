@@ -6,10 +6,18 @@ import LegadoCore
 
 @MainActor
 final class ExploreSourceViewModel: ObservableObject {
-    enum State: Equatable { case idle, loading, ready, empty, failed }
+    enum State: Equatable { case idle, loading, choosingKind, ready, empty, failed }
+
+    struct KindSection {
+        var title: String?
+        var kinds: [ExploreKind] = []
+    }
 
     let source: BookSource
-    @Published private(set) var kinds: [ExploreKind] = []
+    let pixivWebsite: PixivDiscoveryWebsite?
+    @Published private(set) var sections: [KindSection] = []
+    var kinds: [ExploreKind] { sections.flatMap(\.kinds) }
+    var hasKindMenu: Bool { pixivWebsite != nil || (kinds.count > 1 && sections.contains { $0.title != nil }) }
     @Published private(set) var selectedKind: ExploreKind?
     @Published private(set) var books: [SearchBook] = []
     @Published private(set) var diagnostics: [RuleDiagnostic] = []
@@ -26,6 +34,7 @@ final class ExploreSourceViewModel: ObservableObject {
 
     init(source: BookSource, service: BookExploreService = .init(), demoBooks: [SearchBook]? = nil) {
         self.source = source
+        pixivWebsite = PixivDiscoveryWebsite(source: source)
         self.service = service
         self.demoBooks = demoBooks
     }
@@ -40,7 +49,7 @@ final class ExploreSourceViewModel: ObservableObject {
     func reload() async {
         let requestID = beginRequest()
         selectedKind = nil
-        kinds = []
+        sections = []
         books = []
         diagnostics = []
         page = 1
@@ -50,13 +59,32 @@ final class ExploreSourceViewModel: ObservableObject {
         let report = await service.kinds(for: source)
         guard generation == requestID else { return }
         guard !Task.isCancelled else { state = .idle; return }
-        kinds = report.kinds.filter { $0.navigableURL != nil }
+        var groups = [KindSection()]
+        for kind in report.kinds {
+            if kind.navigableURL != nil {
+                groups[groups.count - 1].kinds.append(kind)
+            } else if kind.type.lowercased() == "url", !kind.title.isEmpty {
+                groups.append(KindSection(title: kind.title))
+            }
+        }
+        sections = groups.filter { !$0.kinds.isEmpty }
         diagnostics = report.diagnostics
         guard let first = kinds.first else {
             state = diagnostics.contains(where: { $0.severity == .error }) ? .failed : .empty
             return
         }
-        await select(kind: first)
+        if hasKindMenu {
+            state = .choosingKind
+        } else {
+            await select(kind: first)
+        }
+    }
+
+    func showKindMenu() {
+        _ = beginRequest()
+        selectedKind = nil
+        books = []
+        state = .choosingKind
     }
 
     func select(kind: ExploreKind) async {

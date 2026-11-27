@@ -5,6 +5,35 @@ import LegadoCore
 
 @MainActor
 struct ExploreRegressionTests {
+    @Test func groupedSourceOpensItsMenuBeforeRequestingABookList() async throws {
+        actor MenuTransport: HTTPTransport {
+            var urls: [URL] = []
+            func data(for request: URLRequest) async throws -> HTTPResponse {
+                let url = try #require(request.url)
+                urls.append(url)
+                return .init(data: Data(#"{"books":[{"name":"本周作品","url":"/novel"}]}"#.utf8),
+                             statusCode: 200, headers: [:], finalURL: url)
+            }
+        }
+        let transport = MenuTransport()
+        var source = BookSource(bookSourceUrl: "https://explore-model.test", bookSourceName: "分组发现")
+        source.exploreUrl = #"@js:JSON.stringify([{title:'关注',url:'/a?page={{page}}'},{title:'榜单',url:''},{title:'本周',url:'/b?page={{page}}'}])"#
+        source.ruleExplore = .init(bookList: "$.books", name: "$.name", bookUrl: "$.url")
+        let model = ExploreSourceViewModel(source: source, service: .init(transport: transport, networkPolicy: .init()))
+
+        await model.load()
+        #expect(model.state == .choosingKind)
+        #expect(model.sections.map(\.title) == [nil, "榜单"])
+        #expect(await transport.urls.isEmpty)
+        let kind = try #require(model.kinds.last)
+        await model.select(kind: kind)
+        #expect(await transport.urls.map(\.absoluteString) == ["https://explore-model.test/b?page=1"])
+        #expect(model.books.map(\.name) == ["本周作品"])
+        model.showKindMenu()
+        #expect(model.state == .choosingKind)
+        #expect(model.selectedKind == nil)
+    }
+
     @Test func failedPageCanBeRetriedWithoutDroppingResultsOrSkippingThePage() async throws {
         let transport = ControlledExploreTransport()
         defer { Task { await transport.cancelAll() } }

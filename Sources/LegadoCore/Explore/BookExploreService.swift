@@ -27,29 +27,25 @@ public struct BookExploreService: Sendable {
         var diagnostics: [RuleDiagnostic] = []
         let rendered: String
         if rule.lowercased().hasPrefix("@js:") || rule.lowercased().hasPrefix("<js>") {
-            let result = await engine.evaluate(
-                rule,
-                in: .null,
-                context: .init(source: source)
-            )
-            diagnostics += result.diagnostics
-            rendered = result.firstString ?? ""
+            var context = RuleExecutionContext(baseURL: source.bookSourceUrl, source: source)
+            context.isGeneratingExploreKinds = true
+            let result = await engine.evaluate(rule, in: .null, context: context)
+            diagnostics = result.diagnostics
+            rendered = result.values.first?.stringValue ?? ""
         } else {
             rendered = rule
         }
         do {
             return .init(kinds: try parseKinds(rendered), diagnostics: diagnostics)
         } catch let error as RuleEngineError {
-            diagnostics.append(error.diagnostic)
-            return .init(diagnostics: diagnostics)
+            return .init(diagnostics: diagnostics + [error.diagnostic])
         } catch {
-            diagnostics.append(.init(
+            return .init(diagnostics: diagnostics + [.init(
                 severity: .error,
                 code: "explore.kinds",
                 message: error.localizedDescription,
                 rule: rule
-            ))
-            return .init(diagnostics: diagnostics)
+            )])
         }
     }
 

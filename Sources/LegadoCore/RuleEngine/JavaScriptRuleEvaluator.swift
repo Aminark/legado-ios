@@ -7,6 +7,7 @@ import SwiftSoup
 public struct RuleExecutionContext: Sendable {
     var nestedRuleDepth = 0
     var replacesEachListItem = false
+    var isGeneratingExploreKinds = false
     var cancellation: RuleExecutionCancellation?
 
     func checkCancellation() throws {
@@ -720,6 +721,17 @@ public struct JavaScriptRuleEvaluator: Sendable {
             return authentication.map { Int(Int8(bitPattern: $0)) }
         }
         let formURLEncode: @convention(block) (String) -> String = { Self.formURLEncode($0) }
+        var remainingSleepMilliseconds = 5_000.0
+        let sleep: @convention(block) (Double) -> Void = { [weak context] milliseconds in
+            guard milliseconds > 0 else { return }
+            guard !Thread.isMainThread, milliseconds <= remainingSleepMilliseconds else {
+                context?.exception = JSValue(newErrorFromMessage: "脚本等待时间超过上限", in: context)
+                return
+            }
+            remainingSleepMilliseconds -= milliseconds
+            Thread.sleep(forTimeInterval: milliseconds / 1_000)
+        }
+        context.setObject(sleep, forKeyedSubscript: "__legadoSleep" as NSString)
         context.setObject(utf8Bytes, forKeyedSubscript: "__legadoUTF8Bytes" as NSString)
         context.setObject(utf8String, forKeyedSubscript: "__legadoUTF8String" as NSString)
         context.setObject(aes, forKeyedSubscript: "__legadoAES" as NSString)
@@ -960,6 +972,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         java?.setObject(logValue, forKeyedSubscript: "log" as NSString)
         java?.setObject(logValue, forKeyedSubscript: "logType" as NSString)
         java?.setObject(logValue, forKeyedSubscript: "toast" as NSString)
+        java?.setObject(logValue, forKeyedSubscript: "longToast" as NSString)
         java?.setObject(urlEncode, forKeyedSubscript: "encodeURI" as NSString)
         java?.setObject(getCookieHeader, forKeyedSubscript: "getCookieHeader" as NSString)
         java?.setObject(getCookieValue, forKeyedSubscript: "__getCookieValue" as NSString)
@@ -1876,7 +1889,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
               crypto: { Mac: Mac, Cipher: Cipher, spec: { SecretKeySpec: SecretKeySpec, IvParameterSpec: IvParameterSpec } },
               xml: { bind: { DatatypeConverter: DatatypeConverter } }
             },
-            java: { net: { URLEncoder: URLEncoder }, lang: { String: JavaString }, util: { Base64: Base64, Arrays: Arrays } },
+            java: { net: { URLEncoder: URLEncoder }, lang: { String: JavaString, Thread: javaClass('Thread', { sleep: __legadoSleep }) }, util: { Base64: Base64, Arrays: Arrays } },
             android: { util: { Base64: Base64 } }
           };
           Object.freeze(packages.javax.crypto.spec);

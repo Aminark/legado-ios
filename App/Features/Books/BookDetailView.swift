@@ -7,6 +7,7 @@ struct BookDetailView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @StateObject private var model: BookDetailViewModel
     @State private var showsSourceSwitch = false
+    @State private var showsPixivLogin = false
     @State private var showsRemoveConfirmation = false
     @State private var showsTableOfContents = false
     @State private var warmedReader: ReaderViewModel?
@@ -72,7 +73,9 @@ struct BookDetailView: View {
                             }
                         }
                     }
-                    if model.source.offersLogin {
+                    if PixivDiscoveryWebsite(source: model.source) != nil {
+                        Button("登录 Pixiv", systemImage: "person.badge.key") { showsPixivLogin = true }
+                    } else if model.source.offersLogin {
                         NavigationLink {
                             SourceLoginView(source: model.source)
                         } label: {
@@ -149,6 +152,11 @@ struct BookDetailView: View {
         }
         .fullScreenCover(isPresented: $showsTableOfContents) {
             BookTableOfContentsView(book: model.book, chapters: model.chapters, source: model.source)
+        }
+        .sheet(isPresented: $showsPixivLogin) {
+            if let site = PixivDiscoveryWebsite(source: model.source) {
+                ReadingWebBrowser(url: site.login(), close: { showsPixivLogin = false }).ignoresSafeArea()
+            }
         }
         .confirmationDialog("从书架移除《\(model.book.name)》？", isPresented: $showsRemoveConfirmation) {
             Button("移出书架", role: .destructive) {

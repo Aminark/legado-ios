@@ -331,6 +331,8 @@ private struct ExploreHeaderWave: Shape {
 
 private struct ExploreSourceView: View {
     @StateObject private var model: ExploreSourceViewModel
+    @State private var websitePage: WebsitePage?
+    @State private var lastPixivPage: URL?
 
     init(source: BookSource) {
         _model = StateObject(wrappedValue: ExploreSourceViewModel(
@@ -342,7 +344,15 @@ private struct ExploreSourceView: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                if model.kinds.count > 1 { kindPicker }
+                if model.hasKindMenu {
+                    if let selected = model.selectedKind {
+                        Button { model.showKindMenu() } label: {
+                            Label(selected.title, systemImage: "square.grid.2x2")
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        }
+                        .accessibilityHint("选择其他发现分类")
+                    }
+                } else if model.kinds.count > 1 { kindPicker }
                 content
                 if model.isLoadingMore { ProgressView("继续加载…").padding(.vertical, 12) }
                 if let error = model.paginationError {
@@ -358,15 +368,30 @@ private struct ExploreSourceView: View {
         }
         .background(ReadingTheme.canvas)
         .navigationTitle(model.source.bookSourceName)
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if model.source.offersLogin {
-                NavigationLink { SourceLoginView(source: model.source) } label: { Label("书源登录", systemImage: "person.crop.circle") }
+            ToolbarItem(placement: .topBarTrailing) {
+                if let pixiv = model.pixivWebsite {
+                    Menu {
+                        Button("常规排行榜") { openWebsite(pixiv.publicRanking) }
+                        Button("登录 Pixiv") { websitePage = WebsitePage(url: pixiv.login(returningTo: lastPixivPage)) }
+                    } label: {
+                        Label("Pixiv 账户与榜单", systemImage: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("Pixiv 账户与榜单")
+                } else if model.source.offersLogin {
+                    NavigationLink { SourceLoginView(source: model.source) } label: {
+                        Label("书源登录", systemImage: "person.crop.circle")
+                    }
+                }
             }
+        }
+        .sheet(item: $websitePage) { page in
+            ReadingWebBrowser(url: page.url, close: { websitePage = nil }).ignoresSafeArea()
         }
         .onReceive(NotificationCenter.default.publisher(for: .sourceLoginUpdated)) { event in
             if event.object as? String == model.source.id { Task { await model.reload() } }
         }
-        .navigationBarTitleDisplayMode(.inline)
         .task { await model.load() }
         .refreshable { await model.reload() }
     }
@@ -394,6 +419,27 @@ private struct ExploreSourceView: View {
     @ViewBuilder
     private var content: some View {
         switch model.state {
+        case .choosingKind:
+            ForEach(Array(model.sections.enumerated()), id: \.offset) { _, section in
+                VStack(alignment: .leading, spacing: 4) {
+                    if let title = section.title {
+                        Text(title).font(.headline).accessibilityAddTraits(.isHeader)
+                    }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), alignment: .leading)], alignment: .leading) {
+                        ForEach(section.kinds) { kind in
+                            Button(kind.title) {
+                                if let url = model.pixivWebsite?.destination(for: kind) {
+                                    openWebsite(url)
+                                } else {
+                                    Task { await model.select(kind: kind) }
+                                }
+                            }
+                                .frame(minHeight: 44)
+                        }
+                    }
+                }
+                .padding(.bottom, 12)
+            }
         case .idle, .loading:
             ProgressView("正在加载小说…")
                 .frame(maxWidth: .infinity)
@@ -423,6 +469,16 @@ private struct ExploreSourceView: View {
                 .onAppear { model.loadNextPageIfNeeded(current: book) }
             }
         }
+    }
+
+    private struct WebsitePage: Identifiable {
+        let url: URL
+        var id: URL { url }
+    }
+
+    private func openWebsite(_ url: URL) {
+        lastPixivPage = url
+        websitePage = WebsitePage(url: url)
     }
 }
 

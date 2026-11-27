@@ -94,6 +94,25 @@ private final class JavaScriptDirectRequestMock: JavaScriptRedirectNetworkLoadin
 }
 
 struct JavaScriptRuleEvaluatorTests {
+    @Test func sourceCachePersistsAcrossEvaluationsAndHonorsExpiryAndDeletion() throws {
+        let evaluator = JavaScriptRuleEvaluator()
+        let id = UUID().uuidString
+        func evaluate(_ script: String, sourceName: String = "first") throws -> JSONValue {
+            let source = BookSource(bookSourceUrl: "https://\(id).test/\(sourceName)", bookSourceName: sourceName)
+            return try evaluator.evaluate(script: script, result: .null, executionContext: .init(source: source)).value
+        }
+        defer { _ = try? evaluate("cache.delete('value')") }
+        _ = try evaluate("cache.put('value', 'saved')")
+        #expect(try evaluate("cache.get('value')") == .string("saved"))
+        #expect(try evaluate("cache.get('value')", sourceName: "second") == .null)
+        _ = try evaluate("cache.put('value', 'expired', -1)")
+        #expect(try evaluate("cache.get('value')") == .null)
+        _ = try evaluate("cache.put('value', '', 60)")
+        #expect(try evaluate("cache.get('value')") == .string(""))
+        _ = try evaluate("cache.delete('value')")
+        #expect(try evaluate("cache.get('value') === null") == .bool(true))
+    }
+
     @Test func nestedAJAXIgnoresWebScriptUntilWebViewIsEnabled() throws {
         let evaluator = JavaScriptRuleEvaluator(networkLoader: InactiveWebScriptNetworkMock())
         let result = try evaluator.evaluate(script: "java.ajax(result)", result: .string(

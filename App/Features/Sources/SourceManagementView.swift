@@ -550,6 +550,7 @@ private struct SourceDetailView: View {
     @EnvironmentObject private var library: SourceLibraryModel
     let source: BookSource
     @State private var showsEditor = false
+    @State private var showsPixivLogin = false
     @State private var editedSourceID: String?
     private var current: BookSource { library.sources.first { $0.id == (editedSourceID ?? source.id) } ?? source }
 
@@ -594,13 +595,19 @@ private struct SourceDetailView: View {
             }
             if current.offersLogin {
                 Section("账户") {
-                    NavigationLink {
-                        SourceLoginView(source: current)
-                    } label: {
-                        Label("登录此书源", systemImage: "person.badge.key.fill")
+                    if PixivDiscoveryWebsite(source: current) != nil {
+                        Button("登录 Pixiv", systemImage: "person.badge.key.fill") { showsPixivLogin = true }
+                        Text("登录后可以在发现页浏览关注作品与账户可见的榜单。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    } else {
+                        NavigationLink {
+                            SourceLoginView(source: current)
+                        } label: {
+                            Label("登录此书源", systemImage: "person.badge.key.fill")
+                        }
+                        Text("登录 Cookie 与阅读请求共享；若书源提供检测脚本，会在页面载入后自动验证。")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Text("登录 Cookie 与阅读请求共享；若书源提供检测脚本，会在页面载入后自动验证。")
-                        .font(.footnote).foregroundStyle(.secondary)
                 }
             }
             if let comment = current.bookSourceComment, !comment.isEmpty {
@@ -616,6 +623,11 @@ private struct SourceDetailView: View {
         }
         .sheet(isPresented: $showsEditor) {
             SourceEditorView(source: current) { editedSourceID = $0.id }.environmentObject(library)
+        }
+        .sheet(isPresented: $showsPixivLogin) {
+            if let site = PixivDiscoveryWebsite(source: current) {
+                ReadingWebBrowser(url: site.login(), close: { showsPixivLogin = false }).ignoresSafeArea()
+            }
         }
     }
 }

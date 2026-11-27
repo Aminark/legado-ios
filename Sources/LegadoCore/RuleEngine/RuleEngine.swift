@@ -438,7 +438,11 @@ public struct RuleEngine: Sendable {
             scriptInput = .string(initial.strings.joined(separator: "\n"))
         }
         do {
-            let rendered = try renderDynamicRule(pipeline.script, result: scriptInput, context: execution)
+            // A discovery script produces URL templates for a subsequent request.
+            // Interpreting their braces inside the JavaScript string changes its source.
+            let rendered = execution.isGeneratingExploreKinds
+                ? (rule: pipeline.script, context: execution, captureLiteral: false)
+                : try renderDynamicRule(pipeline.script, result: scriptInput, context: execution)
             let result = try javaScript.evaluate(
                 script: rendered.rule, result: scriptInput, executionContext: rendered.context
             )
