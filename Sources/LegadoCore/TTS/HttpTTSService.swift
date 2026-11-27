@@ -110,7 +110,7 @@ public actor HttpTTSService {
     public init(
         urlBuilder: LegadoURLBuilder = .init(),
         networkPolicy: SourceNetworkPolicy = .shared,
-        transport: any HTTPTransport = URLSessionHTTPTransport(),
+        transport: any HTTPTransport = URLSessionHTTPTransport.shared,
         cache: HttpTTSAudioCache = .shared
     ) {
         self.urlBuilder = urlBuilder

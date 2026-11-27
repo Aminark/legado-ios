@@ -79,6 +79,7 @@ struct ReaderScrollView: UIViewRepresentable {
                 self.update(collection)
             }
             let link = CADisplayLink(target: self, selector: #selector(step(_:)))
+            link.isPaused = true
             link.add(to: .main, forMode: .common)
             displayLink = link
             view = collection
@@ -86,10 +87,15 @@ struct ReaderScrollView: UIViewRepresentable {
         }
 
         func update(_ view: ReaderScrollCollectionView) {
-            guard !parent.configuration.holdsDisplayedPage, !applying, view.bounds.width > 0, view.bounds.height > 0 else { return }
+            let config = parent.configuration
+            let shouldAnimate = config.isAutoReading && !config.isAutoReadPaused && !config.holdsDisplayedPage
+            if displayLink?.isPaused != !shouldAnimate {
+                displayLink?.isPaused = !shouldAnimate
+                if !shouldAnimate { lastTimestamp = 0 }
+            }
+            guard !config.holdsDisplayedPage, !applying, view.bounds.width > 0, view.bounds.height > 0 else { return }
             applying = true
             defer { applying = false }
-            let config = parent.configuration
             let overlap = CGFloat(config.headerInset + config.footerInset) + CGFloat(config.fontSize * 2)
             config.hardwareInput?.turn = { [weak view] direction in
                 guard let view else { return }
@@ -102,7 +108,9 @@ struct ReaderScrollView: UIViewRepresentable {
             if wasLoadingBehind, !parent.loadingBehind { requestedBehind = nil }
             wasLoadingAhead = parent.loadingAhead
             wasLoadingBehind = parent.loadingBehind
+            let backgroundChanged = view.backgroundColor != config.backgroundColor
             view.backgroundColor = config.backgroundColor
+            view.isOpaque = config.backgroundColor != .clear
             let reset = revision != parent.resetID
             if reset {
                 revision = parent.resetID
@@ -172,12 +180,20 @@ struct ReaderScrollView: UIViewRepresentable {
                     else { interruptedDecelerations += 1 }
                 }
                 #endif
+                if styleChanged || backgroundChanged {
+                    for cell in view.visibleCells {
+                        guard let cell = cell as? ReaderScrollCell,
+                              let index = view.indexPath(for: cell)?.item, blocks.indices.contains(index) else { continue }
+                        configure(cell, with: blocks[index])
+                    }
+                }
+                reachedEnd = false
+            } else if backgroundChanged {
                 for cell in view.visibleCells {
                     guard let cell = cell as? ReaderScrollCell,
                           let index = view.indexPath(for: cell)?.item, blocks.indices.contains(index) else { continue }
                     configure(cell, with: blocks[index])
                 }
-                reachedEnd = false
             }
             if !restored, let chapter = chapterLayouts[parent.activeIndex] {
                 restored = true
@@ -202,7 +218,11 @@ struct ReaderScrollView: UIViewRepresentable {
         }
 
         private func configure(_ cell: ReaderScrollCell, with block: ReaderScrollBlock) {
-            cell.configure(block, tint: parent.configuration.foregroundColor) { [weak self] index in
+            cell.configure(
+                block,
+                tint: parent.configuration.foregroundColor,
+                backgroundColor: parent.configuration.backgroundColor
+            ) { [weak self] index in
                 self?.parent.onOpenComments(index)
             }
         }
@@ -547,13 +567,22 @@ private final class ReaderScrollCell: UICollectionViewCell {
         contentView.addSubview(comments)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func configure(_ block: ReaderScrollBlock, tint: UIColor, onOpenComments: @escaping (Int) -> Void) {
-        canvas.block = block
+    func configure(_ block: ReaderScrollBlock, tint: UIColor, backgroundColor: UIColor, onOpenComments: @escaping (Int) -> Void) {
+        let isOpaque = backgroundColor != .clear
+        if self.backgroundColor != backgroundColor {
+            self.backgroundColor = backgroundColor
+            self.isOpaque = isOpaque
+            contentView.backgroundColor = backgroundColor
+            contentView.isOpaque = isOpaque
+        }
+        canvas.update(block: block, backgroundColor: backgroundColor)
         self.onOpenComments = onOpenComments
-        comments.isHidden = !block.endsWithComments
+        let shouldHideComments = !block.endsWithComments
+        let commentsChanged = comments.isHidden != shouldHideComments
+        comments.isHidden = shouldHideComments
         comments.accessibilityValue = block.chapter.chapter.title
         comments.tintColor = tint
-        setNeedsLayout()
+        if commentsChanged { setNeedsLayout() }
     }
 
     override func layoutSubviews() {
@@ -580,11 +609,35 @@ private final class ReaderScrollCell: UICollectionViewCell {
 private final class ReaderScrollCanvas: UIView {
     var block: ReaderScrollBlock? {
         didSet {
+            guard !Self.blocksMatch(oldValue, block) else { return }
             if let block {
                 let range = block.chapter.manager.characterRange(forGlyphRange: block.glyphRange, actualGlyphRange: nil)
                 accessibilityLabel = block.chapter.storage.attributedSubstring(from: range).string
             } else { accessibilityLabel = nil }
             setNeedsDisplay()
+        }
+    }
+
+    func update(block newBlock: ReaderScrollBlock, backgroundColor newBackground: UIColor) {
+        let backgroundChanged = backgroundColor != newBackground
+        if backgroundChanged {
+            backgroundColor = newBackground
+            isOpaque = newBackground != .clear
+        }
+        let blockChanged = !Self.blocksMatch(block, newBlock)
+        if blockChanged {
+            block = newBlock
+        } else if backgroundChanged {
+            setNeedsDisplay()
+        }
+    }
+
+    private static func blocksMatch(_ lhs: ReaderScrollBlock?, _ rhs: ReaderScrollBlock?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): return true
+        case let (l?, r?):
+            return l.chapter === r.chapter && l.glyphRange == r.glyphRange && l.top == r.top && l.height == r.height
+        default: return false
         }
     }
     override init(frame: CGRect) {

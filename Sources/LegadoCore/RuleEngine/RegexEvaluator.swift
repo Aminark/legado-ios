@@ -16,7 +16,46 @@ public struct RegexLimits: Sendable {
     }
 }
 
+private final class RegexExpressionCache: @unchecked Sendable {
+    static let shared = RegexExpressionCache()
+    private let compiled = NSCache<NSString, NSRegularExpression>()
+    private let lock = NSLock()
+    private var nestedCheckCache: [String: Bool] = [:]
+
+    private init() {
+        compiled.countLimit = 512
+    }
+
+    func expression(for pattern: String) throws -> NSRegularExpression {
+        let key = pattern as NSString
+        if let cached = compiled.object(forKey: key) { return cached }
+        let created = try NSRegularExpression(pattern: pattern)
+        compiled.setObject(created, forKey: key)
+        return created
+    }
+
+    func isNestedQuantifier(_ pattern: String, compute: () -> Bool) -> Bool {
+        lock.lock()
+        if let cached = nestedCheckCache[pattern] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+        let value = compute()
+        lock.lock()
+        if nestedCheckCache.count >= 1024 { nestedCheckCache.removeAll(keepingCapacity: true) }
+        nestedCheckCache[pattern] = value
+        lock.unlock()
+        return value
+    }
+}
+
 public struct RegexEvaluator: Sendable {
+    private static let repeatedAtomRegex = try? NSRegularExpression(
+        pattern: #"^(?:\?:)?(?:\\[dDsSwW]|\\[^pPkKgG0-9]|\[(?:\\.|[^\]\\])*\]|[^\[\]()\\?*+{}|^$])(?:[+*]|\{[0-9]+,\})\??$"#
+    )
+    private static let unboundedRegex = try? NSRegularExpression(pattern: #"^(?:[+*]|\{[0-9]+,\})(?!\+)"#)
+
     public var limits: RegexLimits
 
     public init(limits: RegexLimits = .init()) {
@@ -35,7 +74,7 @@ public struct RegexEvaluator: Sendable {
         }
         let expression: NSRegularExpression
         do {
-            expression = try NSRegularExpression(pattern: pattern)
+            expression = try RegexExpressionCache.shared.expression(for: pattern)
         } catch {
             throw RuleEngineError.malformedRule(rule: pattern, detail: error.localizedDescription)
         }
@@ -84,7 +123,7 @@ public struct RegexEvaluator: Sendable {
         }
         let expression: NSRegularExpression
         do {
-            expression = try NSRegularExpression(pattern: pattern)
+            expression = try RegexExpressionCache.shared.expression(for: pattern)
         } catch {
             if firstOnly { return replacement }
             return input.replacingOccurrences(of: pattern, with: replacement)
@@ -136,7 +175,7 @@ public struct RegexEvaluator: Sendable {
             throw RuleEngineError.resourceLimit(rule: pattern, detail: "正则超过资源限制或包含高风险嵌套量词")
         }
         let expression: NSRegularExpression
-        do { expression = try NSRegularExpression(pattern: pattern) }
+        do { expression = try RegexExpressionCache.shared.expression(for: pattern) }
         catch { throw RuleEngineError.malformedRule(rule: pattern, detail: error.localizedDescription) }
         let milliseconds = timeoutMilliseconds <= 0 ? 3_000 : min(timeoutMilliseconds, 60_000)
         let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(milliseconds) * 1_000_000
@@ -155,8 +194,10 @@ public struct RegexEvaluator: Sendable {
         }
         guard !timedOut else { throw RuleEngineError.resourceLimit(rule: pattern, detail: "正则替换超时（\(milliseconds) ms）") }
         guard !exceeded else { throw RuleEngineError.resourceLimit(rule: pattern, detail: "正则匹配数量超过限制") }
+        guard !matches.isEmpty else { return input }
         let original = input as NSString
         var output = ""
+        output.reserveCapacity(input.utf8.count)
         var offset = 0
         var outputLength = 0
         for match in matches {
@@ -173,42 +214,45 @@ public struct RegexEvaluator: Sendable {
             guard outputLength <= limits.maximumInputLength * 2 else {
                 throw RuleEngineError.resourceLimit(rule: pattern, detail: "替换结果超过长度限制")
             }
-            output += untouched + replaced
+            output.append(untouched)
+            output.append(replaced)
         }
         let tail = original.substring(from: offset)
         guard outputLength + tail.utf16.count <= limits.maximumInputLength * 2 else {
             throw RuleEngineError.resourceLimit(rule: pattern, detail: "替换结果超过长度限制")
         }
-        output += tail
+        output.append(tail)
         return output
     }
 
     private func hasObviousNestedQuantifier(_ pattern: String) -> Bool {
-        // Reject clear cases such as (a+)+ and (\w*)*. A '+' inside a character
-        // class/escape is not a quantifier, and bounded or delimited repeated
-        // groups are not proof of catastrophic backtracking. Other expressions
-        // remain protected by enumerateMatches' progress/deadline checks.
-        let atom = #"^(?:\?:)?(?:\\[dDsSwW]|\\[^pPkKgG0-9]|\[(?:\\.|[^\]\\])*\]|[^\[\]()\\?*+{}|^$])(?:[+*]|\{[0-9]+,\})\??$"#
-        guard let repeatedAtom = try? NSRegularExpression(pattern: atom),
-              let unbounded = try? NSRegularExpression(pattern: #"^(?:[+*]|\{[0-9]+,\})(?!\+)"#) else { return false }
-        var groups: [String.Index] = []
-        var classDepth = 0
-        var escaped = false
-        for index in pattern.indices {
-            let character = pattern[index]
-            if escaped { escaped = false; continue }
-            if character == "\\" { escaped = true; continue }
-            if character == "[" { classDepth += 1; continue }
-            if character == "]", classDepth > 0 { classDepth -= 1; continue }
-            guard classDepth == 0 else { continue }
-            if character == "(" { groups.append(pattern.index(after: index)) }
-            if character == ")", let start = groups.popLast() {
-                let inner = String(pattern[start..<index])
-                let suffix = String(pattern[pattern.index(after: index)...])
-                if repeatedAtom.firstMatch(in: inner, range: NSRange(inner.startIndex..., in: inner)) != nil,
-                   unbounded.firstMatch(in: suffix, range: NSRange(suffix.startIndex..., in: suffix)) != nil { return true }
+        guard pattern.contains("(") else { return false }
+        return RegexExpressionCache.shared.isNestedQuantifier(pattern) {
+            // Reject clear cases such as (a+)+ and (\w*)*. A '+' inside a character
+            // class/escape is not a quantifier, and bounded or delimited repeated
+            // groups are not proof of catastrophic backtracking. Other expressions
+            // remain protected by enumerateMatches' progress/deadline checks.
+            guard let repeatedAtom = Self.repeatedAtomRegex,
+                  let unbounded = Self.unboundedRegex else { return false }
+            var groups: [String.Index] = []
+            var classDepth = 0
+            var escaped = false
+            for index in pattern.indices {
+                let character = pattern[index]
+                if escaped { escaped = false; continue }
+                if character == "\\" { escaped = true; continue }
+                if character == "[" { classDepth += 1; continue }
+                if character == "]", classDepth > 0 { classDepth -= 1; continue }
+                guard classDepth == 0 else { continue }
+                if character == "(" { groups.append(pattern.index(after: index)) }
+                if character == ")", let start = groups.popLast() {
+                    let inner = String(pattern[start..<index])
+                    let suffix = String(pattern[pattern.index(after: index)...])
+                    if repeatedAtom.firstMatch(in: inner, range: NSRange(inner.startIndex..., in: inner)) != nil,
+                       unbounded.firstMatch(in: suffix, range: NSRange(suffix.startIndex..., in: suffix)) != nil { return true }
+                }
             }
+            return false
         }
-        return false
     }
 }

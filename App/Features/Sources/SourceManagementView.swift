@@ -10,6 +10,7 @@ struct SourceManagementView: View {
     @State private var showsNewSource = false
     @State private var showsQRImporter = false
     @State private var showsTextImporter = false
+    @State private var pendingTextImport: (mode: Int, value: String)?
     @State private var showsGroupManager = false
     @State private var showsBatchGroups = false
     @State private var selectedGroup: String?
@@ -54,6 +55,8 @@ struct SourceManagementView: View {
     }
 
     var body: some View {
+        let displayed = filteredSources
+        let enabledCount = library.sources.reduce(0) { $0 + ($1.enabled ? 1 : 0) }
         VStack(spacing: 0) {
             ReadingPillSearchField(placeholder: "名称、地址或分组", text: $searchText)
             if library.sources.isEmpty, !library.isWorking {
@@ -91,7 +94,7 @@ struct SourceManagementView: View {
                         }
                     }
                     Section {
-                        ForEach(filteredSources) { source in
+                        ForEach(displayed) { source in
                             if isSelecting {
                                 Button {
                                     if !selectedSourceIDs.insert(source.id).inserted { selectedSourceIDs.remove(source.id) }
@@ -128,13 +131,13 @@ struct SourceManagementView: View {
                             }
                         }
                         .onDelete { offsets in
-                            let ids = Set(offsets.compactMap { filteredSources.indices.contains($0) ? filteredSources[$0].id : nil })
+                            let ids = Set(offsets.compactMap { displayed.indices.contains($0) ? displayed[$0].id : nil })
                             Task { await library.remove(sourceIDs: ids) }
                         }
                     } header: {
-                        Text("\(filteredSources.count) 个书源")
+                        Text("\(displayed.count) 个书源")
                     } footer: {
-                        Text("共 \(library.sources.count) 个书源，\(library.sources.filter(\.enabled).count) 个已启用")
+                        Text("共 \(library.sources.count) 个书源，\(enabledCount) 个已启用")
                     }
                 }
                 .listStyle(.insetGrouped)
@@ -189,9 +192,9 @@ struct SourceManagementView: View {
         .safeAreaInset(edge: .bottom) {
             if isSelecting {
                 HStack(spacing: 12) {
-                    Button(selectedSourceIDs.count == filteredSources.count ? "取消全选" : "全选") {
-                        if selectedSourceIDs.count == filteredSources.count { selectedSourceIDs.removeAll() }
-                        else { selectedSourceIDs = Set(filteredSources.map(\.id)) }
+                    Button(selectedSourceIDs.count == displayed.count ? "取消全选" : "全选") {
+                        if selectedSourceIDs.count == displayed.count { selectedSourceIDs.removeAll() }
+                        else { selectedSourceIDs = Set(displayed.map(\.id)) }
                     }
                     Spacer()
                     Button("分组", systemImage: "folder") { showsBatchGroups = true }
@@ -227,9 +230,18 @@ struct SourceManagementView: View {
         .sheet(isPresented: $showsQRImporter) {
             QRCodeImportView { value in Task { await library.previewInput(value) } }
         }
-        .sheet(isPresented: $showsTextImporter) {
-            SourceTextImportView()
-                .environmentObject(library)
+        .sheet(isPresented: $showsTextImporter, onDismiss: {
+            guard let pending = pendingTextImport else { return }
+            pendingTextImport = nil
+            Task {
+                if pending.mode == 0 { await library.previewRemoteURL(pending.value) }
+                else { await library.previewText(pending.value) }
+            }
+        }) {
+            SourceTextImportView { mode, input in
+                pendingTextImport = (mode, input)
+                showsTextImporter = false
+            }
         }
         .sheet(isPresented: $showsGroupManager) {
             SourceGroupManagerView().environmentObject(library)
@@ -306,7 +318,7 @@ private struct SourceFileImportPicker: UIViewControllerRepresentable {
 
 private struct SourceTextImportView: View {
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var library: SourceLibraryModel
+    let onSubmit: (Int, String) -> Void
     @State private var mode = 0
     @State private var value = ""
 
@@ -340,14 +352,7 @@ private struct SourceTextImportView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("导入") {
-                        let input = value
-                        let selectedMode = mode
-                        dismiss()
-                        Task {
-                            try? await Task.sleep(nanoseconds: 350_000_000)
-                            if selectedMode == 0 { await library.previewRemoteURL(input) }
-                            else { await library.previewText(input) }
-                        }
+                        onSubmit(mode, value)
                     }
                     .disabled(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -402,6 +407,11 @@ private struct SourceGroupManagerView: View {
     @State private var renamedValue = ""
 
     var body: some View {
+        let groupCounts = library.sources.reduce(into: [String: Int]()) { counts, source in
+            for group in source.groups {
+                counts[group, default: 0] += 1
+            }
+        }
         ReadingNavigationStack {
             List {
                 Section("新建分组") {
@@ -427,7 +437,7 @@ private struct SourceGroupManagerView: View {
                                 HStack {
                                     Label(group, systemImage: "folder.fill")
                                     Spacer()
-                                    Text("\(library.sources.filter { $0.hasGroup(group) }.count) 个书源")
+                                    Text("\(groupCounts[group, default: 0]) 个书源")
                                         .foregroundStyle(.secondary)
                                 }
                             }

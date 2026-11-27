@@ -147,6 +147,6 @@ public actor SQLiteRssStarRepository {
 
 public enum RSSRepositoryFactory {
     public static func database(url: URL = LegadoDatabase.defaultURL()) throws -> LegadoDatabase {
-        try LegadoDatabase(url: url)
+        try LegadoDatabase.shared(url: url)
     }
 }

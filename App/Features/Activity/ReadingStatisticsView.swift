@@ -1,20 +1,26 @@
 import SwiftUI
 
 struct ReadingStatisticsView: View {
+    private static let weekdayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "EEE"
+        return formatter
+    }()
+
     @EnvironmentObject private var activity: ReadingActivityModel
     @ScaledMetric(relativeTo: .largeTitle) private var durationFontSize = 42
     @Environment(\.sizeCategory) private var sizeCategory
 
-    private var statistics: ReadingStatistics { activity.statistics }
-
     var body: some View {
+        let stats = activity.statistics
         GeometryReader { geometry in
             ScrollView {
                 VStack(spacing: 18) {
                     header
-                    todayCard
-                    overviewGrid
-                    weeklyCard(chartHeight: max(96, min(148, geometry.size.height - 650)))
+                    todayCard(stats)
+                    overviewGrid(stats)
+                    weeklyCard(stats, chartHeight: max(96, min(148, geometry.size.height - 650)))
                     historyLink
                 }
                 .frame(maxWidth: 640)
@@ -31,7 +37,7 @@ struct ReadingStatisticsView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("阅读统计")
-                .font(.system(size: 30, weight: .bold))
+                .font(.largeTitle.bold())
                 .foregroundStyle(ReadingTheme.ink)
                 .accessibilityAddTraits(.isHeader)
             Text("每一页，都算数")
@@ -42,7 +48,7 @@ struct ReadingStatisticsView: View {
         .padding(.bottom, 8)
     }
 
-    private var todayCard: some View {
+    private func todayCard(_ stats: ReadingStatistics) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text("今日阅读")
@@ -53,13 +59,13 @@ struct ReadingStatisticsView: View {
                     .font(.caption)
                     .foregroundStyle(ReadingTheme.onAccent.opacity(0.75))
             }
-            Text(duration(statistics.todayReadTime, compact: false))
+            Text(duration(stats.todayReadTime, compact: false))
                 .font(.system(size: durationFontSize, weight: .semibold))
                 .foregroundStyle(ReadingTheme.onAccent)
                 .readingNumericTransition()
                 .minimumScaleFactor(0.6)
                 .lineLimit(1)
-            Text(statistics.todayReadTime == 0 ? "今天还没有阅读记录" : "已记录今天的阅读时长")
+            Text(stats.todayReadTime == 0 ? "今天还没有阅读记录" : "已记录今天的阅读时长")
                 .font(.caption)
                 .foregroundStyle(ReadingTheme.onAccent.opacity(0.7))
         }
@@ -87,21 +93,21 @@ struct ReadingStatisticsView: View {
         .accessibilityIdentifier("statistics.todayCard")
     }
 
-    private var overviewGrid: some View {
+    private func overviewGrid(_ stats: ReadingStatistics) -> some View {
         ReadingSoftCard {
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    statisticTile(title: "累计阅读", value: duration(statistics.totalReadTime, compact: true), icon: "clock")
-                    statisticTile(title: "阅读书籍", value: "\(statistics.bookCount) 本", icon: "books.vertical")
+                    statisticTile(title: "累计阅读", value: duration(stats.totalReadTime, compact: true), icon: "clock")
+                    statisticTile(title: "阅读书籍", value: "\(stats.bookCount) 本", icon: "books.vertical")
                 }
                 Rectangle().fill(ReadingTheme.separator.opacity(0.45)).frame(height: 0.5)
                 HStack(spacing: 0) {
                     statisticTile(
                         title: "近 7 天",
-                        value: duration(statistics.recentDays.reduce(0) { $0 + $1.readTime }, compact: true),
+                        value: duration(stats.recentDays.reduce(0) { $0 + $1.readTime }, compact: true),
                         icon: "calendar"
                     )
-                    statisticTile(title: "连续阅读", value: "\(statistics.currentStreak) 天", icon: "chart.bar")
+                    statisticTile(title: "连续阅读", value: "\(stats.currentStreak) 天", icon: "chart.bar")
                 }
             }
             .overlay {
@@ -145,8 +151,9 @@ struct ReadingStatisticsView: View {
         .accessibilityLabel("\(title)，\(value)")
     }
 
-    private func weeklyCard(chartHeight: CGFloat) -> some View {
-        ReadingSoftCard {
+    private func weeklyCard(_ stats: ReadingStatistics, chartHeight: CGFloat) -> some View {
+        let maxDailyReadTime = max(stats.recentDays.map(\.readTime).max() ?? 0, 1)
+        return ReadingSoftCard {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     Text("最近 7 天")
@@ -158,7 +165,8 @@ struct ReadingStatisticsView: View {
                         .foregroundStyle(.secondary)
                 }
                 HStack(alignment: .bottom, spacing: 8) {
-                    ForEach(statistics.recentDays, id: \.date) { day in
+                    ForEach(stats.recentDays, id: \.date) { day in
+                        let dayLabel = weekday(day.date)
                         VStack(spacing: 9) {
                             Text(barLabel(day.readTime))
                                 .font(.system(size: 10).monospacedDigit())
@@ -167,14 +175,14 @@ struct ReadingStatisticsView: View {
                                 .minimumScaleFactor(0.7)
                             Capsule()
                                 .fill(day.readTime > 0 ? ReadingTheme.accent.opacity(Calendar.current.isDateInToday(day.date) ? 1 : 0.3) : ReadingTheme.accentSoft)
-                                .frame(width: 24, height: barHeight(day.readTime, availableHeight: chartHeight))
-                            Text(weekday(day.date))
+                                .frame(width: 24, height: barHeight(day.readTime, maximum: maxDailyReadTime, availableHeight: chartHeight))
+                            Text(dayLabel)
                                 .font(.system(size: 12))
                                 .foregroundStyle(Calendar.current.isDateInToday(day.date) ? ReadingTheme.ink : .secondary)
                         }
                         .frame(maxWidth: .infinity)
                         .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("\(weekday(day.date))，阅读 \(duration(day.readTime, compact: false))")
+                        .accessibilityLabel("\(dayLabel)，阅读 \(duration(day.readTime, compact: false))")
                     }
                 }
                 .frame(height: chartHeight, alignment: .bottom)
@@ -206,8 +214,7 @@ struct ReadingStatisticsView: View {
         .accessibilityIdentifier("statistics.history")
     }
 
-    private func barHeight(_ milliseconds: Int64, availableHeight: CGFloat) -> CGFloat {
-        let maximum = max(statistics.recentDays.map(\.readTime).max() ?? 0, 1)
+    private func barHeight(_ milliseconds: Int64, maximum: Int64, availableHeight: CGFloat) -> CGFloat {
         guard milliseconds > 0 else { return 4 }
         return max(6, (availableHeight - 48) * CGFloat(milliseconds) / CGFloat(maximum))
     }
@@ -220,10 +227,7 @@ struct ReadingStatisticsView: View {
     }
 
     private func weekday(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "EEE"
-        return formatter.string(from: date)
+        Self.weekdayFormatter.string(from: date)
     }
 
     private func duration(_ milliseconds: Int64, compact: Bool) -> String {

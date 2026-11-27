@@ -16,7 +16,7 @@ final class RuleSubscriptionModel: ObservableObject {
     private var persistedValues: [RuleSub] = []
 
     init(repository: SQLiteConfigurationRepository? = nil, transport: any HTTPTransport = URLSessionHTTPTransport.shared) {
-        self.repository = repository ?? (try? LegadoDatabase(url: LegadoDatabase.defaultURL())).map { SQLiteConfigurationRepository(database: $0) }
+        self.repository = repository ?? (try? LegadoDatabase.shared()).map { SQLiteConfigurationRepository(database: $0) }
         self.transport = transport
     }
     func waitForLibraryWrites() async {

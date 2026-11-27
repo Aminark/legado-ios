@@ -14,19 +14,20 @@ struct ExploreView: View {
     }
 
     var body: some View {
+        let exploreSources = sources
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 VStack(spacing: 0) {
-                    introduction
-                    sectionHeading
+                    introduction(isEmpty: exploreSources.isEmpty)
+                    sectionHeading(count: exploreSources.count)
                         .padding(.top, 24)
-                        .padding(.bottom, sources.isEmpty ? 0 : 10)
-                    if sources.isEmpty {
+                        .padding(.bottom, exploreSources.isEmpty ? 0 : 10)
+                    if exploreSources.isEmpty {
                         emptyState
                     } else {
                         LazyVStack(spacing: 8) {
-                            ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
+                            ForEach(Array(exploreSources.enumerated()), id: \.element.id) { index, source in
                                 NavigationLink { ExploreSourceView(source: source) } label: {
                                     ExploreSourceRow(source: source, position: index)
                                 }
@@ -35,7 +36,7 @@ struct ExploreView: View {
                         }
                     }
                 }
-                .padding(.horizontal, sources.isEmpty ? 24 : 20)
+                .padding(.horizontal, exploreSources.isEmpty ? 24 : 20)
                 .padding(.bottom, 28)
             }
             .frame(maxWidth: 620)
@@ -45,7 +46,7 @@ struct ExploreView: View {
         .background {
             ReadingTheme.canvas.ignoresSafeArea()
                 .overlay(alignment: .top) {
-                    if !sources.isEmpty {
+                    if !exploreSources.isEmpty {
                         ExploreHeaderWave()
                             .fill(ReadingTheme.groupedCanvas.opacity(0.6))
                             .frame(height: 160)
@@ -87,7 +88,7 @@ struct ExploreView: View {
         .padding(.bottom, 26)
     }
 
-    private var introduction: some View {
+    private func introduction(isEmpty: Bool) -> some View {
         NavigationLink { SourceManagementView() } label: {
             HStack(spacing: 11) {
                 Image(systemName: "safari")
@@ -115,11 +116,11 @@ struct ExploreView: View {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .medium))
                     .frame(width: 28, height: 28)
-                    .background(ReadingTheme.surface.opacity(sources.isEmpty ? 0 : 0.9), in: Circle())
+                    .background(ReadingTheme.surface.opacity(isEmpty ? 0 : 0.9), in: Circle())
                     .accessibilityHidden(true)
             }
             .padding(.horizontal, 20)
-            .padding(.vertical, sources.isEmpty ? 20 : 23)
+            .padding(.vertical, isEmpty ? 20 : 23)
             .background(alignment: .trailing) {
                 Image("ExploreBookStack")
                     .resizable()
@@ -143,9 +144,10 @@ struct ExploreView: View {
         .accessibilityIdentifier("explore.manageSources")
     }
 
-    private var sectionHeading: some View {
-        HStack(spacing: 10) {
-            if !sources.isEmpty {
+    private func sectionHeading(count: Int) -> some View {
+        let isEmpty = count == 0
+        return HStack(spacing: 10) {
+            if !isEmpty {
                 Capsule()
                     .fill(ReadingTheme.ink)
                     .frame(width: 4, height: 18)
@@ -157,9 +159,9 @@ struct ExploreView: View {
             Spacer(minLength: 8)
             NavigationLink { SourceManagementView() } label: {
                 HStack(spacing: 5) {
-                    Text("\(sources.count)个书源")
+                    Text("\(count)个书源")
                         .font(.footnote)
-                    if !sources.isEmpty {
+                    if !isEmpty {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .medium))
                     }
@@ -171,7 +173,7 @@ struct ExploreView: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("explore.sourceCount")
         }
-        .padding(.horizontal, sources.isEmpty ? 0 : 3)
+        .padding(.horizontal, isEmpty ? 0 : 3)
     }
 
     private var emptyState: some View {
@@ -262,6 +264,8 @@ private struct ExploreSourceRow: View {
 }
 
 private struct ExploreSourceIcon: View {
+    private static let partySymbolName = UIImage(systemName: "party.popper") == nil ? "sparkles" : "party.popper"
+
     let source: BookSource
     let position: Int
 
@@ -273,7 +277,7 @@ private struct ExploreSourceIcon: View {
                 switch position % 7 {
                 case 0: Image(systemName: "cloud")
                 case 1, 4: ExploreGem().stroke(style: StrokeStyle(lineWidth: 1.3, lineCap: .round, lineJoin: .round))
-                case 3: Image(systemName: UIImage(systemName: "party.popper") == nil ? "sparkles" : "party.popper")
+                case 3: Image(systemName: Self.partySymbolName)
                 case 6: ExploreStackIcon().stroke(style: StrokeStyle(lineWidth: 1.3, lineCap: .round, lineJoin: .round))
                 default: Image(systemName: "book")
                 }

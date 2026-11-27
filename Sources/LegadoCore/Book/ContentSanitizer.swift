@@ -2,6 +2,11 @@ import Foundation
 import SwiftSoup
 
 public struct MetadataTextSanitizer: Sendable {
+    private static let blockTagRegex = try? NSRegularExpression(
+        pattern: #"(?i)<\s*br\s*/?\s*>|<\s*/?\s*(?:p|div|li|ul|ol|section|article|blockquote|h[1-6])\b[^>]*>"#
+    )
+    private static let stripTagRegex = try? NSRegularExpression(pattern: #"<[^>]+>"#, options: .caseInsensitive)
+
     public init() {}
 
     public func clean(_ value: String?) -> String? {
@@ -9,18 +14,18 @@ public struct MetadataTextSanitizer: Sendable {
         value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return nil }
 
-        do {
-            value = replacingBlockTagsWithNewlines(value)
-            let document = try SwiftSoup.parseBodyFragment(value)
-            try document.select("script,style,noscript").remove()
-            value = try document.body()?.text(trimAndNormaliseWhitespace: false) ?? document.text()
-        } catch {
-            value = value.replacingOccurrences(
-                of: #"<[^>]+>"#,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
-            value = (try? Parser.unescapeEntities(value, false)) ?? value
+        if value.contains("<") || value.contains("&") {
+            do {
+                if value.contains("<") { value = replacingBlockTagsWithNewlines(value) }
+                let document = try SwiftSoup.parseBodyFragment(value)
+                try document.select("script,style,noscript").remove()
+                value = try document.body()?.text(trimAndNormaliseWhitespace: false) ?? document.text()
+            } catch {
+                if let regex = Self.stripTagRegex {
+                    value = regex.stringByReplacingMatches(in: value, range: NSRange(value.startIndex..., in: value), withTemplate: "")
+                }
+                value = (try? Parser.unescapeEntities(value, false)) ?? value
+            }
         }
 
         value = value
@@ -37,11 +42,8 @@ public struct MetadataTextSanitizer: Sendable {
     }
 
     private func replacingBlockTagsWithNewlines(_ value: String) -> String {
-        value.replacingOccurrences(
-            of: #"(?i)<\s*br\s*/?\s*>|<\s*/?\s*(?:p|div|li|ul|ol|section|article|blockquote|h[1-6])\b[^>]*>"#,
-            with: "\n",
-            options: .regularExpression
-        )
+        guard let regex = Self.blockTagRegex else { return value }
+        return regex.stringByReplacingMatches(in: value, range: NSRange(value.startIndex..., in: value), withTemplate: "\n")
     }
 }
 
@@ -151,21 +153,27 @@ public struct ContentSanitizer: Sendable {
         self.regex = regex
     }
 
+    public static func applicableRules(_ rules: [ReplaceRule], for book: Book) -> [ReplaceRule] {
+        rules.filter { $0.isEnabled && Self.ruleApplies($0, to: book) }
+            .sorted { $0.sortOrder == $1.sortOrder ? $0.id < $1.id : $0.sortOrder < $1.sortOrder }
+    }
+
     public func process(
         book: Book,
         chapter: BookChapter,
         content: String,
         rules: [ReplaceRule],
         removeDuplicateTitle: Bool = true,
-        resegment: Bool = true
+        resegment: Bool = true,
+        rulesPreFiltered: Bool = false
     ) -> ContentProcessingReport {
-        let ordered = rules.filter(\.isEnabled).sorted { $0.sortOrder == $1.sortOrder ? $0.id < $1.id : $0.sortOrder < $1.sortOrder }
+        let ordered = rulesPreFiltered ? rules : Self.applicableRules(rules, for: book)
         var title = chapter.title
         var body = content
         var effective: [Int64] = []
         var diagnostics: [RuleDiagnostic] = []
 
-        for rule in ordered where rule.scopeTitle && applies(rule, to: book) {
+        for rule in ordered where rule.scopeTitle {
             let result = apply(rule, to: title, book: book, chapter: chapter)
             diagnostics += result.diagnostics
             if result.value != title, !result.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -207,7 +215,7 @@ public struct ContentSanitizer: Sendable {
             }
         }
 
-        for rule in ordered where rule.scopeContent && applies(rule, to: book) {
+        for rule in ordered where rule.scopeContent {
             let result = apply(rule, to: body, book: book, chapter: chapter)
             diagnostics += result.diagnostics
             if result.value != body {
@@ -227,7 +235,7 @@ public struct ContentSanitizer: Sendable {
         )
     }
 
-    private func applies(_ rule: ReplaceRule, to book: Book) -> Bool {
+    private static func ruleApplies(_ rule: ReplaceRule, to book: Book) -> Bool {
         if let excluded = rule.excludeScope, !excluded.isEmpty,
            (!book.name.isEmpty && excluded.contains(book.name)) || (!book.origin.isEmpty && excluded.contains(book.origin)) { return false }
         guard let scope = rule.scope, !scope.isEmpty else { return true }

@@ -389,7 +389,8 @@ struct EPUBReaderView: View {
                 let hasChildren = !entry.link.children.isEmpty
                 HStack(spacing: 4) {
                     Button {
-                        if hasChildren && entry.link.href == "#" {
+                        let href = entry.link.href.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if hasChildren && (href.isEmpty || href == "#") {
                             toggleTOCEntry(entry.id)
                         } else {
                             showsTOC = false

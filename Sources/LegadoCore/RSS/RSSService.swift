@@ -27,7 +27,7 @@ public struct RSSService: Sendable {
     private let webViewExecutor: (any SourceWebViewRequestExecuting)?
 
     public init(
-        transport: any HTTPTransport = URLSessionHTTPTransport(),
+        transport: any HTTPTransport = URLSessionHTTPTransport.shared,
         urlBuilder: LegadoURLBuilder = .init(),
         engine: RuleEngine = .init(),
         networkPolicy: SourceNetworkPolicy = .shared,

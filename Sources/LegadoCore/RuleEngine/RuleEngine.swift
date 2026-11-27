@@ -1,6 +1,10 @@
 import Foundation
 
 public struct RuleEngine: Sendable {
+    private static let jsPipelineRegex = try? NSRegularExpression(pattern: #"<js>([\s\S]*?)</js>|@js:([\s\S]*)"#, options: .caseInsensitive)
+    private static let captureGroupRegex = try? NSRegularExpression(pattern: #"\$(\d{1,2})"#)
+    private static let dynamicRuleRegex = try? NSRegularExpression(pattern: #"@get:\{([^}]+?)\}|\{\{([\s\S]*?)\}\}"#, options: .caseInsensitive)
+
     private let parser: RuleExpressionParser
     private let jsonPath: JSONPathEvaluator
     private let regex: RegexEvaluator
@@ -230,7 +234,8 @@ public struct RuleEngine: Sendable {
         listMode: Bool,
         context: RuleExecutionContext
     ) -> RuleEvaluation {
-        if let root = try? JSONValue.decode(data: Data(input.utf8)),
+        let decodedJSON = HTTPResponse.decodeJSON(from: input)
+        if let root = decodedJSON,
            let plan = try? parser.parse(rule, inputLooksLikeJSON: true),
            plan.branches.allSatisfy({ $0.mode == .jsonPath }) {
             return evaluatePrepared(rule, in: root, listMode: listMode, context: context)
@@ -259,7 +264,7 @@ public struct RuleEngine: Sendable {
             }
         }
         do {
-            let plan = try parser.parse(rule, inputLooksLikeJSON: (try? JSONValue.decode(data: Data(input.utf8))) != nil)
+            let plan = try parser.parse(rule, inputLooksLikeJSON: decodedJSON != nil)
             var results: [[JSONValue]] = []
             var diagnostics: [RuleDiagnostic] = []
             var execution = context
@@ -471,6 +476,8 @@ public struct RuleEngine: Sendable {
     }
 
     private func splitJavaScriptPipeline(_ rule: String) -> JavaScriptPipeline? {
+        guard rule.range(of: "<js>", options: .caseInsensitive) != nil
+            || rule.range(of: "@js:", options: .caseInsensitive) != nil else { return nil }
         // @put values can themselves contain JS rules. They belong to the put
         // operation, not to the surrounding rule's pipeline.
         let masked = NSMutableString(string: rule)
@@ -478,7 +485,7 @@ public struct RuleEngine: Sendable {
             let span = NSRange(range.full, in: rule)
             masked.replaceCharacters(in: span, with: String(repeating: " ", count: span.length))
         }
-        guard let pattern = try? NSRegularExpression(pattern: #"<js>([\s\S]*?)</js>|@js:([\s\S]*)"#, options: .caseInsensitive),
+        guard let pattern = Self.jsPipelineRegex,
               let match = pattern.firstMatch(in: masked as String, range: NSRange(location: 0, length: masked.length)),
               let full = Range(match.range, in: rule),
               let script = Range(match.range(at: match.range(at: 2).location == NSNotFound ? 1 : 2), in: rule) else { return nil }
@@ -542,8 +549,7 @@ public struct RuleEngine: Sendable {
     ) throws -> (rule: String, context: RuleExecutionContext, captureLiteral: Bool) {
         var source = source
         var captureLiteral = false
-        if case .array(let captures) = result {
-            let captureExpression = try NSRegularExpression(pattern: #"\$(\d{1,2})"#)
+        if case .array(let captures) = result, source.contains("$"), let captureExpression = Self.captureGroupRegex {
             let captureEnd = source.range(of: "##")?.lowerBound ?? source.endIndex
             let matches = captureExpression.matches(in: source, range: NSRange(source.startIndex..<captureEnd, in: source))
             if !matches.isEmpty {
@@ -556,10 +562,9 @@ public struct RuleEngine: Sendable {
                 }
             }
         }
-        let expression = try NSRegularExpression(
-            pattern: #"@get:\{([^}]+?)\}|\{\{([\s\S]*?)\}\}"#,
-            options: .caseInsensitive
-        )
+        guard source.contains("{"), let expression = Self.dynamicRuleRegex else {
+            return (source, context, captureLiteral)
+        }
         let matches = expression.matches(in: source, range: NSRange(source.startIndex..., in: source))
         guard !matches.isEmpty else { return (source, context, captureLiteral) }
         let replacementStart = source.range(of: "##")?.lowerBound ?? source.endIndex

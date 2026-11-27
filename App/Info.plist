@@ -39,6 +39,12 @@
 			<key>LSHandlerRank</key><string>Alternate</string>
 			<key>LSItemContentTypes</key><array><string>org.idpf.epub-container</string></array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key><string>小浣熊阅读书库备份</string>
+			<key>CFBundleTypeRole</key><string>Editor</string>
+			<key>LSHandlerRank</key><string>Owner</string>
+			<key>LSItemContentTypes</key><array><string>com.epiboly.legado.library-backup</string></array>
+		</dict>
 	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>

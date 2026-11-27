@@ -39,25 +39,30 @@ final class ReaderMediaLibrary: ObservableObject {
                 revision &+= 1
             }
             guard var entry = chapters[chapter.id] else { continue }
+            var uniqueRequests: [String] = []
+            var seenRequests = Set<String>()
             for item in entry.inline.items where entry.images[item.request] == nil {
+                if seenRequests.insert(item.request).inserted {
+                    uniqueRequests.append(item.request)
+                }
+            }
+            guard !uniqueRequests.isEmpty else { continue }
+            let fetched = await Self.fetchBatch(
+                requests: uniqueRequests,
+                loader: loader,
+                source: source,
+                book: book,
+                chapter: record
+            )
+            guard !Task.isCancelled else { return }
+            for (request, bitmap) in fetched.bitmaps {
+                entry.images[request] = bitmap
+            }
+            for (request, data) in fetched.vectors {
                 guard !Task.isCancelled else { return }
-                do {
-                    let data = try await loader.load(item.request, source: source, book: book, chapter: record)
-                    try Task.checkCancellation()
-                    let bitmap = await Task.detached(priority: .utility) { () -> UIImage? in
-                        guard let image = CGImageSourceCreateWithData(data as CFData, nil),
-                              let thumbnail = CGImageSourceCreateThumbnailAtIndex(image, 0, [
-                                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                                kCGImageSourceCreateThumbnailWithTransform: true,
-                                kCGImageSourceThumbnailMaxPixelSize: 1440
-                              ] as CFDictionary) else { return nil }
-                        return UIImage(cgImage: thumbnail)
-                    }.value
-                    if let bitmap { entry.images[item.request] = bitmap }
-                    else if item.request.lowercased().hasPrefix("data:image/svg+xml") || data.prefix(512).contains(0x3c) {
-                        entry.images[item.request] = try await ReaderVectorPreview().image(data)
-                    }
-                } catch { continue }
+                if let image = try? await ReaderVectorPreview().image(data) {
+                    entry.images[request] = image
+                }
             }
             guard !Task.isCancelled else { return }
             if chapters[chapter.id]?.images.count != entry.images.count {
@@ -65,6 +70,59 @@ final class ReaderMediaLibrary: ObservableObject {
                 revision &+= 1
             }
         }
+    }
+
+    private nonisolated static func fetchBatch(
+        requests: [String],
+        loader: ChapterImageLoader,
+        source: BookSource,
+        book: Book,
+        chapter: BookChapter
+    ) async -> (bitmaps: [String: UIImage], vectors: [(String, Data)]) {
+        var bitmaps: [String: UIImage] = [:]
+        var vectors: [(String, Data)] = []
+        await withTaskGroup(of: (String, UIImage?, Data?).self) { group in
+            var iterator = requests.makeIterator()
+            let maxConcurrency = 4
+            func enqueueNext() {
+                guard !Task.isCancelled, let request = iterator.next() else { return }
+                group.addTask {
+                    do {
+                        let data = try await loader.load(request, source: source, book: book, chapter: chapter)
+                        try Task.checkCancellation()
+                        if let bitmap = decodeThumbnail(data: data, maxPixelSize: 1440) {
+                            return (request, bitmap, nil)
+                        }
+                        if request.lowercased().hasPrefix("data:image/svg+xml") || data.prefix(512).contains(0x3c) {
+                            return (request, nil, data)
+                        }
+                        return (request, nil, nil)
+                    } catch {
+                        return (request, nil, nil)
+                    }
+                }
+            }
+            for _ in 0..<min(maxConcurrency, requests.count) { enqueueNext() }
+            while let (request, bitmap, vectorData) = await group.next() {
+                if let bitmap {
+                    bitmaps[request] = bitmap
+                } else if let vectorData {
+                    vectors.append((request, vectorData))
+                }
+                enqueueNext()
+            }
+        }
+        return (bitmaps, vectors)
+    }
+
+    private nonisolated static func decodeThumbnail(data: Data, maxPixelSize: Int) -> UIImage? {
+        guard let image = CGImageSourceCreateWithData(data as CFData, nil),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(image, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+              ] as CFDictionary) else { return nil }
+        return UIImage(cgImage: thumbnail)
     }
 }
 

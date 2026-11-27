@@ -23,6 +23,11 @@ public struct HTTPResponse: Sendable {
         self.rssArticle = rssArticle
     }
 
+    private static let contentTypeCharsetRegex = try? NSRegularExpression(
+        pattern: #"charset\s*=\s*[\"']?([^;\"'\s]+)"#,
+        options: .caseInsensitive
+    )
+
     public var decodedText: String {
         let encoding = requestedCharset.flatMap(HTTPTextDecoder.encoding(named:))
             ?? contentTypeCharset.flatMap(HTTPTextDecoder.encoding(named:))
@@ -35,12 +40,33 @@ public struct HTTPResponse: Sendable {
     }
 
     public var decodedJSON: JSONValue? {
-        try? JSONValue.decode(data: Data(decodedText.utf8))
+        Self.decodeJSON(from: decodedText)
+    }
+
+    func decodeTextAndJSON() -> (text: String, json: JSONValue?) {
+        let text = decodedText
+        return (text, Self.decodeJSON(from: text))
+    }
+
+    static func looksLikeJSON(_ text: String) -> Bool {
+        for byte in text.utf8 {
+            switch byte {
+            case 0x20, 0x09, 0x0A, 0x0D: continue
+            case 0x7B, 0x5B, 0x22, 0x2D, 0x30...0x39, 0x74, 0x66, 0x6E: return true // { [ " - 0-9 t f n
+            default: return false
+            }
+        }
+        return false
+    }
+
+    static func decodeJSON(from text: String) -> JSONValue? {
+        guard looksLikeJSON(text) else { return nil }
+        return try? JSONValue.decode(data: Data(text.utf8))
     }
 
     private var contentTypeCharset: String? {
         guard let value = headers.first(where: { $0.key.caseInsensitiveCompare("Content-Type") == .orderedSame })?.value,
-              let expression = try? NSRegularExpression(pattern: #"charset\s*=\s*[\"']?([^;\"'\s]+)"#, options: .caseInsensitive),
+              let expression = Self.contentTypeCharsetRegex,
               let match = expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
               let range = Range(match.range(at: 1), in: value) else { return nil }
         return String(value[range])
@@ -48,10 +74,12 @@ public struct HTTPResponse: Sendable {
 }
 
 public enum HTTPTextDecoder {
+    private static let metaTagRegex = try? NSRegularExpression(pattern: #"<meta\b[^>]*>"#, options: .caseInsensitive)
+    private static let metaCharsetRegex = try? NSRegularExpression(pattern: #"charset\s*=\s*["']?\s*([a-zA-Z0-9_-]+)"#, options: .caseInsensitive)
+
     public static func htmlEncoding(_ data: Data) -> String.Encoding? {
         let head = String(decoding: data.prefix(16_384), as: UTF8.self)
-        guard let meta = try? NSRegularExpression(pattern: #"<meta\b[^>]*>"#, options: .caseInsensitive),
-              let charset = try? NSRegularExpression(pattern: #"charset\s*=\s*["']?\s*([a-zA-Z0-9_-]+)"#, options: .caseInsensitive) else { return nil }
+        guard let meta = metaTagRegex, let charset = metaCharsetRegex else { return nil }
         for tag in meta.matches(in: head, range: NSRange(head.startIndex..., in: head)) {
             guard let match = charset.firstMatch(in: head, range: tag.range),
                   let range = Range(match.range(at: 1), in: head),
@@ -165,7 +193,7 @@ public final class LegadoUnsafeTrustDelegate: NSObject, URLSessionTaskDelegate, 
             return
         }
         let settings = settingsStore.settings
-        let address = try? ApplicationSettings.parseHosts(settings.hosts)[request.url?.host?.lowercased() ?? ""]
+        let address = (try? settingsStore.hostsMap(for: settings))?[request.url?.host?.lowercased() ?? ""]
         completionHandler(interceptHostsRedirects && settings.proxy.isEmpty && address != nil ? nil : request)
     }
 
@@ -284,7 +312,7 @@ public final class URLSessionHTTPTransport: ProxyHTTPTransport, StreamingHTTPTra
         do {
             let response: HTTPResponse
             if settings.proxy.isEmpty,
-               let address = try ApplicationSettings.parseHosts(settings.hosts)[request.url?.host?.lowercased() ?? ""] {
+               let address = try settingsStore.hostsMap(for: settings)[request.url?.host?.lowercased() ?? ""] {
                 response = try await HostsHTTPTransport.data(for: request, address: address, ignoreCertificateErrors: settings.ignoreCertificateErrors)
             } else {
                 let session = try configuredSession(settings: settings)

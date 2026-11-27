@@ -9,6 +9,7 @@ struct LegadoApp: App {
     @StateObject private var readingActivity: ReadingActivityModel
     @StateObject private var rssLibrary: RSSLibraryModel
     @StateObject private var ruleSubscriptions: RuleSubscriptionModel
+    @State private var incomingBackupURL: URL?
 
     init() {
         AppDiagnostics.shared.start()
@@ -32,7 +33,7 @@ struct LegadoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootTabView()
+            RootTabView(incomingBackupURL: $incomingBackupURL)
                 .environmentObject(sourceLibrary)
                 .environmentObject(bookLibrary)
                 .environmentObject(replaceRuleLibrary)
@@ -40,7 +41,11 @@ struct LegadoApp: App {
                 .environmentObject(rssLibrary)
                 .environmentObject(ruleSubscriptions)
                 .task {
-                    await sourceLibrary.load()
+                    // Load books and sources in parallel so the bookshelf renders immediately.
+                    async let initialBooks: Void = bookLibrary.load()
+                    async let initialSources: Void = sourceLibrary.load()
+                    _ = await (initialBooks, initialSources)
+
                     if let index = ProcessInfo.processInfo.arguments.firstIndex(of: "-uiAutomationImportURL"),
                        ProcessInfo.processInfo.arguments.indices.contains(index + 1),
                        let url = URL(string: ProcessInfo.processInfo.arguments[index + 1]) {
@@ -51,18 +56,18 @@ struct LegadoApp: App {
                     }
                     if !ProcessInfo.processInfo.arguments.contains("-uiDemo") {
                         do {
-                            let db = try LegadoDatabase(url: LegadoDatabase.defaultURL())
+                            let db = try LegadoDatabase.shared()
                             try await db.applyImportedPreferences()
                             try await OfflineEditions.shared.activate(sources: sourceLibrary.sources)
                         } catch {
                             sourceLibrary.notice = .init(kind: .error, title: "书库恢复失败", detail: error.localizedDescription)
                         }
                     }
-                    await bookLibrary.load()
-                    await replaceRuleLibrary.load()
-                    await readingActivity.load()
-                    await rssLibrary.load()
-                    await ruleSubscriptions.load()
+                    async let loadRules: Void = replaceRuleLibrary.load()
+                    async let loadActivity: Void = readingActivity.load()
+                    async let loadRSS: Void = rssLibrary.load()
+                    async let loadSubs: Void = ruleSubscriptions.load()
+                    _ = await (loadRules, loadActivity, loadRSS, loadSubs)
                     if UserDefaults.standard.bool(forKey: "auto_refresh") {
                         await bookLibrary.checkForUpdates(sources: sourceLibrary.sources, onlyRead: UserDefaults.standard.bool(forKey: "onlyUpdateRead"))
                     }
@@ -70,6 +75,10 @@ struct LegadoApp: App {
                 }
                 .onOpenURL { url in
                     Task {
+                        if url.isFileURL && url.pathExtension.lowercased() == "legadobackup" {
+                            incomingBackupURL = url
+                            return
+                        }
                         if url.isFileURL && url.pathExtension.lowercased() == "epub" {
                             let file = LocalBookImportFile(url: url)
                             await bookLibrary.load()

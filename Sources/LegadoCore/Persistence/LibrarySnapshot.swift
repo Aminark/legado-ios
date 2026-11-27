@@ -132,6 +132,10 @@ public struct LibrarySnapshot: Codable, Equatable, Sendable {
             }
             return result
         }
+        func unionKeepingLocal<T: Identifiable>(_ a: [T], _ b: [T]) -> [T] {
+            let existing = Set(a.map(\.id))
+            return a + b.filter { !existing.contains($0.id) }
+        }
         var result = incoming
         var positions = Dictionary(uniqueKeysWithValues: books.indices.map { (books[$0].id, $0) })
         var works = Set(books.map { [$0.name, $0.author] })
@@ -140,6 +144,14 @@ public struct LibrarySnapshot: Codable, Equatable, Sendable {
             if let index = positions[book.id] {
                 if book.backupProgress >= result.books[index].backupProgress {
                     result.books[index].copyProgress(from: book)
+                    if book.totalChapterNum > result.books[index].totalChapterNum {
+                        result.books[index].totalChapterNum = book.totalChapterNum
+                    }
+                    if book.latestChapterTime > result.books[index].latestChapterTime
+                        || (result.books[index].latestChapterTitle?.isEmpty != false && book.latestChapterTitle?.isEmpty == false) {
+                        result.books[index].latestChapterTitle = book.latestChapterTitle
+                        result.books[index].latestChapterTime = max(result.books[index].latestChapterTime, book.latestChapterTime)
+                    }
                 }
                 result.books[index].group |= book.group
             } else if works.insert([book.name, book.author]).inserted {
@@ -147,10 +159,9 @@ public struct LibrarySnapshot: Codable, Equatable, Sendable {
                 result.books.append(book)
             }
         }
-        let savedSources = Set(sources.map(\.id))
-        result.sources = sources + incoming.sources.filter { !savedSources.contains($0.id) }
-        result.groups = union(groups, incoming.groups)
-        result.bookmarks = union(bookmarks, incoming.bookmarks)
+        result.sources = unionKeepingLocal(sources, incoming.sources)
+        result.groups = unionKeepingLocal(groups, incoming.groups)
+        result.bookmarks = unionKeepingLocal(bookmarks, incoming.bookmarks)
         let localRecords = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
         result.records = union(records, incoming.records).map { record in
             localRecords[record.id].map { $0.mergingReadTime(record) } ?? record
@@ -160,23 +171,23 @@ public struct LibrarySnapshot: Codable, Equatable, Sendable {
             guard let local = localKeywords[keyword.id] else { return keyword }
             return .init(word: keyword.word, usage: max(local.usage, keyword.usage), lastUseTime: max(local.lastUseTime, keyword.lastUseTime))
         }
-        result.rssSources = union(rssSources, incoming.rssSources)
-        result.rssStars = union(rssStars, incoming.rssStars)
+        result.rssSources = unionKeepingLocal(rssSources, incoming.rssSources)
+        result.rssStars = unionKeepingLocal(rssStars, incoming.rssStars)
         let localRSS = Dictionary(uniqueKeysWithValues: rssReadRecords.map { ($0.id, $0) })
         result.rssReadRecords = union(rssReadRecords, incoming.rssReadRecords).map { record in
             guard let local = localRSS[record.id], (local.readTime ?? 0) > (record.readTime ?? 0) else { return record }
             return local
         }
-        result.txtRules = union(txtRules, incoming.txtRules)
-        result.tts = union(tts, incoming.tts)
-        result.subscriptions = union(subscriptions, incoming.subscriptions)
-        result.keyboardAssists = union(keyboardAssists, incoming.keyboardAssists)
-        let savedRules = Set(replaceRules.map(\.id))
-        result.replaceRules = replaceRules + incoming.replaceRules.filter { !savedRules.contains($0.id) }
+        result.txtRules = unionKeepingLocal(txtRules, incoming.txtRules)
+        result.tts = unionKeepingLocal(tts, incoming.tts)
+        result.subscriptions = unionKeepingLocal(subscriptions, incoming.subscriptions)
+        result.keyboardAssists = unionKeepingLocal(keyboardAssists, incoming.keyboardAssists)
+        result.replaceRules = unionKeepingLocal(replaceRules, incoming.replaceRules)
         let localBooks = Dictionary(uniqueKeysWithValues: books.map { ($0.id, $0) })
         let incomingBooks = Dictionary(uniqueKeysWithValues: incoming.books.map { ($0.id, $0) })
         result.chapters = chapters.merging(incoming.chapters) { old, _ in old }
-        for book in result.books {
+        for index in result.books.indices {
+            let book = result.books[index]
             let old = chapters[book.id] ?? []
             let new = incoming.chapters[book.id] ?? []
             // Select the directory from the same snapshot as the winning progress, with an empty-directory fallback.
@@ -184,6 +195,12 @@ public struct LibrarySnapshot: Codable, Equatable, Sendable {
             let localProgress = localBooks[book.id]?.backupProgress ?? (0, 0, 0)
             if !new.isEmpty && (old.isEmpty || incomingProgress >= localProgress) {
                 result.chapters[book.id] = new
+                result.books[index].totalChapterNum = new.count
+                if result.books[index].latestChapterTitle?.isEmpty != false, let latest = new.last?.title {
+                    result.books[index].latestChapterTitle = latest
+                }
+            } else if !old.isEmpty {
+                result.books[index].totalChapterNum = max(result.books[index].totalChapterNum, old.count)
             }
         }
         result.chapters = result.chapters.filter { positions[$0.key] != nil }

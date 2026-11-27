@@ -57,13 +57,16 @@ public actor LibraryPassageSearch {
         let url = URL(string: book.bookUrl)
         let epub = try book.origin == "local" && url?.isFileURL == true && url?.pathExtension.lowercased() == "epub"
             ? url.map { try EPUBBook(url: $0) } : nil
-        let applicable = book.readConfig?.useReplaceRule == false ? [] : rules
-        let insert = try prepare("INSERT INTO passages(rowid,body) VALUES(?,?)")
-        defer { sqlite3_finalize(insert) }
+        let textSession = try epub == nil && book.origin == "local" ? local.openTextSession(for: book) : nil
+        let applicable = book.readConfig?.useReplaceRule == false ? [] : ContentSanitizer.applicableRules(rules, for: book)
+        let sanitizer = ContentSanitizer()
+        var batch: [(offset: Int, title: String, body: String)] = []
+        batch.reserveCapacity(min(chapters.count, 128))
         for (offset, chapter) in chapters.enumerated() where !chapter.isVolume {
             try Task.checkCancellation()
             let report: ChapterContentReport
             if let epub { report = try epub.content(chapter: chapter) }
+            else if let textSession { report = try textSession.loadContent(chapter: chapter) }
             else if book.origin == "local" { report = try local.loadContent(book: book, chapter: chapter) }
             else {
                 guard let entry = try await cache.searchContent(bookURL: book.id, chapterURL: chapter.url),
@@ -73,14 +76,43 @@ public actor LibraryPassageSearch {
             }
             var heading = chapter
             if let title = report.title { heading.title = title }
-            let rendered = ContentSanitizer().process(book: book, chapter: heading, content: report.content, rules: applicable)
+            let rendered = sanitizer.process(book: book, chapter: heading, content: report.content, rules: applicable, rulesPreFiltered: true)
             guard !rendered.content.isEmpty else { continue }
-            sqlite3_reset(insert)
-            sqlite3_bind_int64(insert, 1, Int64(locations.count + 1))
-            try bind(rendered.content, to: insert)
-            guard sqlite3_step(insert) == SQLITE_DONE else { throw failure() }
-            locations.append(Location(book: book.id, offset: offset, title: rendered.title))
+            batch.append((offset: offset, title: rendered.title, body: rendered.content))
+            if batch.count >= 128 {
+                try insertPassages(batch, bookID: book.id)
+                batch.removeAll(keepingCapacity: true)
+            }
         }
+        if !batch.isEmpty {
+            try insertPassages(batch, bookID: book.id)
+        }
+    }
+
+    private func insertPassages(_ batch: [(offset: Int, title: String, body: String)], bookID: String) throws {
+        guard !batch.isEmpty else { return }
+        guard sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil) == SQLITE_OK else { throw failure() }
+        var committed = false
+        var addedLocations: [Location] = []
+        addedLocations.reserveCapacity(batch.count)
+        let baseRowID = locations.count
+        defer {
+            if !committed {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            }
+        }
+        let insert = try prepare("INSERT INTO passages(rowid,body) VALUES(?,?)")
+        defer { sqlite3_finalize(insert) }
+        for (index, item) in batch.enumerated() {
+            sqlite3_reset(insert)
+            sqlite3_bind_int64(insert, 1, Int64(baseRowID + index + 1))
+            try bind(item.body, to: insert)
+            guard sqlite3_step(insert) == SQLITE_DONE else { throw failure() }
+            addedLocations.append(Location(book: bookID, offset: item.offset, title: item.title))
+        }
+        guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else { throw failure() }
+        committed = true
+        locations.append(contentsOf: addedLocations)
     }
 
     public func matches(_ input: String, limit: Int = 200) throws -> [Hit] {

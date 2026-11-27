@@ -476,4 +476,82 @@ import Testing
         #expect(result.groups.first { $0.id == 1 }?.groupName == "本机分组")
         #expect(result.books.first?.group == result.groups.first { $0.groupName == "科幻" }?.id)
     }
+
+    @Test func restoringNewerProgressUpdatesTotalChapterNumAndLatestTitle() throws {
+        var local = snapshot()
+        local.books[0].durChapterIndex = 0
+        local.books[0].durChapterTime = 100
+        local.books[0].totalChapterNum = 1
+        local.books[0].latestChapterTitle = "第一章"
+
+        var backup = local
+        backup.chapters[backup.books[0].id] = [
+            .init(url: "https://source.example/ch1", title: "第一章", bookUrl: backup.books[0].id, index: 0),
+            .init(url: "https://source.example/ch2", title: "第二章", bookUrl: backup.books[0].id, index: 1),
+            .init(url: "https://source.example/ch3", title: "第三章", bookUrl: backup.books[0].id, index: 2)
+        ]
+        backup.books[0].durChapterIndex = 2
+        backup.books[0].durChapterTitle = "第三章"
+        backup.books[0].durChapterTime = 300
+        backup.books[0].totalChapterNum = 3
+        backup.books[0].latestChapterTitle = "第三章"
+        backup.books[0].latestChapterTime = 300
+
+        let merged = local.merging(backup)
+        let book = try #require(merged.books.first)
+        #expect(book.durChapterIndex == 2)
+        #expect(book.totalChapterNum == 3)
+        #expect(book.latestChapterTitle == "第三章")
+        #expect(merged.chapters[book.id]?.count == 3)
+    }
+
+    @Test func restoringOlderArchivePreservesLocalRSSBookmarksAndConfigRules() throws {
+        var local = snapshot()
+        local.bookmarks = [.init(time: 123, bookName: local.books[0].name)]
+        local.bookmarks[0].content = "本机修改的笔记"
+        local.rssSources = [.init(sourceUrl: "https://rss.example", sourceName: "本机RSS")]
+        local.txtRules = [.init(id: 1, name: "本机目录规则", rule: "^第.+章")]
+        local.tts = [.init(id: 1, name: "本机朗读")]
+        local.subscriptions = [.init(id: 1, name: "本机订阅", url: "https://sub.example")]
+        local.keyboardAssists = [.init(type: 0, key: "k", value: "本机")]
+
+        var older = snapshot()
+        older.bookmarks = [.init(time: 123, bookName: older.books[0].name), .init(time: 456, bookName: older.books[0].name)]
+        older.bookmarks[0].content = "旧备份笔记"
+        older.rssSources = [.init(sourceUrl: "https://rss.example", sourceName: "旧备份RSS"), .init(sourceUrl: "https://rss2.example", sourceName: "新增RSS")]
+        older.txtRules = [.init(id: 1, name: "旧目录规则", rule: "^old")]
+        older.tts = [.init(id: 1, name: "旧朗读")]
+        older.subscriptions = [.init(id: 1, name: "旧订阅", url: "https://old.example")]
+        older.keyboardAssists = [.init(type: 0, key: "k", value: "旧值")]
+
+        let merged = local.merging(older)
+        #expect(merged.bookmarks.count == 2)
+        #expect(merged.bookmarks.first { $0.id == 123 }?.content == "本机修改的笔记")
+        #expect(merged.rssSources.count == 2)
+        #expect(merged.rssSources.first { $0.id == "https://rss.example" }?.sourceName == "本机RSS")
+        #expect(merged.txtRules.first { $0.id == 1 }?.name == "本机目录规则")
+        #expect(merged.tts.first { $0.id == 1 }?.name == "本机朗读")
+        #expect(merged.subscriptions.first { $0.id == 1 }?.name == "本机订阅")
+        #expect(merged.keyboardAssists.first { $0.key == "k" }?.value == "本机")
+    }
+
+    @Test func exportRecoversStaleLocalContainerPathAndSkipsMissingFiles() async throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let localDir = fixture.directory.appendingPathComponent("LocalBooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: localDir, withIntermediateDirectories: true)
+        let actualFile = localDir.appendingPathComponent("recovered.txt")
+        try Data("可恢复正文".utf8).write(to: actualFile)
+
+        var value = snapshot()
+        value.books.append(Book(bookUrl: "file:///var/mobile/Containers/Data/Application/OLD-UUID/Library/Application%20Support/Legado/LocalBooks/recovered.txt", name: "旧容器书", origin: "local"))
+        value.books.append(Book(bookUrl: localDir.appendingPathComponent("gone.txt").absoluteString, name: "已删除书", origin: "local"))
+        try await fixture.service.apply(value, expected: fixture.service.snapshot())
+
+        let result = try await fixture.service.exportDetailed(includeLocalBooks: true)
+        defer { try? FileManager.default.removeItem(at: result.url) }
+        #expect(result.skippedLocalBooks == ["已删除书"])
+        let prepared = try await fixture.service.prepare(result.url)
+        #expect(prepared.manifest.snapshot.books.map(\.name).sorted() == ["合成测试书", "旧容器书"])
+        #expect(prepared.manifest.attachments.map(\.path) == ["local/recovered.txt"])
+    }
 }

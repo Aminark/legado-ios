@@ -91,7 +91,7 @@ struct OtherSettingsView: View {
                 await WKWebsiteDataStore.default().removeData(ofTypes: [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache, WKWebsiteDataTypeOfflineWebApplicationCache], modifiedSince: .distantPast)
                 URLCache.shared.removeAllCachedResponses()
             case .database:
-                let database = try LegadoDatabase(url: LegadoDatabase.defaultURL())
+                let database = try LegadoDatabase.shared()
                 try await database.compact()
             }
             DiagnosticLog.shared.record(category: "存储", message: "\(operation.rawValue)完成")

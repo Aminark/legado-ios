@@ -95,6 +95,28 @@ private struct TxtHeadingMatch {
 }
 
 public struct LocalBookService: Sendable {
+    private static let leadingWhitespaceRegex = try? NSRegularExpression(pattern: #"^[\n\s]+"#)
+
+    public struct TextBookSession: Sendable {
+        let data: Data
+        let encoding: String.Encoding
+
+        public func loadContent(chapter: BookChapter) throws -> ChapterContentReport {
+            let start = max(Int(chapter.start ?? 0), 0)
+            let end = min(Int(chapter.end ?? Int64(data.count)), data.count)
+            guard start <= end else {
+                return .init(title: chapter.title, diagnostics: [
+                    .init(severity: .error, code: "local.range", message: "本地章节范围无效", rule: chapter.url)
+                ])
+            }
+            guard let decodedContent = String(data: data.subdata(in: start..<end), encoding: encoding) else {
+                throw LocalBookError.unreadableEncoding
+            }
+            let content = LocalBookService.normalizeLeadingWhitespace(decodedContent)
+            return .init(title: chapter.title, content: content, pagesVisited: 1)
+        }
+    }
+
     public var maximumFileSize: Int64
     public var tocRules: [TxtTocRule]
     private var usesFallbackTocRule = true
@@ -335,8 +357,24 @@ public struct LocalBookService: Sendable {
     }
 
     private func leadingWhitespaceLength(_ text: String) -> Int {
-        guard let range = text.range(of: #"^[\n\s]+"#, options: .regularExpression) else { return 0 }
-        return text[range].utf16.count
+        guard let regex = Self.leadingWhitespaceRegex else { return 0 }
+        let source = text as NSString
+        guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: source.length)),
+              match.range.location == 0 else { return 0 }
+        return match.range.length
+    }
+
+    private static func normalizeLeadingWhitespace(_ text: String) -> String {
+        guard let regex = leadingWhitespaceRegex else { return text }
+        let source = text as NSString
+        guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: source.length)),
+              match.range.location == 0, match.range.length > 0 else { return text }
+        return "　　" + source.substring(from: match.range.length)
+    }
+
+    public func openTextSession(for book: Book) throws -> TextBookSession {
+        let decoded = try read(book)
+        return TextBookSession(data: decoded.data, encoding: decoded.encoding)
     }
 
     public func loadContent(book: Book, chapter: BookChapter) throws -> ChapterContentReport {
@@ -372,7 +410,7 @@ public struct LocalBookService: Sendable {
             encoding = try decode(probe, allowTruncatedTail: fileSize > probe.count).encoding
         }
         guard let decodedContent = String(data: contentData, encoding: encoding) else { throw LocalBookError.unreadableEncoding }
-        let content = decodedContent.replacingOccurrences(of: #"^[\n\s]+"#, with: "　　", options: .regularExpression)
+        let content = Self.normalizeLeadingWhitespace(decodedContent)
         return .init(title: chapter.title, content: content, pagesVisited: 1)
     }
 
@@ -682,17 +720,14 @@ public struct LocalBookService: Sendable {
            bomLength <= data.count,
            let text = String(data: data.subdata(in: bomLength..<data.count), encoding: encoding) {
             let source = text as NSString
-            let offsets = try byteOffsetMap(text, encoding: encoding, initialOffset: bomLength)
-            var previousEnd = 0
-            return try expression.matches(in: text, range: NSRange(location: 0, length: source.length)).map { match in
-                try Task.checkCancellation()
-                let titleRange = usesFirstCapture && match.numberOfRanges > 1 ? match.range(at: 1) : match.range
-                let title = titleRange.location == NSNotFound ? "" : source.substring(with: titleRange)
-                let start = min(match.range.location, offsets.count - 1)
-                let end = min(NSMaxRange(match.range), offsets.count - 1)
-                defer { previousEnd = NSMaxRange(match.range) }
-                return .init(title: title, start: offsets[start], end: offsets[end], previousLength: match.range.location - previousEnd)
-            }
+            let matches = expression.matches(in: text, range: NSRange(location: 0, length: source.length))
+            return try buildHeadingMatches(
+                in: source,
+                matches: matches,
+                encoding: encoding,
+                initialOffset: bomLength,
+                usesFirstCapture: usesFirstCapture
+            )
         }
         let blockSize = 512_000
         var position = bomLength
@@ -714,21 +749,15 @@ public struct LocalBookService: Sendable {
                 continue
             }
             let source = block as NSString
-            let offsets = try byteOffsetMap(block, encoding: encoding, initialOffset: position)
-            var previousEnd = 0
-            for match in expression.matches(in: block, range: NSRange(location: 0, length: source.length)) {
-                try Task.checkCancellation()
-                let titleRange = usesFirstCapture && match.numberOfRanges > 1 ? match.range(at: 1) : match.range
-                let title = titleRange.location == NSNotFound ? "" : source.substring(with: titleRange)
-                let startIndex = min(match.range.location, offsets.count - 1)
-                let endIndex = min(NSMaxRange(match.range), offsets.count - 1)
-                output.append(.init(
-                    title: title,
-                    start: offsets[startIndex],
-                    end: offsets[endIndex],
-                    previousLength: max(match.range.location - previousEnd, 0)
+            let matches = expression.matches(in: block, range: NSRange(location: 0, length: source.length))
+            if !matches.isEmpty {
+                output.append(contentsOf: try buildHeadingMatches(
+                    in: source,
+                    matches: matches,
+                    encoding: encoding,
+                    initialOffset: position,
+                    usesFirstCapture: usesFirstCapture
                 ))
-                previousEnd = NSMaxRange(match.range)
             }
             position = end
         }
@@ -971,25 +1000,111 @@ public struct LocalBookService: Sendable {
         return nil
     }
 
-    private func byteOffsetMap(_ content: String, encoding: String.Encoding, initialOffset: Int) throws -> [Int64] {
-        var offsets = [Int64](repeating: Int64(initialOffset), count: content.utf16.count + 1)
-        var utf16Index = 0
-        var byteOffset = initialOffset
-        for scalar in content.unicodeScalars {
-            if utf16Index.isMultiple(of: 1_024) { try Task.checkCancellation() }
-            let scalarText = String(scalar)
-            let unitCount = scalarText.utf16.count
-            let byteCount = isUTF16(encoding)
-                ? unitCount * 2
-                : (scalarText.data(using: encoding, allowLossyConversion: true)?.count ?? 0)
-            if unitCount > 1 {
-                for step in 1..<unitCount { offsets[utf16Index + step] = Int64(byteOffset) }
+    private func buildHeadingMatches(
+        in source: NSString,
+        matches: [NSTextCheckingResult],
+        encoding: String.Encoding,
+        initialOffset: Int,
+        usesFirstCapture: Bool
+    ) throws -> [TxtHeadingMatch] {
+        guard !matches.isEmpty else { return [] }
+        let totalUTF16 = source.length
+        let cfString = source as CFString
+        let cfEncoding = CFStringConvertNSStringEncodingToEncoding(encoding.rawValue)
+        let utf16 = isUTF16(encoding)
+        var cursorUTF16 = 0
+        var cursorByteOffset = Int64(initialOffset)
+        var previousEnd = 0
+        var output: [TxtHeadingMatch] = []
+        output.reserveCapacity(matches.count)
+
+        func advance(to targetUTF16: Int) throws -> Int64 {
+            let clamped = min(max(targetUTF16, 0), totalUTF16)
+            if utf16 {
+                return Int64(initialOffset) + Int64(clamped) * 2
             }
-            utf16Index += unitCount
-            byteOffset += byteCount
-            offsets[utf16Index] = Int64(byteOffset)
+            if clamped == cursorUTF16 { return cursorByteOffset }
+            let delta = clamped - cursorUTF16
+            if delta > 0 {
+                cursorByteOffset += try byteLength(
+                    of: cfString,
+                    range: CFRange(location: cursorUTF16, length: delta),
+                    encoding: encoding,
+                    cfEncoding: cfEncoding
+                )
+                cursorUTF16 = clamped
+                return cursorByteOffset
+            }
+            cursorByteOffset = Int64(initialOffset) + (try byteLength(
+                of: cfString,
+                range: CFRange(location: 0, length: clamped),
+                encoding: encoding,
+                cfEncoding: cfEncoding
+            ))
+            cursorUTF16 = clamped
+            return cursorByteOffset
         }
-        return offsets
+
+        for match in matches {
+            try Task.checkCancellation()
+            let titleRange = usesFirstCapture && match.numberOfRanges > 1 ? match.range(at: 1) : match.range
+            let title = titleRange.location == NSNotFound ? "" : source.substring(with: titleRange)
+            let start = try advance(to: match.range.location)
+            let end = try advance(to: NSMaxRange(match.range))
+            output.append(.init(
+                title: title,
+                start: start,
+                end: end,
+                previousLength: max(match.range.location - previousEnd, 0)
+            ))
+            previousEnd = NSMaxRange(match.range)
+        }
+        return output
+    }
+
+    private func byteLength(
+        of cfString: CFString,
+        range: CFRange,
+        encoding: String.Encoding,
+        cfEncoding: CFStringEncoding
+    ) throws -> Int64 {
+        guard range.length > 0 else { return 0 }
+        if cfEncoding != kCFStringEncodingInvalidId {
+            var totalBytes: Int64 = 0
+            var location = range.location
+            let end = range.location + range.length
+            let chunkSize = 65_536
+            while location < end {
+                try Task.checkCancellation()
+                var length = min(chunkSize, end - location)
+                if location + length < end {
+                    let lastUnit = CFStringGetCharacterAtIndex(cfString, location + length - 1)
+                    if (0xD800...0xDBFF).contains(lastUnit) {
+                        length += 1
+                    }
+                }
+                var usedBufLen: CFIndex = 0
+                let converted = CFStringGetBytes(
+                    cfString,
+                    CFRange(location: location, length: length),
+                    cfEncoding,
+                    UInt8(ascii: "?"),
+                    false,
+                    nil,
+                    0,
+                    &usedBufLen
+                )
+                if converted > 0 {
+                    totalBytes += Int64(usedBufLen)
+                    location += converted
+                } else {
+                    location += 1
+                }
+            }
+            return totalBytes
+        }
+        let substring = CFStringCreateWithSubstring(nil, cfString, range) as String
+        return Int64(substring.data(using: encoding, allowLossyConversion: true)?.count ?? 0)
     }
 
     private func textProbe(_ data: Data, encoding: String.Encoding) -> String {

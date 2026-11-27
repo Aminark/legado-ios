@@ -177,9 +177,12 @@ struct ReaderTextView: UIViewRepresentable {
         context.coordinator.updateInteractionMode(on: view, isScrollMode: effectivePageAnimation == 3)
         view.backgroundColor = backgroundColor
         view.isOpaque = backgroundColor != .clear
-        view.isSelectable = false
-        view.selectedRange = NSRange(location: 0, length: 0)
-        view.resignFirstResponder()
+        if view.selectedRange.length > 0 {
+            view.selectedRange = NSRange(location: 0, length: 0)
+        }
+        if view.isFirstResponder {
+            view.resignFirstResponder()
+        }
         let contentKey = text.hashValue
         var primaryHasher = Hasher()
         primaryHasher.combine(title)
@@ -187,7 +190,18 @@ struct ReaderTextView: UIViewRepresentable {
         let primaryContentKey = primaryHasher.finalize()
         let showsContinuation = effectivePageAnimation == 3 && isContinuationReady && continuationTitle != nil
         let showsPrevious = showsContinuation && isPreviousReady && previousTitle != nil
-        let adjacentContentKey = "\(showsPrevious)|\(previousTitle ?? "")|\(previousText)|\(showsContinuation)|\(continuationTitle ?? "")|\(continuationText)".hashValue
+        var adjacentHasher = Hasher()
+        adjacentHasher.combine(showsPrevious)
+        if showsPrevious {
+            adjacentHasher.combine(previousTitle)
+            adjacentHasher.combine(previousText)
+        }
+        adjacentHasher.combine(showsContinuation)
+        if showsContinuation {
+            adjacentHasher.combine(continuationTitle)
+            adjacentHasher.combine(continuationText)
+        }
+        let adjacentContentKey = adjacentHasher.finalize()
         let displaysTitle = titleMode != 2 || isVolume
         let titlePrefix = displaysTitle && !title.isEmpty ? title + "\n" : ""
         let styleKey = "\(contentKey)|\(adjacentContentKey)|\(title)|\(isVolume)|\(fontSize)|\(fontPath)|\(fontRevision)|\(letterSpacing)|\(lineSpacing)|\(paragraphSpacing)|\(paragraphIndent)|\(paddingLeft)|\(paddingRight)|\(paddingTop)|\(paddingBottom)|\(headerInset)|\(footerInset)|\(fontWeight)|\(titleMode)|\(titleSize)|\(titleTopSpacing)|\(titleBottomSpacing)|\(underlineMode)|\(isSelectable)|\(fullJustify)|\(effectivePageAnimation)|\(foregroundColor.hash)"
@@ -354,8 +368,15 @@ struct ReaderTextView: UIViewRepresentable {
         func installDisplayLink(for view: UITextView) {
             textView = view
             let link = CADisplayLink(target: self, selector: #selector(step(_:)))
+            link.isPaused = true
             link.add(to: .main, forMode: .common)
             displayLink = link
+        }
+
+        private func syncDisplayLinkPaused() {
+            let shouldRun = isAutoReading && !isAutoReadPaused && !parent.holdsDisplayedPage
+            displayLink?.isPaused = !shouldRun
+            if !shouldRun { lastTimestamp = 0 }
         }
 
         func installGestures(on view: UITextView) {
@@ -446,6 +467,7 @@ struct ReaderTextView: UIViewRepresentable {
             layoutAnchor = nil
             layoutGeneration &+= 1
             isAutoReadPaused = true
+            syncDisplayLinkPaused()
         }
 
         func invalidate() {
@@ -470,6 +492,7 @@ struct ReaderTextView: UIViewRepresentable {
             } else if isPaused || wasPaused != isPaused {
                 lastTimestamp = 0
             }
+            syncDisplayLinkPaused()
         }
 
         func resetAutoReadForPageChange() {
@@ -926,29 +949,26 @@ struct ReaderTextView: UIViewRepresentable {
                 parent.onReachedEnd(contentCharacter(at: view.contentOffset, in: view))
                 return
             }
-            isTurningPage = true
             let completion: (Bool) -> Void = { [weak self] _ in self?.isTurningPage = false }
             switch parent.isEInkMode ? 4 : parent.pageAnimation {
             case 4:
                 view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
-                isTurningPage = false
             case 0:
                 let transition = CATransition()
-                transition.duration = 0.3
+                transition.duration = 0.28
                 transition.type = direction > 0 ? .reveal : .moveIn
                 transition.subtype = direction > 0 ? .fromRight : .fromLeft
                 view.layer.add(transition, forKey: "reader-cover")
                 view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.31) { [weak self] in self?.isTurningPage = false }
             case 1:
                 let transition = CATransition()
-                transition.duration = 0.3
+                transition.duration = 0.28
                 transition.type = .push
                 transition.subtype = direction > 0 ? .fromRight : .fromLeft
                 view.layer.add(transition, forKey: "reader-slide")
                 view.setContentOffset(CGPoint(x: 0, y: target), animated: false)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.31) { [weak self] in self?.isTurningPage = false }
             case 2:
+                isTurningPage = true
                 UIView.transition(
                     with: view,
                     duration: 0.38,
@@ -957,6 +977,7 @@ struct ReaderTextView: UIViewRepresentable {
                     completion: completion
                 )
             default:
+                isTurningPage = true
                 view.setContentOffset(CGPoint(x: 0, y: target), animated: true)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in self?.isTurningPage = false }
             }

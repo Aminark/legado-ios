@@ -36,7 +36,7 @@ final class ReadingActivityModel: ObservableObject {
         let bookmarksURL = base.appendingPathComponent("bookmarks.json")
         let recordsURL = base.appendingPathComponent("read-records.json")
         let repository: any ReadingActivityRepository
-        if let database = try? LegadoDatabase(url: base.appendingPathComponent("legado.sqlite3")) {
+        if let database = try? LegadoDatabase.shared(url: base.appendingPathComponent("legado.sqlite3")) {
             repository = SQLiteReadingActivityRepository(
                 database: database,
                 legacyBookmarksURL: bookmarksURL,

@@ -281,11 +281,34 @@ final class ReaderScrollGestureTests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(font.waitForExistence(timeout: 5))
         XCTAssertTrue(font.isEnabled)
-        font.tap()
-        XCTAssertTrue(app.buttons["更换字体文件"].waitForExistence(timeout: 10))
+        font.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        let open = app.buttons.matching(NSPredicate(format: "label IN %@", ["Open", "打开", "Import", "导入"])).firstMatch
+        if open.waitForExistence(timeout: 3) {
+            XCTAssertTrue(open.isEnabled)
+            open.tap()
+        }
+        XCTAssertTrue(app.buttons["更换字体文件"].waitForExistence(timeout: 10), app.debugDescription)
         let installed = app.staticTexts["Reader-Test.ttf"]
         scrollToAppearanceElement(installed, in: app)
         XCTAssertTrue(installed.isHittable)
+
+        // Selecting a non-font file must report a clear error without clearing the installed font.
+        scrollToAppearanceElement(choose, in: app)
+        choose.tap()
+        openImportFixtureFolder(in: app)
+        let nonFont = app.collectionViews["File View"].cells.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "TXT-Book")
+        ).firstMatch
+        XCTAssertTrue(nonFont.waitForExistence(timeout: 5))
+        nonFont.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        if open.waitForExistence(timeout: 3) {
+            XCTAssertTrue(open.isEnabled)
+            open.tap()
+        }
+        let errorText = app.staticTexts["所选文件不是有效的字体文件，请选择 .ttf、.otf 或 .ttc 字体文件。"]
+        XCTAssertTrue(errorText.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(installed.exists)
+
         let reset = app.buttons["恢复默认字体"]
         scrollToAppearanceElement(reset, in: app)
         reset.tap()

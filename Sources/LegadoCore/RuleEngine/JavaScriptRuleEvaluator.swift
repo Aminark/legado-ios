@@ -162,7 +162,7 @@ public final class SynchronousJavaScriptNetworkLoader: JavaScriptRedirectNetwork
     public func load(_ original: URLRequest, followRedirects: Bool) throws -> HTTPResponse {
         let settings = ApplicationSettingsStore.shared.settings
         let request = settings.configure(original)
-        let address = try ApplicationSettings.parseHosts(settings.hosts)[request.url?.host?.lowercased() ?? ""]
+        let address = try ApplicationSettingsStore.shared.hostsMap(for: settings)[request.url?.host?.lowercased() ?? ""]
         if followRedirects || (settings.proxy.isEmpty && address != nil) {
             let semaphore = DispatchSemaphore(value: 0)
             let lock = NSLock()

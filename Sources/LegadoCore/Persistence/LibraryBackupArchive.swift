@@ -186,7 +186,14 @@ public enum LibraryBackupArchive {
     private static func hex(_ hash: SHA256.Digest) -> String { hash.map { String(format: "%02x", $0) }.joined() }
 }
 
+public struct LibraryBackupExportResult: Sendable {
+    public let url: URL
+    public let skippedLocalBooks: [String]
+}
+
 public actor LibraryBackupService {
+    private static let ioQueue = DispatchQueue(label: "Legado.LibraryBackupIO", qos: .userInitiated, attributes: .concurrent)
+
     private let database: LegadoDatabase
     private let support: URL
     private var rulesURL: URL { support.appendingPathComponent("replace-rules.json") }
@@ -198,7 +205,16 @@ public actor LibraryBackupService {
 
     public static func live() throws -> LibraryBackupService {
         let location = LegadoDatabase.defaultURL()
-        return .init(database: try LegadoDatabase(url: location), support: location.deletingLastPathComponent())
+        return .init(database: try LegadoDatabase.shared(url: location), support: location.deletingLastPathComponent())
+    }
+
+    private static func runBlockingIO<T: Sendable>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
+        try Task.checkCancellation()
+        return try await withCheckedThrowingContinuation { continuation in
+            ioQueue.async {
+                continuation.resume(with: Result { try operation() })
+            }
+        }
     }
 
     func snapshot() async throws -> LibrarySnapshot {
@@ -210,17 +226,45 @@ public actor LibraryBackupService {
     }
 
     public func export(includeLocalBooks: Bool) async throws -> URL {
+        try await exportDetailed(includeLocalBooks: includeLocalBooks).url
+    }
+
+    public func exportDetailed(includeLocalBooks: Bool) async throws -> LibraryBackupExportResult {
         var value = try await snapshot()
         var files: [String: URL] = [:]
+        var skippedLocalBooks: [String] = []
         if includeLocalBooks {
+            let localFolder = support.appendingPathComponent("LocalBooks", isDirectory: true)
+            let localFolderPath = localFolder.resolvingSymlinksInPath().standardizedFileURL.path
+            var missingIDs = Set<String>()
             for index in value.books.indices where value.books[index].origin == "local" {
-                guard let url = URL(string: value.books[index].bookUrl), url.isFileURL,
-                      url.deletingLastPathComponent().standardizedFileURL.path == support.appendingPathComponent("LocalBooks").standardizedFileURL.path else {
-                    throw LibraryBackupError.invalid("本地书文件位置不正确")
+                guard let url = URL(string: value.books[index].bookUrl), url.isFileURL else {
+                    missingIDs.insert(value.books[index].id)
+                    skippedLocalBooks.append(value.books[index].name)
+                    continue
                 }
-                files["local/" + url.lastPathComponent] = url
-                let portable = URL(fileURLWithPath: "/local").appendingPathComponent(url.lastPathComponent)
+                let resolvedParent = url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
+                let candidate: URL
+                if resolvedParent == localFolderPath, FileManager.default.fileExists(atPath: url.path) {
+                    candidate = url
+                } else {
+                    // Recover books whose saved absolute path came from a previous iOS container UUID.
+                    let recovered = localFolder.appendingPathComponent(url.lastPathComponent)
+                    guard FileManager.default.fileExists(atPath: recovered.path) else {
+                        missingIDs.insert(value.books[index].id)
+                        skippedLocalBooks.append(value.books[index].name)
+                        continue
+                    }
+                    candidate = recovered
+                }
+                files["local/" + candidate.lastPathComponent] = candidate
+                let portable = URL(fileURLWithPath: "/local").appendingPathComponent(candidate.lastPathComponent)
                 value.relocateLocalBook(at: index, to: portable.absoluteString)
+            }
+            if !missingIDs.isEmpty {
+                value.books.removeAll { missingIDs.contains($0.id) }
+                let retained = Set(value.books.map(\.id))
+                value.chapters = value.chapters.filter { retained.contains($0.key) }
             }
         } else {
             value.books.removeAll { $0.origin == "local" }
@@ -228,19 +272,27 @@ public actor LibraryBackupService {
             value.chapters = value.chapters.filter { retained.contains($0.key) }
         }
         let destination = FileManager.default.temporaryDirectory.appendingPathComponent("小浣熊阅读-\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.prefix(6)).legadobackup")
-        try LibraryBackupArchive.write(snapshot: value, files: files, to: destination)
-        return destination
-    }
-    public func prepare(_ url: URL) throws -> PreparedLibraryBackup {
-        var coordinationError: NSError?
-        var result: Result<PreparedLibraryBackup, Error>?
-        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { readable in
-            result = Result { try LibraryBackupArchive.prepare(readable) }
+        let snapshotToWrite = value
+        let filesToWrite = files
+        try await Self.runBlockingIO {
+            try LibraryBackupArchive.write(snapshot: snapshotToWrite, files: filesToWrite, to: destination)
         }
-        if let coordinationError { throw coordinationError }
-        guard let result else { throw LibraryBackupError.invalid("无法读取备份文件") }
-        return try result.get()
+        return LibraryBackupExportResult(url: destination, skippedLocalBooks: skippedLocalBooks)
     }
+
+    public func prepare(_ url: URL) async throws -> PreparedLibraryBackup {
+        try await Self.runBlockingIO {
+            var coordinationError: NSError?
+            var result: Result<PreparedLibraryBackup, Error>?
+            NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { readable in
+                result = Result { try LibraryBackupArchive.prepare(readable) }
+            }
+            if let coordinationError { throw coordinationError }
+            guard let result else { throw LibraryBackupError.invalid("无法读取备份文件") }
+            return try result.get()
+        }
+    }
+
     public func restore(_ prepared: PreparedLibraryBackup) async throws {
         var incoming = prepared.manifest.snapshot
         let before = try await snapshot().validated()
@@ -269,6 +321,7 @@ public actor LibraryBackupService {
         }
         var created: [URL] = []
         var replacements: [String: String] = [:]
+        let supportDirectory = support
         do {
             for attachment in prepared.manifest.attachments where attachment.path.hasPrefix("local/") {
                 let source = prepared.directory.appendingPathComponent(attachment.path)
@@ -276,20 +329,23 @@ public actor LibraryBackupService {
                 if matchingBooks.isEmpty { continue }
                 // Each restore owns its files until the database transaction commits.
                 // A failed concurrent restore can only remove the copies it created.
-                let folder = support.appendingPathComponent("LocalBooks", isDirectory: true)
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                var stem = source.deletingPathExtension().lastPathComponent
-                while stem.utf8.count > 160 { stem.removeLast() }
-                let target = folder.appendingPathComponent(stem + "-" + UUID().uuidString).appendingPathExtension(source.pathExtension)
-                let staging = folder.appendingPathComponent(".restore-" + UUID().uuidString)
-                do {
-                    try FileManager.default.copyItem(at: source, to: staging)
-                    try FileManager.default.moveItem(at: staging, to: target)
-                    created.append(target)
-                } catch {
-                    try? FileManager.default.removeItem(at: staging)
-                    throw error
+                let target = try await Self.runBlockingIO { () -> URL in
+                    let folder = supportDirectory.appendingPathComponent("LocalBooks", isDirectory: true)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    var stem = source.deletingPathExtension().lastPathComponent
+                    while stem.utf8.count > 160 { stem.removeLast() }
+                    let destination = folder.appendingPathComponent(stem + "-" + UUID().uuidString).appendingPathExtension(source.pathExtension)
+                    let staging = folder.appendingPathComponent(".restore-" + UUID().uuidString)
+                    do {
+                        try FileManager.default.copyItem(at: source, to: staging)
+                        try FileManager.default.moveItem(at: staging, to: destination)
+                        return destination
+                    } catch {
+                        try? FileManager.default.removeItem(at: staging)
+                        throw error
+                    }
                 }
+                created.append(target)
                 for index in matchingBooks {
                     let old = incoming.books[index].id
                     incoming.relocateLocalBook(at: index, to: target.absoluteString)

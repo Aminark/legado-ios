@@ -70,7 +70,7 @@ struct AndroidLibraryImportView: View {
             await books.waitForLibraryWrites()
             await sources.waitForLibraryWrites()
             await rules.waitForLibraryWrites()
-            let db = try LegadoDatabase(url: LegadoDatabase.defaultURL())
+            let db = try LegadoDatabase.shared()
             try await db.restoreLibrary(value, sections: selected, legacyRulesURL: LibraryRuleRepository.legacyURL)
             try await db.applyImportedPreferences()
             await books.load()
@@ -165,7 +165,7 @@ struct OfflineBooksView: View {
         message = nil
         defer { loading = false }
         do {
-            let database = try LegadoDatabase(url: LegadoDatabase.defaultURL())
+            let database = try LegadoDatabase.shared()
             var chapters = try await database.loadChapters(bookURL: book.id)
             if chapters.isEmpty {
                 let report = await NetworkBookService().loadChapters(book: book, source: source)
@@ -254,7 +254,7 @@ struct LibraryPassageView: View {
         issue = nil
         do {
             let search = try LibraryPassageSearch()
-            let db = try LegadoDatabase(url: LegadoDatabase.defaultURL())
+            let db = try LegadoDatabase.shared()
             let books = current.map { [$0.book] } ?? library.books
             var unavailable = 0
             for book in books {

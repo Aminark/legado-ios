@@ -73,7 +73,7 @@ public struct BookSourceDebugger: Sendable {
     private let searchService: BookSearchService
     private let bookService: NetworkBookService
 
-    public init(transport: any HTTPTransport = URLSessionHTTPTransport()) {
+    public init(transport: any HTTPTransport = URLSessionHTTPTransport.shared) {
         searchService = BookSearchService(transport: transport)
         bookService = NetworkBookService(transport: transport)
     }

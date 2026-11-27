@@ -31,7 +31,7 @@ struct BookDetailView: View {
             VStack(alignment: .leading, spacing: 24) {
                 hero
                 Divider()
-                if let intro = MetadataTextSanitizer().clean(model.book.intro), !intro.isEmpty {
+                if let intro = model.cleanedIntro, !intro.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("简介").font(.headline)
                         Text(intro).font(.subheadline).foregroundStyle(.secondary).lineSpacing(5)

@@ -8,7 +8,7 @@ final class TxtTocRuleManagementModel: ObservableObject {
     private let repository: SQLiteConfigurationRepository?
 
     init() {
-        repository = (try? LegadoDatabase(url: LegadoDatabase.defaultURL())).map {
+        repository = (try? LegadoDatabase.shared()).map {
             SQLiteConfigurationRepository(database: $0)
         }
     }

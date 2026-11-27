@@ -2,6 +2,12 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct RootTabView: View {
+    private struct IncomingBackupItem: Identifiable {
+        let url: URL
+        var id: String { url.absoluteString }
+    }
+
+    @Binding var incomingBackupURL: URL?
     @EnvironmentObject private var sourceLibrary: SourceLibraryModel
     private enum Tab: Hashable { case bookshelf, explore, statistics, my }
     @State private var selection: Tab
@@ -11,7 +17,8 @@ struct RootTabView: View {
     @State private var displayedSourceNotice: SourceLibraryModel.Notice?
     @AppStorage("themeMode") private var themeMode = "0"
 
-    init() {
+    init(incomingBackupURL: Binding<URL?> = .constant(nil)) {
+        _incomingBackupURL = incomingBackupURL
         let arguments = ProcessInfo.processInfo.arguments
         let requested = arguments.firstIndex(of: "-uiDemoTab")
             .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
@@ -116,6 +123,16 @@ struct RootTabView: View {
                 .environmentObject(sourceLibrary)
                 .onAppear { sourceImportIsPresented = true }
         }
+        .sheet(item: Binding(
+            get: { incomingBackupURL.map(IncomingBackupItem.init(url:)) },
+            set: { if $0 == nil { incomingBackupURL = nil } }
+        )) { item in
+            ReadingNavigationStack {
+                LocalBackupView(incomingURL: item.url) {
+                    incomingBackupURL = nil
+                }
+            }
+        }
         .onChange(of: sourceLibrary.notice?.id) { _ in
             if !sourceImportIsPresented { displayedSourceNotice = sourceLibrary.notice }
         }
@@ -175,15 +192,11 @@ private struct BookshelfView: View {
             ?? BookGroup(groupId: BookGroup.idAll, groupName: "全部")
     }
 
-    private var displayedBooks: [Book] { library.books(in: selectedGroup, defaultSort: bookshelfSort) }
-
-    private var recentBook: Book? {
-        displayedBooks.filter(BookReadingPresentation.hasStarted)
-            .sorted { $0.durChapterTime > $1.durChapterTime }
-            .first
-    }
-
     var body: some View {
+        let currentGroup = selectedGroup
+        let books = library.books(in: currentGroup, defaultSort: bookshelfSort)
+        let recent = books.filter(BookReadingPresentation.hasStarted)
+            .max { $0.durChapterTime < $1.durChapterTime }
         GeometryReader { geometry in
             ScrollView {
                 VStack(spacing: 0) {
@@ -192,17 +205,17 @@ private struct BookshelfView: View {
                             ReadingToolbarIcon(systemName: "magnifyingglass")
                         }
                         .accessibilityLabel("搜索")
-                        bookshelfMenu
+                        bookshelfMenu(group: currentGroup, bookCount: books.count)
                     }
                     if !library.books.isEmpty && library.visibleGroups.count > 1 {
                         bookshelfGroups.padding(.bottom, 24)
                     }
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        if displayedBooks.isEmpty {
+                        if books.isEmpty {
                             EmptyBookshelfHero { showsLocalImporter = true }
                                 .padding(.top, min(80, max(24, geometry.size.height * 0.075)))
                         } else {
-                            if let book = recentBook {
+                            if let book = recent {
                                 VStack(alignment: .leading, spacing: 12) {
                                     Text("继续阅读")
                                         .font(.subheadline.weight(.medium))
@@ -216,17 +229,18 @@ private struct BookshelfView: View {
                                 }
                                 .padding(.bottom, 30)
                             }
-                            bookshelfSummary
+                            bookshelfSummary(group: currentGroup, count: books.count)
                             if bookshelfLayout.hasPrefix("grid") {
                                 LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
-                                    ForEach(displayedBooks) { book in
+                                    ForEach(books) { book in
                                         BookshelfBookLink(book: book, compact: false, grid: true) { open(book) }
                                     }
                                 }
                             } else {
-                                ForEach(displayedBooks) { book in
+                                let lastID = books.last?.id
+                                ForEach(books) { book in
                                     BookshelfBookLink(book: book, compact: bookshelfLayout == "compact", grid: false) { open(book) }
-                                    if book.id != displayedBooks.last?.id {
+                                    if book.id != lastID {
                                         Rectangle().fill(ReadingTheme.separator).frame(height: 0.5)
                                             .padding(.leading, bookshelfLayout == "compact" ? 54 : 66)
                                     }
@@ -252,9 +266,9 @@ private struct BookshelfView: View {
             }
         }
         .onDisappear { opening?.cancel(); warmedReader = nil }
-        .task(id: recentBook) {
+        .task(id: recent) {
             warmedReader = nil
-            guard let book = recentBook, book.origin != "local",
+            guard let book = recent, book.origin != "local",
                   let source = sources.sources.first(where: { $0.id == book.origin }),
                   !ProcessInfo.processInfo.arguments.contains("-uiDemo") else { return }
             let chapters = await library.updateCoordinator.storedChapters(bookURL: book.bookUrl)
@@ -339,13 +353,13 @@ private struct BookshelfView: View {
         }
     }
 
-    private var bookshelfSummary: some View {
+    private func bookshelfSummary(group: BookGroup, count: Int) -> some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(selectedGroupID == BookGroup.idAll ? "全部书籍" : selectedGroup.groupName)
+                Text(selectedGroupID == BookGroup.idAll ? "全部书籍" : group.groupName)
                     .font(.title3.bold())
                     .accessibilityAddTraits(.isHeader)
-                Text("\(displayedBooks.count)本")
+                Text("\(count)本")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -372,13 +386,13 @@ private struct BookshelfView: View {
     }
 
     @ViewBuilder
-    private var bookshelfMenu: some View {
+    private func bookshelfMenu(group: BookGroup, bookCount: Int) -> some View {
         if library.isCheckingUpdates {
             ProgressView().controlSize(.small).frame(width: 44, height: 44)
         } else {
             Menu {
                 Button("更新目录", systemImage: "arrow.clockwise") {
-                    Task { await library.checkForUpdates(sources: sources.sources, group: selectedGroup) }
+                    Task { await library.checkForUpdates(sources: sources.sources, group: group) }
                 }
                 Button("书架正文搜索", systemImage: "text.magnifyingglass") { shelfTool = .search }
                 Button("整书离线", systemImage: "arrow.down.circle") { shelfTool = .downloads }
@@ -386,21 +400,21 @@ private struct BookshelfView: View {
                 Button("书架分组", systemImage: "rectangle.3.group") { showsGroupManager = true }
                 Menu("本分组设置", systemImage: "slider.horizontal.3") {
                     Picker("书籍排序", selection: Binding(
-                        get: { selectedGroup.bookSort },
-                        set: { sort in Task { await library.setGroupSort(selectedGroup, sort: sort) } }
+                        get: { group.bookSort },
+                        set: { sort in Task { await library.setGroupSort(group, sort: sort) } }
                     )) {
                         Text("跟随默认排序").tag(-1)
                         ForEach(BookshelfSort.allCases) { sort in Text(sort.title).tag(sort.rawValue) }
                     }
                     Button("调整书籍顺序") { showsBookOrder = true }
-                        .disabled(displayedBooks.count < 2)
+                        .disabled(bookCount < 2)
                     Toggle("允许下拉更新", isOn: Binding(
-                        get: { selectedGroup.enableRefresh },
-                        set: { enabled in Task { await library.setGroupRefreshEnabled(selectedGroup, enabled: enabled) } }
+                        get: { group.enableRefresh },
+                        set: { enabled in Task { await library.setGroupRefreshEnabled(group, enabled: enabled) } }
                     ))
                     Toggle("仅更新已读至最新章的书", isOn: Binding(
-                        get: { selectedGroup.onlyUpdateRead },
-                        set: { enabled in Task { await library.setGroupOnlyUpdateRead(selectedGroup, enabled: enabled) } }
+                        get: { group.onlyUpdateRead },
+                        set: { enabled in Task { await library.setGroupOnlyUpdateRead(group, enabled: enabled) } }
                     ))
                 }
                 Menu("书架布局", systemImage: "square.grid.2x2") {
@@ -1166,7 +1180,8 @@ struct SearchView: View {
     }
 
     private var resultsContent: some View {
-        Group {
+        let sourceByURL = Dictionary(library.sources.map { ($0.bookSourceUrl, $0) }, uniquingKeysWith: { first, _ in first })
+        return Group {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -1194,7 +1209,7 @@ struct SearchView: View {
             .padding(.vertical, 4)
 
             ForEach(model.books) { book in
-                if let source = library.sources.first(where: { $0.bookSourceUrl == book.origin }) {
+                if let source = sourceByURL[book.origin] {
                     NavigationLink {
                         BookDetailView(searchBook: book, source: source)
                     } label: {
@@ -1467,8 +1482,14 @@ private struct SettingsView: View {
                         readingSection
                         rulesSection
                         settingSection("文件与存储") {
-                            settingLink("文件管理", icon: "folder", showsSeparator: false) {
+                            settingLink("文件管理", icon: "folder") {
                                 FileManagementView()
+                            }
+                            settingLink("本机书库备份", icon: "externaldrive.badge.timemachine") {
+                                LocalBackupView()
+                            }
+                            settingLink("整书离线", icon: "arrow.down.circle", showsSeparator: false) {
+                                OfflineBooksView()
                             }
                         }
                         supportSection
@@ -1718,7 +1739,7 @@ private struct ProfileDestination<Content: View>: View {
 }
 
 private enum ProfileTheme {
-    static let canvas = adaptive(0xF8F8F7, dark: 0x141416)
+    static let canvas = adaptive(0xF8F8F7, dark: 0x111113)
     static let surface = adaptive(0xFFFFFF, dark: 0x232326)
     static let appCardTint = adaptive(0xFBF3EC, dark: 0x302923)
     static let ink = adaptive(0x171817, dark: 0xF3F0EC)
@@ -1816,6 +1837,12 @@ private struct ProfileSettingIcon: View {
 }
 
 private struct AllBookmarksView: View {
+    private static let exportDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyMMddHHmmss"
+        return formatter
+    }()
+
     @EnvironmentObject private var activity: ReadingActivityModel
     @EnvironmentObject private var library: BookLibraryModel
     @EnvironmentObject private var sources: SourceLibraryModel
@@ -1837,6 +1864,8 @@ private struct AllBookmarksView: View {
     }
 
     var body: some View {
+        let bookByKey = Dictionary(library.books.map { ($0.name + "\u{0}" + $0.author, $0) }, uniquingKeysWith: { first, _ in first })
+        let sourceByURL = Dictionary(sources.sources.map { ($0.bookSourceUrl, $0) }, uniquingKeysWith: { first, _ in first })
         List {
             if activity.bookmarks.isEmpty {
                 ReadingUnavailableView(
@@ -1848,7 +1877,9 @@ private struct AllBookmarksView: View {
                 ForEach(sections) { section in
                     Section("\(section.bookName)(\(section.author))") {
                         ForEach(section.bookmarks) { bookmark in
-                            bookmarkLink(bookmark)
+                            let matchedBook = bookByKey[bookmark.bookName + "\u{0}" + bookmark.bookAuthor]
+                            let matchedSource = matchedBook.flatMap { sourceByURL[$0.origin] }
+                            bookmarkLink(bookmark, book: matchedBook, source: matchedSource)
                                 .contextMenu {
                                     Button("编辑书签", systemImage: "square.and.pencil") { editingBookmark = bookmark }
                                 }
@@ -1885,17 +1916,13 @@ private struct AllBookmarksView: View {
         ) { _ in }
     }
 
-    private func matchingBook(_ bookmark: Bookmark) -> Book? {
-        library.books.first { $0.name == bookmark.bookName && $0.author == bookmark.bookAuthor }
-    }
-
-    @ViewBuilder private func bookmarkLink(_ bookmark: Bookmark) -> some View {
-        if let book = matchingBook(bookmark) {
+    @ViewBuilder private func bookmarkLink(_ bookmark: Bookmark, book: Book?, source: BookSource?) -> some View {
+        if let book {
             NavigationLink {
                 BookmarkReaderDestination(
                     book: book,
                     bookmark: bookmark,
-                    source: sources.sources.first { $0.bookSourceUrl == book.origin }
+                    source: source
                 )
             } label: { bookmarkRow(bookmark) }
         } else {
@@ -1926,7 +1953,7 @@ private struct AllBookmarksView: View {
         var name = ""
         var author = ""
         for bookmark in activity.bookmarks {
-            if bookmark.bookName != name && bookmark.bookAuthor != author {
+            if bookmark.bookName != name || bookmark.bookAuthor != author {
                 name = bookmark.bookName
                 author = bookmark.bookAuthor
                 output += "## \(bookmark.bookName) \(bookmark.bookAuthor)\n\n"
@@ -1939,9 +1966,7 @@ private struct AllBookmarksView: View {
     }
 
     private func exportFilename(extension value: String) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyMMddHHmmss"
-        return "bookmark-\(formatter.string(from: Date())).\(value)"
+        "bookmark-\(Self.exportDateFormatter.string(from: Date())).\(value)"
     }
 }
 

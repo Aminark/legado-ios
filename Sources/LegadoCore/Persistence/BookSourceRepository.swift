@@ -3,6 +3,13 @@ import Foundation
 public protocol BookSourceRepository: Sendable {
     func load() async throws -> [BookSource]
     func save(_ sources: [BookSource]) async throws
+    func saveUpdate(_ source: BookSource, in sources: [BookSource]) async throws
+}
+
+public extension BookSourceRepository {
+    func saveUpdate(_ source: BookSource, in sources: [BookSource]) async throws {
+        try await save(sources)
+    }
 }
 
 public actor FileBookSourceRepository: BookSourceRepository {

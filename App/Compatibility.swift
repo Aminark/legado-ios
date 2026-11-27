@@ -280,6 +280,168 @@ struct ReadingImportPicker: UIViewControllerRepresentable {
     }
 }
 
+final class SecurityScopedImportURL: @unchecked Sendable {
+    let url: URL
+    private let hasSecurityScope: Bool
+
+    init(url: URL) {
+        self.url = url
+        hasSecurityScope = url.startAccessingSecurityScopedResource()
+    }
+
+    deinit {
+        if hasSecurityScope { url.stopAccessingSecurityScopedResource() }
+    }
+
+    var isDirectory: Bool {
+        if url.hasDirectoryPath { return true }
+        return (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
+    func readData() throws -> Data {
+        var coordinationError: NSError?
+        var readResult: Result<Data, Error>?
+        let coordinator = NSFileCoordinator()
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
+            readResult = Result { try Data(contentsOf: coordinatedURL) }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let readResult else { throw CocoaError(.fileReadUnknown) }
+        return try readResult.get()
+    }
+}
+
+/// Presents `UIDocumentPickerViewController` directly via UIKit from the active
+/// topmost view controller, avoiding SwiftUI nested-sheet and detent conflicts.
+@MainActor
+enum ReadingDocumentPickerPresenter {
+    private static var activeSession: Session?
+
+    static func present(
+        contentTypes: [UTType],
+        allowsMultipleSelection: Bool,
+        onPick: @escaping @MainActor ([SecurityScopedImportURL]) -> Void,
+        onCancel: @escaping @MainActor () -> Void = {}
+    ) {
+        if let existing = activeSession, existing.isActive { return }
+        activeSession = nil
+
+        guard var presenter = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .filter({ $0.activationState == .foregroundActive })
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)?.rootViewController else {
+            onCancel()
+            return
+        }
+        while let presented = presenter.presentedViewController, !presented.isBeingDismissed {
+            presenter = presented
+        }
+        guard !(presenter is UIDocumentPickerViewController) else { return }
+
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: true)
+        picker.allowsMultipleSelection = allowsMultipleSelection
+        picker.shouldShowFileExtensions = true
+
+        let session = Session(picker: picker, onPick: onPick, onCancel: onCancel)
+        picker.delegate = session
+        picker.presentationController?.delegate = session
+        activeSession = session
+
+        let presentNow: @MainActor () -> Void = {
+            presenter.present(picker, animated: true) {
+                Task { @MainActor in
+                    if picker.presentingViewController == nil {
+                        clear(session)
+                        onCancel()
+                    }
+                }
+            }
+        }
+        if let dismissing = presenter.presentedViewController, dismissing.isBeingDismissed {
+            if let coordinator = dismissing.transitionCoordinator {
+                coordinator.animate(alongsideTransition: nil) { _ in
+                    Task { @MainActor in presentNow() }
+                }
+            } else {
+                DispatchQueue.main.async { presentNow() }
+            }
+        } else {
+            presentNow()
+        }
+    }
+
+    private static func clear(_ session: Session) {
+        if activeSession === session { activeSession = nil }
+    }
+
+    @MainActor
+    private final class Session: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
+        private weak var picker: UIDocumentPickerViewController?
+        private let onPick: @MainActor ([SecurityScopedImportURL]) -> Void
+        private let onCancel: @MainActor () -> Void
+        private var finished = false
+
+        var isActive: Bool {
+            !finished && picker?.presentingViewController != nil
+        }
+
+        init(
+            picker: UIDocumentPickerViewController,
+            onPick: @escaping @MainActor ([SecurityScopedImportURL]) -> Void,
+            onCancel: @escaping @MainActor () -> Void
+        ) {
+            self.picker = picker
+            self.onPick = onPick
+            self.onCancel = onCancel
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            finish(controller: controller, files: urls.map(SecurityScopedImportURL.init))
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            finish(controller: controller, files: nil)
+        }
+
+        func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+            finish(controller: nil, files: nil)
+        }
+
+        private func finish(controller: UIDocumentPickerViewController?, files: [SecurityScopedImportURL]?) {
+            guard !finished else { return }
+            finished = true
+            let deliver: @MainActor () -> Void = { [onPick, onCancel] in
+                ReadingDocumentPickerPresenter.clear(self)
+                if let files, !files.isEmpty {
+                    onPick(files)
+                } else {
+                    onCancel()
+                }
+            }
+            guard let controller else {
+                deliver()
+                return
+            }
+            if controller.isBeingDismissed {
+                if let coordinator = controller.transitionCoordinator {
+                    coordinator.animate(alongsideTransition: nil) { _ in
+                        Task { @MainActor in deliver() }
+                    }
+                } else {
+                    DispatchQueue.main.async { deliver() }
+                }
+            } else if controller.presentingViewController != nil {
+                controller.dismiss(animated: true) {
+                    Task { @MainActor in deliver() }
+                }
+            } else {
+                deliver()
+            }
+        }
+    }
+}
+
 enum ReadingSheetDetent { case medium, large }
 
 extension View {

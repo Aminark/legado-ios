@@ -10,7 +10,14 @@ final class BookDetailViewModel: ObservableObject {
     typealias PreparedUpdateCommit = @MainActor (BookUpdateReport) async -> Bool
 
     @Published private(set) var state: State = .idle
-    @Published private(set) var book: Book
+    @Published private(set) var book: Book {
+        didSet {
+            if book.intro != oldValue.intro {
+                cleanedIntro = Self.cleanIntro(book.intro)
+            }
+        }
+    }
+    @Published private(set) var cleanedIntro: String?
     @Published private(set) var chapters: [BookChapter] = []
     @Published private(set) var diagnostics: [RuleDiagnostic] = []
     @Published private(set) var isCaching = false
@@ -57,11 +64,13 @@ final class BookDetailViewModel: ObservableObject {
         book.intro = searchBook.intro
         book.kind = searchBook.kind
         self.book = book
+        cleanedIntro = Self.cleanIntro(book.intro)
     }
 
     init(book: Book, source: BookSource, service: NetworkBookService = .init()) {
         searchBook = nil
         self.book = book
+        cleanedIntro = Self.cleanIntro(book.intro)
         self.source = source
         self.service = service
         let chapters = AppBookChapterRepository.live()
@@ -77,6 +86,7 @@ final class BookDetailViewModel: ObservableObject {
     init(demoBook: Book, source: BookSource, chapters: [BookChapter]) {
         searchBook = nil
         book = demoBook
+        cleanedIntro = Self.cleanIntro(demoBook.intro)
         self.source = source
         service = .init()
         updateCoordinator = .init()
@@ -87,6 +97,10 @@ final class BookDetailViewModel: ObservableObject {
         isCaching = true
         cacheCompleted = 2
         cacheTotal = chapters.filter { !$0.isVolume }.count
+    }
+
+    private static func cleanIntro(_ intro: String?) -> String? {
+        MetadataTextSanitizer().clean(intro)
     }
 
     func load(sources: [BookSource] = [], persistDirectory: Bool = true, runPreUpdateScript: Bool? = nil, forceRefresh: Bool = false,

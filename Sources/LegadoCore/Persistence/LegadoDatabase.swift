@@ -58,6 +58,22 @@ public actor LegadoDatabase {
             .appendingPathComponent("Legado/legado.sqlite3")
     }
 
+    private static let sharedLock = NSLock()
+    nonisolated(unsafe) private static var sharedInstances: [String: LegadoDatabase] = [:]
+
+    /// Reuse one SQLite handle per path inside the app to avoid redundant WAL/migration
+    /// setup and cross-connection lock contention. Tests may still open independent handles
+    /// directly via `init(url:)`.
+    public static func shared(url: URL = defaultURL()) throws -> LegadoDatabase {
+        let key = url.standardizedFileURL.path
+        sharedLock.lock()
+        defer { sharedLock.unlock() }
+        if let existing = sharedInstances[key] { return existing }
+        let created = try LegadoDatabase(url: url)
+        sharedInstances[key] = created
+        return created
+    }
+
     public func compact() throws {
         try Self.execute(handle, "PRAGMA wal_checkpoint(TRUNCATE)")
         try Self.execute(handle, "VACUUM")
@@ -131,16 +147,27 @@ public actor LegadoDatabase {
             if values.isEmpty {
                 try Self.execute(handle, "DELETE FROM book_sources")
             } else {
-                let placeholders = Array(repeating: "?", count: values.count).joined(separator: ",")
-                let prune = try prepare("DELETE FROM book_sources WHERE book_source_url NOT IN (\(placeholders))")
-                defer { sqlite3_finalize(prune) }
-                for (offset, value) in values.enumerated() {
-                    try bind(value.bookSourceUrl, to: prune, at: Int32(offset + 1))
-                }
-                try stepDone(prune)
+                try pruneRows(table: "book_sources", keyColumn: "book_source_url", keeping: values.map(\.bookSourceUrl))
             }
             try upsertBookSources(values)
         }
+    }
+
+    public func updateBookSource(_ source: BookSource, in all: [BookSource]) throws {
+        let statement = try prepare("""
+            UPDATE book_sources
+            SET book_source_group = ?, custom_order = ?, enabled = ?, payload = ?
+            WHERE book_source_url = ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        if let group = source.bookSourceGroup { try bind(group, to: statement, at: 1) }
+        else { sqlite3_bind_null(statement, 1) }
+        sqlite3_bind_int64(statement, 2, Int64(source.customOrder))
+        sqlite3_bind_int(statement, 3, source.enabled ? 1 : 0)
+        try bind(try encoder.encode(source), to: statement, at: 4)
+        try bind(source.bookSourceUrl, to: statement, at: 5)
+        try stepDone(statement)
+        if sqlite3_changes(handle) == 0 { try replaceBookSources(all) }
     }
 
     private func upsertBookSources(_ values: [BookSource], startingAt start: Int = 0) throws {
@@ -194,15 +221,34 @@ public actor LegadoDatabase {
         if values.isEmpty {
             try Self.execute(handle, "DELETE FROM books")
         } else {
-            let placeholders = Array(repeating: "?", count: values.count).joined(separator: ",")
-            let prune = try prepare("DELETE FROM books WHERE book_url NOT IN (\(placeholders))")
-            defer { sqlite3_finalize(prune) }
-            for (offset, value) in values.enumerated() {
-                try bind(value.bookUrl, to: prune, at: Int32(offset + 1))
-            }
-            try stepDone(prune)
+            try pruneRows(table: "books", keyColumn: "book_url", keeping: values.map(\.bookUrl))
         }
         try upsertBooks(values)
+    }
+
+    private func pruneRows(table: String, keyColumn: String, keeping keys: [String]) throws {
+        if keys.count <= 500 {
+            let placeholders = Array(repeating: "?", count: keys.count).joined(separator: ",")
+            let prune = try prepare("DELETE FROM \(table) WHERE \(keyColumn) NOT IN (\(placeholders))")
+            defer { sqlite3_finalize(prune) }
+            for (offset, key) in keys.enumerated() {
+                try bind(key, to: prune, at: Int32(offset + 1))
+            }
+            try stepDone(prune)
+            return
+        }
+        try Self.execute(handle, "CREATE TEMP TABLE IF NOT EXISTS _legado_keep(id TEXT PRIMARY KEY NOT NULL)")
+        try Self.execute(handle, "DELETE FROM _legado_keep")
+        let insert = try prepare("INSERT OR IGNORE INTO _legado_keep(id) VALUES(?)")
+        defer { sqlite3_finalize(insert) }
+        for key in keys {
+            sqlite3_reset(insert)
+            sqlite3_clear_bindings(insert)
+            try bind(key, to: insert, at: 1)
+            try stepDone(insert)
+        }
+        try Self.execute(handle, "DELETE FROM \(table) WHERE \(keyColumn) NOT IN (SELECT id FROM _legado_keep)")
+        try Self.execute(handle, "DELETE FROM _legado_keep")
     }
 
     private func upsertBooks(_ values: [Book]) throws {
@@ -1374,6 +1420,9 @@ public actor SQLiteBookSourceRepository: BookSourceRepository {
         return try await database.loadBookSources()
     }
     public func save(_ sources: [BookSource]) async throws { try await database.replaceBookSources(sources) }
+    public func saveUpdate(_ source: BookSource, in sources: [BookSource]) async throws {
+        try await database.updateBookSource(source, in: sources)
+    }
 }
 
 public actor SQLiteBookRepository: SourceSwitchBookRepository {
@@ -1563,9 +1612,9 @@ public struct LibraryRuleRepository: ReplaceRuleRepository {
     public static var legacyURL: URL { LegadoDatabase.defaultURL().deletingLastPathComponent().appendingPathComponent("replace-rules.json") }
     public init() {}
     public func load() async throws -> [ReplaceRule] {
-        try await LegadoDatabase(url: LegadoDatabase.defaultURL()).storedRules(legacyURL: Self.legacyURL)
+        try await LegadoDatabase.shared().storedRules(legacyURL: Self.legacyURL)
     }
     public func save(_ rules: [ReplaceRule]) async throws {
-        try await LegadoDatabase(url: LegadoDatabase.defaultURL()).storeRules(rules)
+        try await LegadoDatabase.shared().storeRules(rules)
     }
 }

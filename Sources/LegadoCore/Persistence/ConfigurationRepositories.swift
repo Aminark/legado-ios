@@ -402,7 +402,7 @@ public actor SQLiteLegadoCookieRepository: LegadoCookieRepository {
 
 public enum SearchKeywordRepositoryFactory {
     public static func live(defaults: UserDefaults = .standard) -> any SearchKeywordRepository {
-        guard let database = try? LegadoDatabase(url: LegadoDatabase.defaultURL()) else {
+        guard let database = try? LegadoDatabase.shared() else {
             return InMemorySearchKeywordRepository()
         }
         return SQLiteSearchKeywordRepository(
@@ -414,7 +414,7 @@ public enum SearchKeywordRepositoryFactory {
 
 public enum SearchBookRepositoryFactory {
     public static func live() -> any SearchBookRepository {
-        guard let database = try? LegadoDatabase(url: LegadoDatabase.defaultURL()) else {
+        guard let database = try? LegadoDatabase.shared() else {
             return InMemorySearchBookRepository()
         }
         return SQLiteSearchBookRepository(database: database)

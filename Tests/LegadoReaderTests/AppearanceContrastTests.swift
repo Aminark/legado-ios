@@ -47,8 +47,37 @@ final class ReaderFontStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: target), previous)
 
         try FileManager.default.removeItem(at: target)
-        XCTAssertThrowsError(try ReaderFontStore.install(from: source))
+        XCTAssertThrowsError(try ReaderFontStore.install(from: source)) { error in
+            XCTAssertEqual(error as? ReaderFontError, .invalidFontFile)
+            XCTAssertEqual(error.localizedDescription, ReaderFontError.invalidFontFile.errorDescription)
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    func testDirectoryIsRejectedAndFontCollectionLoadsWhenAvailable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        XCTAssertThrowsError(try ReaderFontStore.install(from: root)) { error in
+            XCTAssertEqual(error as? ReaderFontError, .invalidFontFile)
+        }
+
+        // Verify TrueType Collection (.ttc) support using a system collection font when present in the simulator runtime.
+        let candidates = [
+            "/System/Library/Fonts/Core/Avenir.ttc",
+            "/System/Library/Fonts/Core/HelveticaNeue.ttc",
+            "/System/Library/Fonts/LanguageSupport/PingFang.ttc"
+        ]
+        if let systemPath = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            let source = root.appendingPathComponent(UUID().uuidString + ".ttc")
+            let installedFile = ReaderFontStore.directory.appendingPathComponent(source.lastPathComponent)
+            defer { try? FileManager.default.removeItem(at: installedFile) }
+            try Data(contentsOf: URL(fileURLWithPath: systemPath)).write(to: source)
+            let key = try ReaderFontStore.install(from: source)
+            let font = try XCTUnwrap(ReaderFontStore.font(at: key, size: 20, weight: 0))
+            XCTAssertFalse(font.fontName.isEmpty)
+        }
     }
 }
 

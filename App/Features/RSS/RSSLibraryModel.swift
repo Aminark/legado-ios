@@ -33,6 +33,8 @@ final class RSSLibraryModel: ObservableObject {
     private var articleRequestID = UUID()
     private var loadingMoreRequestID: UUID?
     private var activeOperations = 0
+    private var activeWriteCount = 0
+    private var writeWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(database: LegadoDatabase, service: RSSService = .init()) {
         databaseResult = .success(database)
@@ -47,8 +49,28 @@ final class RSSLibraryModel: ObservableObject {
     }
 
     static func live(databaseURL: URL = LegadoDatabase.defaultURL()) -> RSSLibraryModel {
-        do { return .init(database: try LegadoDatabase(url: databaseURL)) }
+        do { return .init(database: try LegadoDatabase.shared(url: databaseURL)) }
         catch { return .init(databaseError: error) }
+    }
+
+    func waitForLibraryWrites() async {
+        guard activeWriteCount > 0 else { return }
+        await withCheckedContinuation { continuation in
+            writeWaiters.append(continuation)
+        }
+    }
+
+    private func trackWrite<T>(_ operation: () async throws -> T) async rethrows -> T {
+        activeWriteCount += 1
+        defer {
+            activeWriteCount -= 1
+            if activeWriteCount == 0 {
+                let waiters = writeWaiters
+                writeWaiters.removeAll()
+                waiters.forEach { $0.resume() }
+            }
+        }
+        return try await operation()
     }
 
     func load() async {
@@ -106,11 +128,11 @@ final class RSSLibraryModel: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool, source: RssSource) async {
-        do { try await sourceRepository.setEnabled(enabled, sourceURL: source.sourceUrl); sources = try await sourceRepository.all() }
+        do { try await trackWrite { try await sourceRepository.setEnabled(enabled, sourceURL: source.sourceUrl); sources = try await sourceRepository.all() } }
         catch { errorMessage = error.localizedDescription }
     }
     func remove(_ source: RssSource) async {
-        do { try await sourceRepository.remove(sourceURL: source.sourceUrl); sources = try await sourceRepository.all() }
+        do { try await trackWrite { try await sourceRepository.remove(sourceURL: source.sourceUrl); sources = try await sourceRepository.all() } }
         catch { errorMessage = error.localizedDescription }
     }
 
@@ -118,7 +140,7 @@ final class RSSLibraryModel: ObservableObject {
         var values = sources
         values.move(fromOffsets: offsets, toOffset: destination)
         for index in values.indices { values[index].customOrder = index }
-        do { try await sourceRepository.save(values); sources = try await sourceRepository.all() }
+        do { try await trackWrite { try await sourceRepository.save(values); sources = try await sourceRepository.all() } }
         catch { errorMessage = error.localizedDescription }
     }
 
@@ -127,22 +149,24 @@ final class RSSLibraryModel: ObservableObject {
         let url = value.sourceUrl.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, !url.isEmpty else { errorMessage = "源名称和URL不能为空"; return false }
         do {
-            var source = value; source.sourceName = name; source.sourceUrl = url
-            let original = originalURL.flatMap { key in sources.first { $0.sourceUrl == key } }
-            let encoder = JSONEncoder()
-            let oldData = try encoder.encode(original)
-            let newData = try encoder.encode(source)
-            if oldData != newData { source.lastUpdateTime = Int64(Date().timeIntervalSince1970 * 1_000) }
-            if let originalURL, originalURL != source.sourceUrl {
-                try await starRepository.updateOrigin(from: originalURL, to: source.sourceUrl)
-                try await articleRepository.updateOrigin(from: originalURL, to: source.sourceUrl)
-                try await database.deleteSourceVariables(originalURL)
+            return try await trackWrite {
+                var source = value; source.sourceName = name; source.sourceUrl = url
+                let original = originalURL.flatMap { key in sources.first { $0.sourceUrl == key } }
+                let encoder = JSONEncoder()
+                let oldData = try encoder.encode(original)
+                let newData = try encoder.encode(source)
+                if oldData != newData { source.lastUpdateTime = Int64(Date().timeIntervalSince1970 * 1_000) }
+                if let originalURL, originalURL != source.sourceUrl {
+                    try await starRepository.updateOrigin(from: originalURL, to: source.sourceUrl)
+                    try await articleRepository.updateOrigin(from: originalURL, to: source.sourceUrl)
+                    try await database.deleteSourceVariables(originalURL)
+                }
+                var values = sources.filter { $0.sourceUrl != originalURL && $0.sourceUrl != source.sourceUrl }
+                values.append(source)
+                try await sourceRepository.save(values)
+                sources = try await sourceRepository.all()
+                return true
             }
-            var values = sources.filter { $0.sourceUrl != originalURL && $0.sourceUrl != source.sourceUrl }
-            values.append(source)
-            try await sourceRepository.save(values)
-            sources = try await sourceRepository.all()
-            return true
         } catch { errorMessage = error.localizedDescription; return false }
     }
 
@@ -224,9 +248,11 @@ final class RSSLibraryModel: ObservableObject {
 
     func read(_ article: RssArticle) async {
         do {
-            try await recordRepository.insertIgnoringExisting(article.record())
-            records = try await recordRepository.all()
-            if let index = articles.firstIndex(of: article) { articles[index].read = true }
+            try await trackWrite {
+                try await recordRepository.insertIgnoringExisting(article.record())
+                records = try await recordRepository.all()
+                if let index = articles.firstIndex(of: article) { articles[index].read = true }
+            }
         }
         catch { errorMessage = error.localizedDescription }
     }
@@ -270,31 +296,33 @@ final class RSSLibraryModel: ObservableObject {
     }
     func toggleStar(_ article: RssArticle) async {
         do {
-            if try await starRepository.star(origin: article.origin, link: article.link) != nil {
-                try await starRepository.remove(origin: article.origin, link: article.link)
-            } else { try await starRepository.save(article.star()) }
-            stars = try await starRepository.all()
+            try await trackWrite {
+                if try await starRepository.star(origin: article.origin, link: article.link) != nil {
+                    try await starRepository.remove(origin: article.origin, link: article.link)
+                } else { try await starRepository.save(article.star()) }
+                stars = try await starRepository.all()
+            }
         } catch { errorMessage = error.localizedDescription }
     }
     func isStarred(_ article: RssArticle) -> Bool { stars.contains { $0.origin == article.origin && $0.link == article.link } }
 
     func removeStar(_ value: RssStar) async {
-        do { try await starRepository.remove(origin: value.origin, link: value.link); stars = try await starRepository.all() }
+        do { try await trackWrite { try await starRepository.remove(origin: value.origin, link: value.link); stars = try await starRepository.all() } }
         catch { errorMessage = error.localizedDescription }
     }
 
     func saveStar(_ value: RssStar) async {
-        do { try await starRepository.save(value); stars = try await starRepository.all() }
+        do { try await trackWrite { try await starRepository.save(value); stars = try await starRepository.all() } }
         catch { errorMessage = error.localizedDescription }
     }
 
     func clearStars() async {
-        do { try await starRepository.clear(); stars = [] }
+        do { try await trackWrite { try await starRepository.clear(); stars = [] } }
         catch { errorMessage = error.localizedDescription }
     }
 
     func clearRecords() async {
-        do { try await recordRepository.clear(); records = [] }
+        do { try await trackWrite { try await recordRepository.clear(); records = [] } }
         catch { errorMessage = error.localizedDescription }
     }
 
@@ -313,7 +341,7 @@ final class RSSLibraryModel: ObservableObject {
         activeOperations += 1
         isWorking = true
         defer { activeOperations -= 1; isWorking = activeOperations > 0 }
-        do { try await operation() } catch { if isCurrent() { errorMessage = error.localizedDescription } }
+        do { try await trackWrite(operation) } catch { if isCurrent() { errorMessage = error.localizedDescription } }
     }
 }
 

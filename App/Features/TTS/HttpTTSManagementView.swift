@@ -7,7 +7,7 @@ final class HttpTTSLibraryModel: ObservableObject {
     @Published var errorMessage: String?
 
     private func repository() throws -> SQLiteConfigurationRepository {
-        SQLiteConfigurationRepository(database: try LegadoDatabase(url: LegadoDatabase.defaultURL()))
+        SQLiteConfigurationRepository(database: try LegadoDatabase.shared())
     }
 
     func load() async {

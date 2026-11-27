@@ -139,7 +139,7 @@ public struct BookSearchService: Sendable {
     private let history: BookSearchHistory
 
     public init(
-        transport: any HTTPTransport = URLSessionHTTPTransport(),
+        transport: any HTTPTransport = URLSessionHTTPTransport.shared,
         urlBuilder: LegadoURLBuilder = .init(),
         engine: RuleEngine = .init(),
         networkPolicy: SourceNetworkPolicy = .shared,
@@ -286,8 +286,7 @@ public struct BookSearchService: Sendable {
                 if !matches.isEmpty { return await detailOutcome(variables: response.requestVariables) }
             }
             let listRule = rules.bookList ?? ""
-            let root = response.decodedJSON
-            let body = response.decodedText
+            let (body, root) = response.decodeTextAndJSON()
             let listEvaluation = if listRule.isEmpty {
                 RuleEvaluation(variables: response.requestVariables)
             } else if let root {
@@ -315,38 +314,60 @@ public struct BookSearchService: Sendable {
                 return outcome
             }
             var books: [SearchBook] = []
-            for item in items {
-                try Task.checkCancellation()
-                let fields = await evaluateFields(
-                    rules,
-                    item: item,
-                    isHTML: root == nil,
-                    baseURL: response.finalURL.absoluteString,
-                    source: source,
-                    variables: listEvaluation.variables,
-                    keyword: keyword,
-                    page: page
-                )
-                diagnostics += fields.diagnostics
-                guard let name = fields.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { continue }
-                let bookURLValue = fields.bookURL?.nilIfEmpty ?? response.finalURL.absoluteString
-                let bookURL = resolve(bookURLValue, against: response.finalURL)
-                var book = SearchBook(
-                    bookURL: bookURL,
-                    origin: source.bookSourceUrl,
-                    originName: source.bookSourceName,
-                    type: source.bookSourceType,
-                    name: name,
-                    author: fields.author ?? ""
-                )
-                book.kind = fields.kind
-                book.coverURL = fields.coverURL.map { resolve($0, against: response.finalURL) }
-                book.intro = MetadataTextSanitizer().clean(fields.intro)
-                book.wordCount = fields.wordCount
-                book.latestChapterTitle = fields.lastChapter
-                book.originOrder = source.customOrder
-                book.variables = fields.variables
-                books.append(book)
+            if !items.isEmpty {
+                let cancellation = RuleExecutionCancellation()
+                let baseURLString = response.finalURL.absoluteString
+                let finalURL = response.finalURL
+                let isHTML = root == nil
+                let listVariables = listEvaluation.variables
+                let evaluated = try await withTaskCancellationHandler {
+                    try await RuleExecutionWorker.runRule {
+                        var parsed: [SearchBook] = []
+                        var itemDiagnostics: [RuleDiagnostic] = []
+                        parsed.reserveCapacity(items.count)
+                        let sanitizer = MetadataTextSanitizer()
+                        for item in items {
+                            try cancellation.check()
+                            let fields = evaluateFieldsSynchronously(
+                                rules,
+                                item: item,
+                                isHTML: isHTML,
+                                baseURL: baseURLString,
+                                source: source,
+                                variables: listVariables,
+                                keyword: keyword,
+                                page: page,
+                                cancellation: cancellation,
+                                sanitizer: sanitizer
+                            )
+                            itemDiagnostics += fields.diagnostics
+                            guard let name = fields.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { continue }
+                            let bookURLValue = fields.bookURL?.nilIfEmpty ?? baseURLString
+                            let bookURL = resolve(bookURLValue, against: finalURL)
+                            var book = SearchBook(
+                                bookURL: bookURL,
+                                origin: source.bookSourceUrl,
+                                originName: source.bookSourceName,
+                                type: source.bookSourceType,
+                                name: name,
+                                author: fields.author ?? ""
+                            )
+                            book.kind = fields.kind
+                            book.coverURL = fields.coverURL.map { resolve($0, against: finalURL) }
+                            book.intro = fields.intro
+                            book.wordCount = fields.wordCount
+                            book.latestChapterTitle = fields.lastChapter
+                            book.originOrder = source.customOrder
+                            book.variables = fields.variables
+                            parsed.append(book)
+                        }
+                        return (parsed, itemDiagnostics)
+                    }
+                } onCancel: {
+                    cancellation.cancel()
+                }
+                books = evaluated.0
+                diagnostics += evaluated.1
             }
             if listRule.hasPrefix("-") { books.reverse() }
             var seenURLs = Set<String>()
@@ -361,7 +382,7 @@ public struct BookSearchService: Sendable {
         }
     }
 
-    private func evaluateFields(
+    private func evaluateFieldsSynchronously(
         _ rules: SearchRule,
         item: JSONValue,
         isHTML: Bool,
@@ -369,68 +390,79 @@ public struct BookSearchService: Sendable {
         source: BookSource,
         variables: [String: String],
         keyword: String,
-        page: Int
-    ) async -> FieldEvaluation {
+        page: Int,
+        cancellation: RuleExecutionCancellation,
+        sanitizer: MetadataTextSanitizer
+    ) -> FieldEvaluation {
         var result = FieldEvaluation()
         var currentBook = Book(bookUrl: baseURL, name: "", origin: source.bookSourceUrl)
         currentBook.originName = source.bookSourceName
         currentBook.originOrder = source.customOrder
         currentBook.type = source.bookSourceType
-        var context = RuleExecutionContext(variables: variables, baseURL: baseURL, key: keyword, page: page, source: source, book: currentBook, isHTMLFragment: true)
-        let name = await evaluate(rules.name, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        var context = RuleExecutionContext(
+            variables: variables,
+            baseURL: baseURL,
+            key: keyword,
+            page: page,
+            source: source,
+            book: currentBook,
+            isHTMLFragment: true
+        )
+        context.cancellation = cancellation
+        let name = evaluateSynchronously(rules.name, item: item, baseURL: baseURL, context: context)
         context.variables = name.variables
         context.book?.name = name.joinedString ?? ""
-        let author = await evaluate(rules.author, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        let author = evaluateSynchronously(rules.author, item: item, baseURL: baseURL, context: context)
         context.variables = author.variables
         context.book?.author = author.joinedString ?? ""
-        let kind = await evaluate(rules.kind, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        let kind = evaluateSynchronously(rules.kind, item: item, baseURL: baseURL, context: context)
         context.variables = kind.variables
-        context.book?.kind = kind.strings.filter { !$0.isEmpty }.joined(separator: ",").nilIfEmpty
+        let joinedKind = kind.strings.filter { !$0.isEmpty }.joined(separator: ",").nilIfEmpty
+        context.book?.kind = joinedKind
         // Match BookList.getSearchItem: metadata and variables produced by an
         // earlier field are visible to the rules evaluated after it.
-        let wordCount = await evaluate(rules.wordCount, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        let wordCount = evaluateSynchronously(rules.wordCount, item: item, baseURL: baseURL, context: context)
         context.variables = wordCount.variables
         context.book?.wordCount = wordCount.joinedString
-        let lastChapter = await evaluate(rules.lastChapter, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        let lastChapter = evaluateSynchronously(rules.lastChapter, item: item, baseURL: baseURL, context: context)
         context.variables = lastChapter.variables
         context.book?.latestChapterTitle = lastChapter.joinedString
-        let intro = await evaluate(rules.intro, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        let intro = evaluateSynchronously(rules.intro, item: item, baseURL: baseURL, context: context)
         context.variables = intro.variables
-        context.book?.intro = MetadataTextSanitizer().clean(intro.joinedString)
-        let coverURL = await evaluate(rules.coverUrl, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        let cleanedIntro = sanitizer.clean(intro.joinedString)
+        context.book?.intro = cleanedIntro
+        let coverURL = evaluateSynchronously(rules.coverUrl, item: item, baseURL: baseURL, context: context)
         context.variables = coverURL.variables
         context.book?.coverUrl = coverURL.joinedString.flatMap { value in
             URL(string: baseURL).map { resolve(value, against: $0) }
         }
-        let bookURL = await evaluate(rules.bookUrl, item: item, isHTML: isHTML, baseURL: baseURL, context: context)
+        let bookURL = evaluateSynchronously(rules.bookUrl, item: item, baseURL: baseURL, context: context)
         context.variables = bookURL.variables
-        let values = (name, author, kind, bookURL, coverURL, intro, wordCount, lastChapter)
-        result.name = values.0.joinedString
-        result.author = values.1.joinedString
-        result.kind = values.2.strings.filter { !$0.isEmpty }.joined(separator: ",").nilIfEmpty
-        result.bookURL = isHTML ? values.3.leadingString : values.3.joinedString
-        result.coverURL = values.4.joinedString
-        result.intro = MetadataTextSanitizer().clean(values.5.joinedString)
-        result.wordCount = values.6.joinedString
-        result.lastChapter = values.7.joinedString
-        result.diagnostics = [values.0, values.1, values.2, values.3, values.4, values.5, values.6, values.7]
+        result.name = name.joinedString
+        result.author = author.joinedString
+        result.kind = joinedKind
+        result.bookURL = isHTML ? bookURL.leadingString : bookURL.joinedString
+        result.coverURL = coverURL.joinedString
+        result.intro = cleanedIntro
+        result.wordCount = wordCount.joinedString
+        result.lastChapter = lastChapter.joinedString
+        result.diagnostics = [name, author, kind, bookURL, coverURL, intro, wordCount, lastChapter]
             .flatMap(\.diagnostics)
         result.variables = context.variables
         return result
     }
 
-    private func evaluate(
+    private func evaluateSynchronously(
         _ rule: String?,
         item: JSONValue,
-        isHTML: Bool,
         baseURL: String,
         context: RuleExecutionContext = .init()
-    ) async -> RuleEvaluation {
+    ) -> RuleEvaluation {
         guard let rule, !rule.isEmpty else { return .init(variables: context.variables) }
         if case .string(let text) = item {
-            return await engine.evaluate(rule, inText: text, baseURL: baseURL, context: context)
+            return engine.evaluateSynchronously(rule, inText: text, baseURL: baseURL, context: context)
         }
-        return await engine.evaluate(rule, in: item, context: context)
+        return engine.evaluateSynchronously(rule, in: item, context: context)
     }
 
     private func resolve(_ value: String, against baseURL: URL) -> String {

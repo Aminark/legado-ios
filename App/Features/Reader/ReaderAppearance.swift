@@ -95,6 +95,17 @@ enum ReaderBackgroundStore {
     static func remove() { try? FileManager.default.removeItem(at: url) }
 }
 
+enum ReaderFontError: LocalizedError, Equatable {
+    case invalidFontFile
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidFontFile:
+            "所选文件不是有效的字体文件，请选择 .ttf、.otf 或 .ttc 字体文件。"
+        }
+    }
+}
+
 enum ReaderFontStore {
     static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -102,16 +113,21 @@ enum ReaderFontStore {
     }
 
     static func install(from source: URL) throws -> String {
-        let accessing = source.startAccessingSecurityScopedResource()
-        defer { if accessing { source.stopAccessingSecurityScopedResource() } }
-        let data = try Data(contentsOf: source)
-        guard let provider = CGDataProvider(data: data as CFData),
-              font(provider: provider, size: 20, weight: 0) != nil else {
-            throw CocoaError(.fileReadCorruptFile)
+        let file = SecurityScopedImportURL(url: source)
+        guard !file.isDirectory else { throw ReaderFontError.invalidFontFile }
+        let data = try file.readData()
+        return try install(data: data, filename: source.lastPathComponent, sourceURL: source)
+    }
+
+    static func install(data: Data, filename: String, sourceURL: URL? = nil) throws -> String {
+        let trimmedName = URL(fileURLWithPath: filename).lastPathComponent
+        guard !trimmedName.isEmpty, trimmedName != "/",
+              font(data: data, size: 20, weight: 0) != nil else {
+            throw ReaderFontError.invalidFontFile
         }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let target = directory.appendingPathComponent(source.lastPathComponent)
-        if target != source {
+        let target = directory.appendingPathComponent(trimmedName)
+        if target != sourceURL {
             try data.write(to: target, options: .atomic)
         }
         return target.lastPathComponent
@@ -122,14 +138,31 @@ enum ReaderFontStore {
         // Older versions saved the absolute sandbox path. Resolve managed fonts
         // against the current container, including after an app update or restore.
         let url = directory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
-        guard let provider = CGDataProvider(url: url as CFURL) else { return nil }
-        return font(provider: provider, size: size, weight: weight)
+        if let provider = CGDataProvider(url: url as CFURL),
+           let graphicsFont = CGFont(provider) {
+            return styledFont(from: CTFontCreateWithGraphicsFont(graphicsFont, size, nil, nil) as UIFont, size: size, weight: weight)
+        }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+        return collectionFont(from: data, size: size, weight: weight)
     }
 
-    private static func font(provider: CGDataProvider, size: CGFloat, weight: Int) -> UIFont? {
-        guard let graphicsFont = CGFont(provider) else { return nil }
+    private static func font(data: Data, size: CGFloat, weight: Int) -> UIFont? {
+        if let provider = CGDataProvider(data: data as CFData),
+           let graphicsFont = CGFont(provider) {
+            return styledFont(from: CTFontCreateWithGraphicsFont(graphicsFont, size, nil, nil) as UIFont, size: size, weight: weight)
+        }
+        return collectionFont(from: data, size: size, weight: weight)
+    }
+
+    private static func collectionFont(from data: Data, size: CGFloat, weight: Int) -> UIFont? {
+        guard let descriptors = CTFontManagerCreateFontDescriptorsFromData(data as CFData) as? [CTFontDescriptor],
+              let first = descriptors.first else { return nil }
+        let base = CTFontCreateWithFontDescriptor(first, size, nil) as UIFont
+        return styledFont(from: base, size: size, weight: weight)
+    }
+
+    private static func styledFont(from base: UIFont, size: CGFloat, weight: Int) -> UIFont {
         // Use the selected face even when its PostScript name matches an installed font.
-        let base = CTFontCreateWithGraphicsFont(graphicsFont, size, nil, nil) as UIFont
         if weight == 1,
            let descriptor = base.fontDescriptor.withSymbolicTraits(.traitBold) {
             return UIFont(descriptor: descriptor, size: size)

@@ -30,7 +30,7 @@ enum AppBookChapterRepository {
     static func live() -> any BookChapterRepository {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Legado", isDirectory: true)
-        guard let database = try? LegadoDatabase(url: base.appendingPathComponent("legado.sqlite3")) else {
+        guard let database = try? LegadoDatabase.shared(url: base.appendingPathComponent("legado.sqlite3")) else {
             return FileBookChapterRepository.live()
         }
         return SQLiteBookChapterRepository(
@@ -113,7 +113,7 @@ final class BookLibraryModel: ObservableObject {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Legado", isDirectory: true)
         let legacyBooks = base.appendingPathComponent("books.json")
-        guard let database = try? LegadoDatabase(url: base.appendingPathComponent("legado.sqlite3")) else {
+        guard let database = try? LegadoDatabase.shared(url: base.appendingPathComponent("legado.sqlite3")) else {
             return BookLibraryModel(
                 repository: FileBookRepository(fileURL: legacyBooks),
                 localDirectory: base.appendingPathComponent("LocalBooks", isDirectory: true),
@@ -203,7 +203,7 @@ final class BookLibraryModel: ObservableObject {
         var config = updated[index].readConfig ?? BookReadConfig()
         change(&config)
         updated[index].readConfig = config
-        return await persist(updated)
+        return await persist(updated, progressBook: updated[index])
     }
 
     @discardableResult
@@ -365,7 +365,7 @@ final class BookLibraryModel: ObservableObject {
               books[index].origin == "local", books[index].coverUrl?.isEmpty != false else { return }
         var updated = books
         updated[index].coverUrl = dataURL
-        await persist(updated)
+        await persist(updated, progressBook: updated[index])
     }
 
     private func persistPendingProgress() {
@@ -609,7 +609,7 @@ final class BookLibraryModel: ObservableObject {
         var updated = books
         if included { updated[index].group |= group.groupId }
         else { updated[index].group &= ~group.groupId }
-        await persist(updated)
+        await persist(updated, progressBook: updated[index])
     }
 
     func setBook(_ book: Book, groupIDs: Set<Int64>) async {
@@ -621,7 +621,7 @@ final class BookLibraryModel: ObservableObject {
         let selectedMask = groupIDs.reduce(Int64(0), |)
         var updated = books
         updated[index].group = (updated[index].group & ~customMask) | selectedMask
-        await persist(updated)
+        await persist(updated, progressBook: updated[index])
     }
 
     func remove(bookURL: String) async {

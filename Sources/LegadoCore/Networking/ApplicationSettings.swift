@@ -102,22 +102,75 @@ public final class ApplicationSettingsStore: @unchecked Sendable {
     public static let key = "legado.applicationSettings.v2"
     private static let legacyKey = "legado.applicationSettings.v1"
     private let defaults: UserDefaults
+    private let lock = NSLock()
+    private var cachedRawData: Data?
+    private var hasCachedValue = false
+    private var cachedSettings = ApplicationSettings()
+    private var cachedHostsText: String?
+    private var cachedHostsMap: [String: String] = [:]
 
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
     public var settings: ApplicationSettings {
         let current = defaults.data(forKey: Self.key)
-        guard let data = current ?? defaults.data(forKey: Self.legacyKey),
-              let value = try? JSONDecoder().decode(ApplicationSettings.self, from: data),
-              var settings = try? value.validated() else { return .init() }
-        if current == nil, settings.prefetchChapters == 1 {
-            settings.prefetchChapters = ApplicationSettings().prefetchChapters
+        let data = current ?? defaults.data(forKey: Self.legacyKey)
+        lock.lock()
+        if hasCachedValue, cachedRawData == data {
+            let value = cachedSettings
+            lock.unlock()
+            return value
         }
-        return settings
+        lock.unlock()
+
+        let resolved: ApplicationSettings
+        if let data,
+           let value = try? JSONDecoder().decode(ApplicationSettings.self, from: data),
+           var validated = try? value.validated() {
+            if current == nil, validated.prefetchChapters == 1 {
+                validated.prefetchChapters = ApplicationSettings().prefetchChapters
+            }
+            resolved = validated
+        } else {
+            resolved = .init()
+        }
+
+        lock.lock()
+        cachedRawData = data
+        cachedSettings = resolved
+        hasCachedValue = true
+        lock.unlock()
+        return resolved
+    }
+
+    public func hostsMap(for settings: ApplicationSettings) throws -> [String: String] {
+        let raw = settings.hosts
+        if raw.isEmpty { return [:] }
+        lock.lock()
+        if cachedHostsText == raw {
+            let map = cachedHostsMap
+            lock.unlock()
+            return map
+        }
+        lock.unlock()
+        let parsed = try ApplicationSettings.parseHosts(raw)
+        lock.lock()
+        cachedHostsText = raw
+        cachedHostsMap = parsed
+        lock.unlock()
+        return parsed
     }
 
     public func save(_ settings: ApplicationSettings) throws {
         let validated = try settings.validated()
-        defaults.set(try JSONEncoder().encode(validated), forKey: Self.key)
+        let encoded = try JSONEncoder().encode(validated)
+        let parsedHosts = validated.hosts.isEmpty ? [:] : try ApplicationSettings.parseHosts(validated.hosts)
+        defaults.set(encoded, forKey: Self.key)
+        lock.lock()
+        cachedRawData = encoded
+        cachedSettings = validated
+        hasCachedValue = true
+        cachedHostsText = validated.hosts
+        cachedHostsMap = parsedHosts
+        lock.unlock()
     }
 }

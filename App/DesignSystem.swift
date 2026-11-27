@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 
 struct ReadingUnavailableView<Label: View, Description: View, Actions: View>: View {
@@ -280,12 +281,83 @@ struct ReadingProgressLine: View {
     }
 }
 
+private final class BookCoverCache: @unchecked Sendable {
+    static let shared = BookCoverCache()
+    private let cache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 180
+        cache.totalCostLimit = 32 * 1024 * 1024
+        return cache
+    }()
+
+    func image(forKey key: String) -> UIImage? {
+        cache.object(forKey: key as NSString)
+    }
+
+    func store(_ image: UIImage, forKey key: String) {
+        let cost = image.cgImage.map { $0.bytesPerRow * $0.height }
+            ?? Int(image.size.width * image.size.height * image.scale * image.scale * 4)
+        cache.setObject(image, forKey: key as NSString, cost: max(cost, 1))
+    }
+
+    nonisolated static func load(remoteURL: String, maxPixelSize: Int) async -> UIImage? {
+        let key = "\(remoteURL)#\(maxPixelSize)"
+        if let cached = shared.image(forKey: key) { return cached }
+        let data: Data?
+        if remoteURL.hasPrefix("data:image/") {
+            guard let comma = remoteURL.firstIndex(of: ",") else { return nil }
+            let encoded = String(remoteURL[remoteURL.index(after: comma)...])
+            data = await Task.detached(priority: .userInitiated) {
+                Data(base64Encoded: encoded, options: .ignoreUnknownCharacters)
+            }.value
+        } else if let url = URL(string: remoteURL) {
+            if url.isFileURL {
+                data = await Task.detached(priority: .userInitiated) {
+                    try? Data(contentsOf: url)
+                }.value
+            } else {
+                data = try? await URLSession.shared.data(from: url).0
+            }
+        } else {
+            data = nil
+        }
+        guard let data, !data.isEmpty, !Task.isCancelled else { return nil }
+        let decoded = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+            if let source = CGImageSourceCreateWithData(data as CFData, nil),
+               let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+               ] as CFDictionary) {
+                return UIImage(cgImage: thumbnail)
+            }
+            return UIImage(data: data)
+        }.value
+        if let decoded {
+            shared.store(decoded, forKey: key)
+        }
+        return decoded
+    }
+}
+
 struct BookCoverArtwork: View {
     let title: String
     var author: String = ""
     var remoteURL: String?
     var width: CGFloat = 68
     var height: CGFloat = 96
+
+    @State private var loadedImage: UIImage?
+    @State private var loadedKey: String?
+
+    private var targetMaxPixelSize: Int {
+        min(max(Int(ceil(max(width, height) * 3)), 96), 480)
+    }
+
+    private var cacheKey: String? {
+        guard let remoteURL, !remoteURL.isEmpty else { return nil }
+        return "\(remoteURL)#\(targetMaxPixelSize)"
+    }
 
     private var coverStyle: Int {
         switch title {
@@ -305,20 +377,16 @@ struct BookCoverArtwork: View {
     }
 
     var body: some View {
+        let displayImage: UIImage? = if let cacheKey {
+            BookCoverCache.shared.image(forKey: cacheKey) ?? (loadedKey == cacheKey ? loadedImage : nil)
+        } else {
+            nil
+        }
         Group {
-            if let remoteURL, remoteURL.hasPrefix("data:image/"),
-               let comma = remoteURL.firstIndex(of: ","),
-               let data = Data(base64Encoded: String(remoteURL[remoteURL.index(after: comma)...])),
-               let image = UIImage(data: data) {
-                Image(uiImage: image).resizable().scaledToFill()
+            if let displayImage {
+                Image(uiImage: displayImage).resizable().scaledToFill()
             } else {
-                AsyncImage(url: remoteURL.flatMap(URL.init(string:))) { phase in
-                    if case .success(let image) = phase {
-                        image.resizable().scaledToFill()
-                    } else {
-                        placeholder
-                    }
-                }
+                placeholder
             }
         }
         .frame(width: width, height: height)
@@ -331,6 +399,23 @@ struct BookCoverArtwork: View {
                 .strokeBorder(.black.opacity(0.08), lineWidth: 0.5)
         }
         .accessibilityHidden(true)
+        .task(id: cacheKey) {
+            guard let remoteURL, !remoteURL.isEmpty, let key = cacheKey else {
+                loadedKey = nil
+                loadedImage = nil
+                return
+            }
+            if let cached = BookCoverCache.shared.image(forKey: key) {
+                loadedKey = key
+                loadedImage = cached
+                return
+            }
+            if let decoded = await BookCoverCache.load(remoteURL: remoteURL, maxPixelSize: targetMaxPixelSize),
+               !Task.isCancelled {
+                loadedKey = key
+                loadedImage = decoded
+            }
+        }
     }
 
     private var placeholder: some View {

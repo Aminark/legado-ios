@@ -97,7 +97,7 @@ final class SourceLibraryModel: ObservableObject {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Legado", isDirectory: true)
         let legacy = base.appendingPathComponent("book-sources.json")
-        guard let database = try? LegadoDatabase(url: base.appendingPathComponent("legado.sqlite3")) else {
+        guard let database = try? LegadoDatabase.shared(url: base.appendingPathComponent("legado.sqlite3")) else {
             return SourceLibraryModel(repository: FileBookSourceRepository(fileURL: legacy))
         }
         return SourceLibraryModel(repository: SQLiteBookSourceRepository(database: database, legacyFileURL: legacy))
@@ -185,7 +185,7 @@ final class SourceLibraryModel: ObservableObject {
         var updated = sources
         guard let index = updated.firstIndex(where: { $0.id == sourceID }) else { return }
         updated[index].enabled = enabled
-        await persist(updated, successTitle: nil)
+        await persist(updated, singleUpdate: updated[index], successTitle: nil)
     }
 
     func applySilentSubscription(_ data: Data) async throws {
@@ -366,7 +366,7 @@ final class SourceLibraryModel: ObservableObject {
         var updated = sources
         guard let index = updated.firstIndex(where: { $0.id == sourceID }) else { return }
         updated[index].enabledExplore = enabled
-        await persist(updated, successTitle: nil)
+        await persist(updated, singleUpdate: updated[index], successTitle: nil)
     }
 
     func saveSource(_ source: BookSource, replacing oldSourceID: String? = nil) async -> Bool {
@@ -446,9 +446,9 @@ final class SourceLibraryModel: ObservableObject {
     }
 
     @discardableResult
-    private func persist(_ updated: [BookSource], successTitle: String?) async -> Bool {
+    private func persist(_ updated: [BookSource], singleUpdate: BookSource? = nil, successTitle: String?) async -> Bool {
         do {
-            try await saveSources(updated)
+            try await saveSources(updated, singleUpdate: singleUpdate)
             if let successTitle {
                 notice = .init(kind: .success, title: successTitle, detail: "")
             }
@@ -471,7 +471,7 @@ final class SourceLibraryModel: ObservableObject {
         )
     }
 
-    private func saveSources(_ updated: [BookSource]) async throws {
+    private func saveSources(_ updated: [BookSource], singleUpdate: BookSource? = nil) async throws {
         sources = updated
         saveGeneration &+= 1
         let generation = saveGeneration
@@ -479,7 +479,11 @@ final class SourceLibraryModel: ObservableObject {
         let task = Task { @MainActor [weak self, repository] () -> Result<Void, Error> in
             _ = await previousSave?.value
             do {
-                try await repository.save(updated)
+                if let singleUpdate {
+                    try await repository.saveUpdate(singleUpdate, in: updated)
+                } else {
+                    try await repository.save(updated)
+                }
                 self?.persistedSources = updated
                 return .success(())
             } catch {

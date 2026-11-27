@@ -23,7 +23,14 @@ struct ReaderView: View {
         var id: Self { self }
     }
 
+    private enum PendingSheetTransition {
+        case sheet(ReaderSheet)
+        case tableOfContents
+        case readerMenu
+    }
+
     @State private var activeSheet: ReaderSheet?
+    @State private var pendingSheetTransition: PendingSheetTransition?
     @State private var showsTableOfContents = false
     @State private var readerSessionActive = false
     private var palette = ReadingPalettePreference()
@@ -37,8 +44,8 @@ struct ReaderView: View {
     @State private var isAutoReading = false
     @State private var showsReaderMenu = false
     @State private var followsSystemBrightness = true
-    @State private var readerBrightness = Double(UIScreen.main.brightness)
-    @State private var brightnessBeforeReading = Double(UIScreen.main.brightness)
+    @State private var readerBrightness = 0.5
+    @State private var brightnessBeforeReading = 0.5
     @State private var tocDescending = false
     @State private var editedContent = ""
     @State private var contentEditError: String?
@@ -46,7 +53,7 @@ struct ReaderView: View {
     @State private var backgroundImage: UIImage?
     @State private var backgroundError: String?
     @State private var showsBackgroundPicker = false
-    @State private var showsFontImporter = false
+    @State private var isInstallingFont = false
     @State private var fontError: String?
     @State private var readerJumpPosition: Int?
     @State private var contentSearchQuery = ""
@@ -314,7 +321,7 @@ struct ReaderView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .sheet(item: $activeSheet) { sheet in
+        .sheet(item: $activeSheet, onDismiss: performPendingSheetTransition) { sheet in
             switch sheet {
             case .bookmarks: bookmarksSheet
             case .autoRead: autoReadControls
@@ -933,16 +940,36 @@ struct ReaderView: View {
         switch value {
         case 1: return model.title
         case 2: return time
-        case 3: return "▰"
+        case 3: return batteryGlyph(for: battery)
         case 4: return "\(currentPage)/\(totalPages)"
         case 5: return progressText
         case 6: return "\(currentPage)/\(totalPages)  \(progressText)"
         case 7: return book.name
-        case 8: return "\(time) ▰"
+        case 8: return "\(time) \(batteryGlyph(for: battery))"
         case 9: return "\(time) \(battery)%"
         case 10: return "\(battery)%"
         case 11: return "\(model.currentChapterNumber)/\(model.directory.readableIndices.count)"
         default: return ""
+        }
+    }
+
+    private func batteryGlyph(for percentage: Int) -> String {
+        switch percentage {
+        case 85...: "▰▰▰▰"
+        case 60..<85: "▰▰▰▱"
+        case 35..<60: "▰▰▱▱"
+        case 15..<35: "▰▱▱▱"
+        default: "▱▱▱▱"
+        }
+    }
+
+    private func performPendingSheetTransition() {
+        guard let pending = pendingSheetTransition else { return }
+        pendingSheetTransition = nil
+        switch pending {
+        case .sheet(let sheet): activeSheet = sheet
+        case .tableOfContents: showsTableOfContents = true
+        case .readerMenu: showsReaderMenu = true
         }
     }
 
@@ -1246,24 +1273,24 @@ struct ReaderView: View {
                 }
                 Section {
                     Button("目录", systemImage: "list.bullet") {
+                        pendingSheetTransition = .tableOfContents
                         activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showsTableOfContents = true }
                     }
                     Button("开始自动阅读", systemImage: "play.fill") {
                         activeSheet = nil
                         startAutoReading()
                     }
                     Button("主菜单", systemImage: "menubar.rectangle") {
+                        pendingSheetTransition = .readerMenu
                         activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showsReaderMenu = true }
                     }
                     Button("停止自动阅读", systemImage: "stop.fill", role: .destructive) {
                         isAutoReading = false
                         activeSheet = nil
                     }
                     Button("设置", systemImage: "gearshape") {
+                        pendingSheetTransition = .sheet(.appearance)
                         activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { activeSheet = .appearance }
                     }
                 }
             }
@@ -1411,7 +1438,16 @@ struct ReaderView: View {
                             .foregroundStyle(.secondary)
                     }
                     Button(fontPath.isEmpty ? "选择字体文件" : "更换字体文件", systemImage: "textformat") {
-                        showsFontImporter = true
+                        presentFontPicker()
+                    }
+                    .disabled(isInstallingFont)
+                    if isInstallingFont {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("正在导入字体…")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     if !fontPath.isEmpty {
                         HStack {
@@ -1540,22 +1576,59 @@ struct ReaderView: View {
         } onError: { error in
             backgroundError = error.localizedDescription
         }
-        .sheet(isPresented: $showsFontImporter) {
-            // Some Files providers report fonts as generic data. The installer validates the font itself.
-            ReadingImportPicker(contentTypes: [.font, .data], allowsMultipleSelection: false) { urls in
-                showsFontImporter = false
-                guard let source = urls.first else { return }
-                do {
-                    fontPath = try ReaderFontStore.install(from: source)
-                    fontRevision &+= 1
-                    fontError = nil
-                } catch {
-                    fontError = error.localizedDescription
-                }
-            } onCancel: { showsFontImporter = false }
-        }
-        .readingPresentationDetents([.medium])
+        .readingPresentationDetents([.medium, .large])
         .readingPresentationDragIndicator()
+    }
+
+    private func presentFontPicker() {
+        guard !isInstallingFont else { return }
+        fontError = nil
+        // Present UIDocumentPickerViewController directly via UIKit using `.item`
+        // and multi-selection so Files enables all font files regardless of
+        // third-party UTI overrides and always offers an explicit "Open" action.
+        ReadingDocumentPickerPresenter.present(
+            contentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { files in
+            installPickedFonts(files)
+        }
+    }
+
+    private func installPickedFonts(_ files: [SecurityScopedImportURL]) {
+        guard !files.isEmpty else { return }
+        isInstallingFont = true
+        fontError = nil
+        Task {
+            let result: Result<String, Error> = await Task.detached(priority: .userInitiated) {
+                var installedName: String?
+                var lastError: Error?
+                for file in files {
+                    do {
+                        guard !file.isDirectory else { throw ReaderFontError.invalidFontFile }
+                        let data = try file.readData()
+                        let name = try ReaderFontStore.install(
+                            data: data,
+                            filename: file.url.lastPathComponent,
+                            sourceURL: file.url
+                        )
+                        if installedName == nil { installedName = name }
+                    } catch {
+                        lastError = error
+                    }
+                }
+                if let installedName { return .success(installedName) }
+                return .failure(lastError ?? ReaderFontError.invalidFontFile)
+            }.value
+            isInstallingFont = false
+            switch result {
+            case .success(let installed):
+                fontPath = installed
+                fontRevision &+= 1
+                fontError = nil
+            case .failure(let error):
+                fontError = error.localizedDescription
+            }
+        }
     }
 
     private static let pageAnimationChoices: [(value: Int, title: String, icon: String)] = [
@@ -1743,8 +1816,8 @@ struct ReaderView: View {
                     Button("编辑本章正文") {
                         editedContent = model.content
                         contentEditError = nil
+                        pendingSheetTransition = .sheet(.editor)
                         activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { activeSheet = .editor }
                     }
                     .disabled(!model.canEditContent || model.content.isEmpty)
                     Button("重新获取本章") {
@@ -1830,12 +1903,12 @@ struct ReaderView: View {
 
                 Section("操作") {
                     Button("自动阅读设置") {
+                        pendingSheetTransition = .sheet(.autoRead)
                         activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { activeSheet = .autoRead }
                     }
                     Button("点击区域设置") {
+                        pendingSheetTransition = .sheet(.clickActions)
                         activeSheet = nil
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { activeSheet = .clickActions }
                     }
                 }
             }
@@ -2324,7 +2397,7 @@ struct ReaderView: View {
     }
 
     private nonisolated static func storedHTTPEngines() async -> [HttpTTS]? {
-        guard let database = try? LegadoDatabase(url: LegadoDatabase.defaultURL()) else { return nil }
+        guard let database = try? LegadoDatabase.shared() else { return nil }
         let repository = SQLiteConfigurationRepository(database: database)
         var values = (try? await repository.loadHttpTTS()) ?? []
         if values.isEmpty,
