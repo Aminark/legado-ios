@@ -171,20 +171,50 @@ final class ReaderPagingGeometryTests: XCTestCase {
         XCTAssertTrue(mask.intersection(view.bounds).contains(heading))
     }
 
+    func testChangingTypographyAndMarginsOnALaterPageKeepsItsTextVisible() async throws {
+        let text = String(repeating: "翻页以后调整字号、字距和段距，正文的首尾都应该完整。\n", count: 180)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 420, height: 900))
+        let host = UIHostingController(rootView: pagedReader(text: text, title: "第五章"))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        host.view.layoutIfNeeded()
+        await Task.yield()
+        let view = try XCTUnwrap(findTextView(host.view))
+        let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+        defer { coordinator.invalidate() }
+        for _ in 0..<6 { coordinator.turnPage(1) }
+        let original = ReaderTextPage.layout(in: view, height: view.bounds.height - 32)[6]
+        XCTAssertEqual(view.contentOffset.y, original.offset, accuracy: 0.5)
+
+        host.rootView = pagedReader(text: text, title: "第五章", fontSize: 24, lineSpacing: 15,
+                                    paragraphSpacing: 23, paddingLeft: 90, paddingRight: 80)
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        await Task.yield()
+        let pages = ReaderTextPage.layout(in: view, height: view.bounds.height - 32)
+        let page = try XCTUnwrap(pages.first { NSLocationInRange(original.characterRange.location, $0.characterRange) })
+        XCTAssertEqual(view.contentOffset.y, page.offset, accuracy: 0.5)
+        let mask = try XCTUnwrap((view.layer.mask as? CAShapeLayer)?.path?.boundingBoxOfPath)
+        XCTAssertEqual(mask.minY, view.textContainerInset.top + page.offset, accuracy: 0.5)
+        XCTAssertEqual(mask.height, page.height, accuracy: 0.5)
+    }
+
     private func findTextView(_ view: UIView) -> UITextView? {
         (view as? UITextView) ?? view.subviews.lazy.compactMap(findTextView).first
     }
 
     private func pagedReader(text: String, title: String, animation: Int = 4,
-                             lineSpacing: Double = 8,
+                             fontSize: Double = 32, lineSpacing: Double = 8, paragraphSpacing: Double = 12,
+                             paddingLeft: Double = 18, paddingRight: Double = 18,
                              ranges: Binding<[NSRange]> = .constant([]),
                              currentPage: Binding<Int> = .constant(1),
                              totalPages: Binding<Int> = .constant(1)) -> ReaderTextView {
         ReaderTextView(
             text: text, title: title, previousTitle: nil, previousText: "", isPreviousReady: false,
             continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
-            fontSize: 32, fontPath: "", letterSpacing: 0, lineSpacing: lineSpacing, paragraphSpacing: 12,
-            paragraphIndent: "　　", paddingLeft: 18, paddingRight: 18, paddingTop: 16, paddingBottom: 16,
+            fontSize: fontSize, fontPath: "", letterSpacing: 0, lineSpacing: lineSpacing, paragraphSpacing: paragraphSpacing,
+            paragraphIndent: "　　", paddingLeft: paddingLeft, paddingRight: paddingRight, paddingTop: 16, paddingBottom: 16,
             headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
             titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
             fullJustify: true, pageAnimation: animation, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),

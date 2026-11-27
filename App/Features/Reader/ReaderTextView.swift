@@ -180,12 +180,6 @@ struct ReaderTextView: UIViewRepresentable {
         view.isSelectable = false
         view.selectedRange = NSRange(location: 0, length: 0)
         view.resignFirstResponder()
-        view.textContainerInset = .init(
-            top: CGFloat(paddingTop + headerInset),
-            left: CGFloat(paddingLeft),
-            bottom: CGFloat(paddingBottom + footerInset),
-            right: CGFloat(paddingRight)
-        )
         let contentKey = text.hashValue
         var primaryHasher = Hasher()
         primaryHasher.combine(title)
@@ -253,6 +247,12 @@ struct ReaderTextView: UIViewRepresentable {
                 ))
             }
             context.coordinator.isApplyingContent = true
+            // Changing the margins rewraps the old text immediately. Apply them
+            // after capturing the visible character, together with the new text.
+            view.textContainerInset = .init(
+                top: CGFloat(paddingTop + headerInset), left: CGFloat(paddingLeft),
+                bottom: CGFloat(paddingBottom + footerInset), right: CGFloat(paddingRight)
+            )
             view.textStorage.setAttributedString(rendered)
             context.coordinator.isApplyingContent = false
             context.coordinator.scroll(to: position, in: view)
@@ -638,7 +638,7 @@ struct ReaderTextView: UIViewRepresentable {
             let page = pages[pageIndex(in: view, pages: pages)]
             // UITextView lays out one continuous document. Hide neighboring
             // lines in the per-page margins instead of showing partial lines.
-            let rect = CGRect(x: view.bounds.minX, y: view.bounds.minY + view.textContainerInset.top,
+            let rect = CGRect(x: view.bounds.minX, y: page.offset + view.textContainerInset.top,
                               width: view.bounds.width, height: min(page.height, readingViewportHeight(for: view)))
             CATransaction.begin()
             CATransaction.setDisableActions(true)
