@@ -25,13 +25,15 @@ final class ReplaceRuleLibraryModel: ObservableObject {
     init(repository: any ReplaceRuleRepository) { self.repository = repository }
 
     static func live() -> ReplaceRuleLibraryModel {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Legado", isDirectory: true)
-        return ReplaceRuleLibraryModel(repository: FileReplaceRuleRepository(fileURL: base.appendingPathComponent("replace-rules.json")))
+        ReplaceRuleLibraryModel(repository: LibraryRuleRepository())
     }
 
     static func demo() -> ReplaceRuleLibraryModel {
         ReplaceRuleLibraryModel(repository: InMemoryReplaceRuleRepository())
+    }
+
+    func waitForLibraryWrites() async {
+        _ = await saveTask?.value
     }
 
     func load() async {

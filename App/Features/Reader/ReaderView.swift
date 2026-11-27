@@ -153,6 +153,11 @@ struct ReaderView: View {
         ))
     }
 
+    init(textSearchBook book: Book, chapters: [BookChapter]) {
+        self.init(book: book, chapters: chapters, initialIndex: book.durChapterIndex)
+        _sessionEPUBMode = State(initialValue: .text)
+    }
+
     init(book: Book, chapters: [BookChapter], initialIndex: Int) {
         _pageAnimation = State(initialValue: book.readConfig?.pageAnim.flatMap { $0 >= 0 ? $0 : nil }
             ?? Self.globalPageAnimation())
@@ -1938,6 +1943,16 @@ struct ReaderView: View {
                                 .foregroundStyle(.primary)
                                 .lineLimit(3)
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink("全书") {
+                        LibraryPassageView(current: .init(book: book, chapters: model.chapters)) { index, position in
+                            navigate(to: index, position: position)
+                            activeSheet = nil
                         }
                     }
                 }

@@ -141,6 +141,12 @@ final class BookLibraryModel: ObservableObject {
         BookLibraryModel(repository: InMemoryBookRepository(books: books))
     }
 
+    func waitForLibraryWrites() async {
+        await waitForSourceSwitch()
+        _ = await bookSaveTask?.value
+        _ = await groupSaveTask?.value
+    }
+
     func load() async {
         loadGeneration &+= 1
         let generation = loadGeneration

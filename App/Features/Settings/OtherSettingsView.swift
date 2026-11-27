@@ -32,6 +32,10 @@ struct OtherSettingsView: View {
                     ForEach(BookshelfSort.allCases) { sort in Text(sort.title).tag(sort.rawValue) }
                 }
             }
+            Section("书库") {
+                NavigationLink("导入阅读备份") { AndroidLibraryImportView() }
+                NavigationLink("整书离线") { OfflineBooksView() }
+            }
             Section("网络与存储") {
                 NavigationLink {
                     NetworkSettingsView()

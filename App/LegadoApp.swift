@@ -49,6 +49,15 @@ struct LegadoApp: App {
                             sourceLibrary.notice = nil
                         }
                     }
+                    if !ProcessInfo.processInfo.arguments.contains("-uiDemo") {
+                        do {
+                            let db = try LegadoDatabase(url: LegadoDatabase.defaultURL())
+                            try await db.applyImportedPreferences()
+                            try await OfflineEditions.shared.activate(sources: sourceLibrary.sources)
+                        } catch {
+                            sourceLibrary.notice = .init(kind: .error, title: "书库恢复失败", detail: error.localizedDescription)
+                        }
+                    }
                     await bookLibrary.load()
                     await replaceRuleLibrary.load()
                     await readingActivity.load()

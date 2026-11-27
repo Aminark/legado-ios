@@ -81,6 +81,7 @@ public actor ChapterContentCache {
     }
 
     private let directory: URL
+    private let offlineFiles: OfflineEditionFiles?
     private let maximumTotalBytes: Int?
     private let legacyDirectory: URL?
     private var storageReady = false
@@ -100,14 +101,16 @@ public actor ChapterContentCache {
     }
     private var observers: [URL: [UUID: AvailabilityObserver]] = [:]
 
-    public init(directory: URL, maximumTotalBytes: Int? = nil) {
+    public init(directory: URL, maximumTotalBytes: Int? = nil, offlineFiles: OfflineEditionFiles? = nil) {
+        self.offlineFiles = offlineFiles
         self.directory = directory
         self.maximumTotalBytes = maximumTotalBytes.map { max($0, Self.maximumEntryBytes) }
         recent = nil
         legacyDirectory = nil
     }
 
-    init(liveDirectory: URL, legacyDirectory: URL) {
+    init(liveDirectory: URL, legacyDirectory: URL, offlineFiles: OfflineEditionFiles? = nil) {
+        self.offlineFiles = offlineFiles
         directory = liveDirectory
         self.legacyDirectory = legacyDirectory
         maximumTotalBytes = nil
@@ -121,7 +124,8 @@ public actor ChapterContentCache {
         liveDirectory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Legado/ChapterContent", isDirectory: true),
         legacyDirectory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Legado/Chapters", isDirectory: true)
+            .appendingPathComponent("Legado/Chapters", isDirectory: true),
+        offlineFiles: .live
     )
 
     public static func live() -> ChapterContentCache { shared }
@@ -166,6 +170,10 @@ public actor ChapterContentCache {
         try read(bookURL: bookURL, chapterURL: chapterURL, markUsed: true)
     }
 
+    public func searchContent(bookURL: String, chapterURL: String) throws -> CachedChapterContent? {
+        try read(bookURL: bookURL, chapterURL: chapterURL, markUsed: false)
+    }
+
     /// Observing a directory row must not make its chapter more recent for eviction.
     public func availability(bookURL: String, chapterURL: String, sourceID: String) -> AsyncStream<Bool> {
         let url = fileURL(bookURL: bookURL, chapterURL: chapterURL)
@@ -206,6 +214,7 @@ public actor ChapterContentCache {
             }
         }
         guard FileManager.default.fileExists(atPath: url.path) else {
+            if let value = try offlineFiles?.content(book: bookURL, chapter: chapterURL) { return value }
             versions.values.removeObject(forKey: url as NSURL)
             return nil
         }
@@ -247,6 +256,9 @@ public actor ChapterContentCache {
         }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = fileURL(bookURL: entry.bookURL, chapterURL: entry.chapterURL)
+        if let offlineFiles, FileManager.default.fileExists(atPath: offlineFiles.page(entry.bookURL, entry.chapterURL).path) {
+            try offlineFiles.save(entry)
+        }
         try data.write(to: url, options: .atomic)
         recent?.setObject(MemoryEntry(entry), forKey: url as NSURL, cost: data.count)
         notify(url, entry: entry)

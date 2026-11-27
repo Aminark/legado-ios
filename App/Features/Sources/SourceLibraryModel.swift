@@ -107,8 +107,12 @@ final class SourceLibraryModel: ObservableObject {
         SourceLibraryModel(repository: InMemoryBookSourceRepository(sources: sources))
     }
 
-    func load() async {
-        guard sources.isEmpty else { return }
+    func waitForLibraryWrites() async {
+        _ = await saveTask?.value
+    }
+
+    func load(force: Bool = false) async {
+        guard force || sources.isEmpty else { return }
         isWorking = true
         defer { isWorking = false }
         do {

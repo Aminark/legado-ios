@@ -4,6 +4,24 @@ import Vision
 
 @MainActor
 final class ReaderScrollGestureTests: XCTestCase {
+    func testLibrarySearchAndDownloadScreensOpenFromShelf() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-defaultHomePage", "bookshelf"]
+        app.launch()
+        let more = app.buttons["更多"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 15))
+        more.tap()
+        app.buttons["书架正文搜索"].tap()
+        XCTAssertTrue(app.navigationBars["书架正文搜索"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.searchFields.firstMatch.exists)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        more.tap()
+        app.buttons["整书离线"].tap()
+        XCTAssertTrue(app.navigationBars["整书离线"].waitForExistence(timeout: 8))
+        app.buttons["选择要下载的书"].tap()
+        XCTAssertTrue(app.navigationBars["选择书籍"].waitForExistence(timeout: 8))
+    }
+
     func testComicImagesLoadInOrderAndFailedImageCanRetry() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

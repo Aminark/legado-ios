@@ -17,7 +17,7 @@ public enum LegadoDatabaseError: Error, LocalizedError, Sendable {
 }
 
 public actor LegadoDatabase {
-    public static let schemaVersion: Int32 = 7
+    public static let schemaVersion: Int32 = 8
 
     // SQLite is opened with FULLMUTEX and every operational access remains
     // actor-isolated. `nonisolated(unsafe)` only permits closing the handle
@@ -80,30 +80,34 @@ public actor LegadoDatabase {
                 }
                 try stepDone(prune)
             }
-            let statement = try prepare("""
-                INSERT INTO book_sources(
-                    book_source_url, book_source_group, custom_order, enabled, position, payload
-                ) VALUES(?, ?, ?, ?, ?, ?)
-                ON CONFLICT(book_source_url) DO UPDATE SET
-                    book_source_group = excluded.book_source_group,
-                    custom_order = excluded.custom_order,
-                    enabled = excluded.enabled,
-                    position = excluded.position,
-                    payload = excluded.payload
-                """)
-            defer { sqlite3_finalize(statement) }
-            for (position, value) in values.enumerated() {
-                sqlite3_reset(statement)
-                sqlite3_clear_bindings(statement)
-                try bind(value.bookSourceUrl, to: statement, at: 1)
-                if let group = value.bookSourceGroup { try bind(group, to: statement, at: 2) }
-                else { sqlite3_bind_null(statement, 2) }
-                sqlite3_bind_int64(statement, 3, Int64(value.customOrder))
-                sqlite3_bind_int(statement, 4, value.enabled ? 1 : 0)
-                sqlite3_bind_int64(statement, 5, Int64(position))
-                try bind(try encoder.encode(value), to: statement, at: 6)
-                try stepDone(statement)
-            }
+            try upsertBookSources(values)
+        }
+    }
+
+    private func upsertBookSources(_ values: [BookSource], startingAt start: Int = 0) throws {
+        let statement = try prepare("""
+            INSERT INTO book_sources(
+                book_source_url, book_source_group, custom_order, enabled, position, payload
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(book_source_url) DO UPDATE SET
+                book_source_group = excluded.book_source_group,
+                custom_order = excluded.custom_order,
+                enabled = excluded.enabled,
+                position = excluded.position,
+                payload = excluded.payload
+            """)
+        defer { sqlite3_finalize(statement) }
+        for (position, value) in values.enumerated() {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            try bind(value.bookSourceUrl, to: statement, at: 1)
+            if let group = value.bookSourceGroup { try bind(group, to: statement, at: 2) }
+            else { sqlite3_bind_null(statement, 2) }
+            sqlite3_bind_int64(statement, 3, Int64(value.customOrder))
+            sqlite3_bind_int(statement, 4, value.enabled ? 1 : 0)
+            sqlite3_bind_int64(statement, 5, Int64(start + position))
+            try bind(try encoder.encode(value), to: statement, at: 6)
+            try stepDone(statement)
         }
     }
 
@@ -139,6 +143,10 @@ public actor LegadoDatabase {
             }
             try stepDone(prune)
         }
+        try upsertBooks(values)
+    }
+
+    private func upsertBooks(_ values: [Book]) throws {
         let insert = try prepare("""
             INSERT INTO books(book_url, name, author, position, payload) VALUES(?, ?, ?, ?, ?)
             ON CONFLICT(book_url) DO UPDATE SET
@@ -1106,6 +1114,15 @@ public actor LegadoDatabase {
                 throw error
             }
         }
+        if version < 8 {
+            try execute(database, "BEGIN IMMEDIATE")
+            do {
+                try execute(database, "CREATE TABLE IF NOT EXISTS library_documents(name TEXT PRIMARY KEY, payload BLOB NOT NULL); PRAGMA user_version = 8; COMMIT")
+            } catch {
+                try? execute(database, "ROLLBACK")
+                throw error
+            }
+        }
     }
 
     private func legacyChaptersImported() -> Bool {
@@ -1377,4 +1394,96 @@ public actor SQLiteBookGroupRepository: BookGroupRepository {
         return try await database.loadBookGroups()
     }
     public func save(_ groups: [BookGroup]) async throws { try await database.replaceBookGroups(groups) }
+}
+
+extension LegadoDatabase {
+    // Persist pending defaults in the same transaction as the imported library.
+    // Replay is idempotent if iOS terminates the app before the defaults are applied.
+    public func restoreLibrary(_ archive: AndroidLibraryImport, sections: Set<ImportSection>,
+                               legacyRulesURL: URL) throws {
+        try transaction {
+            if sections.contains(.books) {
+                var books = try loadBooks()
+                var positions = Dictionary(uniqueKeysWithValues: books.indices.map { (books[$0].id, $0) })
+                // The shelf also has a unique (name, author) constraint. Keep its current
+                // source when an Android library contains the same work under another URL.
+                var works = Set(books.map { [$0.name, $0.author] })
+                for incoming in archive.books {
+                    if let index = positions[incoming.id] {
+                        let existing = books[index]
+                        guard incoming.durChapterTime > existing.durChapterTime ||
+                                (incoming.durChapterTime == existing.durChapterTime &&
+                                 (incoming.durChapterIndex, incoming.durChapterPos) > (existing.durChapterIndex, existing.durChapterPos)) else { continue }
+                        books[index].durChapterIndex = incoming.durChapterIndex
+                        books[index].durChapterTitle = incoming.durChapterTitle
+                        books[index].durChapterPos = incoming.durChapterPos
+                        books[index].durChapterTime = incoming.durChapterTime
+                    } else {
+                        guard works.insert([incoming.name, incoming.author]).inserted else { continue }
+                        positions[incoming.id] = books.count
+                        var book = incoming
+                        book.group = 0 // Android group bits have no identity in this library.
+                        books.append(book)
+                    }
+                }
+                try upsertBooks(books)
+            }
+            if sections.contains(.sources) {
+                let existing = try loadBookSources()
+                var ids = Set(existing.map(\.id))
+                let additions = archive.sources.filter { ids.insert($0.id).inserted }
+                try upsertBookSources(additions, startingAt: existing.count)
+            }
+            if sections.contains(.rules) {
+                var existing = try storedRules(legacyURL: legacyRulesURL)
+                var ids = Set(existing.map(\.id))
+                existing.append(contentsOf: archive.rules.filter { ids.insert($0.id).inserted })
+                try storeImportValue(existing, key: "rules")
+            }
+            if sections.contains(.preferences) {
+                var pending = try importValue([String: Bool].self, key: "preferences") ?? [:]
+                pending.merge(archive.preferences) { _, incoming in incoming }
+                try storeImportValue(pending, key: "preferences")
+            }
+        }
+    }
+
+    public func applyImportedPreferences() throws {
+        try transaction {
+            guard let pending = try importValue([String: Bool].self, key: "preferences") else { return }
+            for (key, value) in pending { UserDefaults.standard.set(value, forKey: key) }
+            try executeBound("DELETE FROM library_documents WHERE name = ?", text: "preferences")
+        }
+    }
+
+    func storedRules(legacyURL: URL) throws -> [ReplaceRule] {
+        if let stored = try importValue([ReplaceRule].self, key: "rules") { return stored }
+        guard FileManager.default.fileExists(atPath: legacyURL.path) else { return [] }
+        return try decoder.decode([ReplaceRule].self, from: Data(contentsOf: legacyURL))
+    }
+
+    func storeRules(_ rules: [ReplaceRule]) throws { try storeImportValue(rules, key: "rules") }
+
+    private func importValue<T: Decodable>(_ type: T.Type, key: String) throws -> T? {
+        try load("SELECT payload FROM library_documents WHERE name = ?", as: type, bindings: [key]).first
+    }
+
+    private func storeImportValue<T: Encodable>(_ value: T, key: String) throws {
+        let statement = try prepare("INSERT OR REPLACE INTO library_documents(name,payload) VALUES(?,?)")
+        defer { sqlite3_finalize(statement) }
+        try bind(key, to: statement, at: 1)
+        try bind(encoder.encode(value), to: statement, at: 2)
+        try stepDone(statement)
+    }
+}
+
+public struct LibraryRuleRepository: ReplaceRuleRepository {
+    public static var legacyURL: URL { LegadoDatabase.defaultURL().deletingLastPathComponent().appendingPathComponent("replace-rules.json") }
+    public init() {}
+    public func load() async throws -> [ReplaceRule] {
+        try await LegadoDatabase(url: LegadoDatabase.defaultURL()).storedRules(legacyURL: Self.legacyURL)
+    }
+    public func save(_ rules: [ReplaceRule]) async throws {
+        try await LegadoDatabase(url: LegadoDatabase.defaultURL()).storeRules(rules)
+    }
 }

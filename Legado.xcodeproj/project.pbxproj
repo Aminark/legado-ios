@@ -65,6 +65,7 @@
 		C10000000000000000000003 /* LibraryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000003 /* LibraryModels.swift */; };
 		C10000000000000000000004 /* BookSourceValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000004 /* BookSourceValidator.swift */; };
 		C10000000000000000000005 /* BookSourceImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000005 /* BookSourceImporter.swift */; };
+		2472490FD7C66C2643B293E7 /* AndroidLibraryImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920BCBD338F79C0F20D611BF /* AndroidLibraryImport.swift */; };
 		C10000000000000000000006 /* BookSourceRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000006 /* BookSourceRepository.swift */; };
 		C10000000000000000000007 /* SearchBook.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000007 /* SearchBook.swift */; };
 		C10000000000000000000008 /* RuleDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000008 /* RuleDiagnostic.swift */; };
@@ -76,6 +77,7 @@
 		C1000000000000000000000E /* LegadoURLBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000000000000000000000E /* LegadoURLBuilder.swift */; };
 		C1000000000000000000000F /* HTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000000000000000000000F /* HTTPClient.swift */; };
 		C10000000000000000000010 /* BookSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000010 /* BookSearchService.swift */; };
+		3B38181D6EC19083A88CEEB4 /* LibraryPassageSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62F62971CF3A0E67C5EC0F9D /* LibraryPassageSearch.swift */; };
 		C10000000000000000000011 /* HTMLRuleEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000011 /* HTMLRuleEvaluator.swift */; };
 		C10000000000000000000012 /* NetworkBookService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000012 /* NetworkBookService.swift */; };
 		C10000000000000000000013 /* BookRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000013 /* BookRepository.swift */; };
@@ -90,6 +92,7 @@
 		C1000000000000000000001A /* ReplaceRuleRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000000000000000000001A /* ReplaceRuleRepository.swift */; };
 		C1000000000000000000001B /* ReadingActivityRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000000000000000000001B /* ReadingActivityRepository.swift */; };
 		C1000000000000000000001C /* ChapterContentCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000000000000000000001C /* ChapterContentCache.swift */; };
+		B80B56753C8ADF5680A5528E /* OfflineEditions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B0934C0F9B51BE778994ECF /* OfflineEditions.swift */; };
 		C1000000000000000000001D /* BookChapterRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000000000000000000001D /* BookChapterRepository.swift */; };
 		C1000000000000000000001E /* BookUpdateCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000000000000000000001E /* BookUpdateCoordinator.swift */; };
 		C1000000000000000000001F /* BookSourceSwitchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000000000000000000001F /* BookSourceSwitchService.swift */; };
@@ -115,6 +118,7 @@
 		910000000000000000000002 /* HostsHTTPTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000002 /* HostsHTTPTransport.swift */; };
 		910000000000000000000003 /* DiagnosticLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000003 /* DiagnosticLog.swift */; };
 		910000000000000000000004 /* OtherSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000004 /* OtherSettingsView.swift */; };
+		A33CD8A8E6A3506C76480EC1 /* LibraryTransferViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3B2125A2F9CCF18E7463BEB /* LibraryTransferViews.swift */; };
 		910000000000000000000005 /* DiagnosticLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000005 /* DiagnosticLogView.swift */; };
 		910000000000000000000006 /* AboutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000006 /* AboutView.swift */; };
 		910000000000000000000007 /* AppDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000007 /* AppDiagnostics.swift */; };
@@ -206,6 +210,7 @@
 		C20000000000000000000003 /* LibraryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryModels.swift; sourceTree = "<group>"; };
 		C20000000000000000000004 /* BookSourceValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookSourceValidator.swift; sourceTree = "<group>"; };
 		C20000000000000000000005 /* BookSourceImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookSourceImporter.swift; sourceTree = "<group>"; };
+		920BCBD338F79C0F20D611BF /* AndroidLibraryImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AndroidLibraryImport.swift; sourceTree = "<group>"; };
 		C20000000000000000000006 /* BookSourceRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookSourceRepository.swift; sourceTree = "<group>"; };
 		C20000000000000000000007 /* SearchBook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchBook.swift; sourceTree = "<group>"; };
 		C20000000000000000000008 /* RuleDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleDiagnostic.swift; sourceTree = "<group>"; };
@@ -217,6 +222,7 @@
 		C2000000000000000000000E /* LegadoURLBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegadoURLBuilder.swift; sourceTree = "<group>"; };
 		C2000000000000000000000F /* HTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPClient.swift; sourceTree = "<group>"; };
 		C20000000000000000000010 /* BookSearchService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookSearchService.swift; sourceTree = "<group>"; };
+		62F62971CF3A0E67C5EC0F9D /* LibraryPassageSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryPassageSearch.swift; sourceTree = "<group>"; };
 		C20000000000000000000011 /* HTMLRuleEvaluator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTMLRuleEvaluator.swift; sourceTree = "<group>"; };
 		C20000000000000000000012 /* NetworkBookService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkBookService.swift; sourceTree = "<group>"; };
 		C20000000000000000000013 /* BookRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRepository.swift; sourceTree = "<group>"; };
@@ -231,6 +237,7 @@
 		C2000000000000000000001A /* ReplaceRuleRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplaceRuleRepository.swift; sourceTree = "<group>"; };
 		C2000000000000000000001B /* ReadingActivityRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingActivityRepository.swift; sourceTree = "<group>"; };
 		C2000000000000000000001C /* ChapterContentCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterContentCache.swift; sourceTree = "<group>"; };
+		3B0934C0F9B51BE778994ECF /* OfflineEditions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineEditions.swift; sourceTree = "<group>"; };
 		C2000000000000000000001D /* BookChapterRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookChapterRepository.swift; sourceTree = "<group>"; };
 		C2000000000000000000001E /* BookUpdateCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookUpdateCoordinator.swift; sourceTree = "<group>"; };
 		C2000000000000000000001F /* BookSourceSwitchService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookSourceSwitchService.swift; sourceTree = "<group>"; };
@@ -257,6 +264,7 @@
 		E20000000000000000000002 /* HostsHTTPTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostsHTTPTransport.swift; sourceTree = "<group>"; };
 		E20000000000000000000003 /* DiagnosticLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLog.swift; sourceTree = "<group>"; };
 		E20000000000000000000004 /* OtherSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OtherSettingsView.swift; sourceTree = "<group>"; };
+		B3B2125A2F9CCF18E7463BEB /* LibraryTransferViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryTransferViews.swift; sourceTree = "<group>"; };
 		E20000000000000000000005 /* DiagnosticLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLogView.swift; sourceTree = "<group>"; };
 		E20000000000000000000006 /* AboutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutView.swift; sourceTree = "<group>"; };
 		E20000000000000000000007 /* AppDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDiagnostics.swift; sourceTree = "<group>"; };
@@ -486,6 +494,7 @@
 				F21000000000000000000004 /* RuleImportInput.swift */,
 				C20000000000000000000004 /* BookSourceValidator.swift */,
 				C20000000000000000000005 /* BookSourceImporter.swift */,
+				920BCBD338F79C0F20D611BF /* AndroidLibraryImport.swift */,
 				C20000000000000000000029 /* RSSSourceImporter.swift */,
 			);
 			path = Import;
@@ -537,6 +546,7 @@
 			isa = PBXGroup;
 			children = (
 				C20000000000000000000010 /* BookSearchService.swift */,
+				62F62971CF3A0E67C5EC0F9D /* LibraryPassageSearch.swift */,
 			);
 			path = Search;
 			sourceTree = "<group>";
@@ -549,6 +559,7 @@
 				C01700000000000000000001 /* ChapterImages.swift */,
 				F62000000000000000000001 /* ChapterResegmenter.swift */,
 				C2000000000000000000001C /* ChapterContentCache.swift */,
+				3B0934C0F9B51BE778994ECF /* OfflineEditions.swift */,
 				C2000000000000000000001E /* BookUpdateCoordinator.swift */,
 				C2000000000000000000001F /* BookSourceSwitchService.swift */,
 				C2000000000000000000002D /* AddBookURLService.swift */,
@@ -632,6 +643,7 @@
 			isa = PBXGroup;
 			children = (
 				E20000000000000000000004 /* OtherSettingsView.swift */,
+				B3B2125A2F9CCF18E7463BEB /* LibraryTransferViews.swift */,
 				E20000000000000000000005 /* DiagnosticLogView.swift */,
 				E20000000000000000000006 /* AboutView.swift */,
 				E20000000000000000000007 /* AppDiagnostics.swift */,
@@ -766,6 +778,7 @@
 				910000000000000000000006 /* AboutView.swift in Sources */,
 				910000000000000000000005 /* DiagnosticLogView.swift in Sources */,
 				910000000000000000000004 /* OtherSettingsView.swift in Sources */,
+				A33CD8A8E6A3506C76480EC1 /* LibraryTransferViews.swift in Sources */,
 				910000000000000000000003 /* DiagnosticLog.swift in Sources */,
 				910000000000000000000002 /* HostsHTTPTransport.swift in Sources */,
 				910000000000000000000001 /* ApplicationSettings.swift in Sources */,
@@ -826,6 +839,7 @@
 				C10000000000000000000003 /* LibraryModels.swift in Sources */,
 				C10000000000000000000004 /* BookSourceValidator.swift in Sources */,
 				C10000000000000000000005 /* BookSourceImporter.swift in Sources */,
+				2472490FD7C66C2643B293E7 /* AndroidLibraryImport.swift in Sources */,
 				C10000000000000000000006 /* BookSourceRepository.swift in Sources */,
 				C10000000000000000000007 /* SearchBook.swift in Sources */,
 				C10000000000000000000008 /* RuleDiagnostic.swift in Sources */,
@@ -837,6 +851,7 @@
 				C1000000000000000000000E /* LegadoURLBuilder.swift in Sources */,
 				C1000000000000000000000F /* HTTPClient.swift in Sources */,
 				C10000000000000000000010 /* BookSearchService.swift in Sources */,
+				3B38181D6EC19083A88CEEB4 /* LibraryPassageSearch.swift in Sources */,
 				C10000000000000000000011 /* HTMLRuleEvaluator.swift in Sources */,
 				C10000000000000000000012 /* NetworkBookService.swift in Sources */,
 				C10000000000000000000013 /* BookRepository.swift in Sources */,
@@ -853,6 +868,7 @@
 				C1000000000000000000001A /* ReplaceRuleRepository.swift in Sources */,
 				C1000000000000000000001B /* ReadingActivityRepository.swift in Sources */,
 				C1000000000000000000001C /* ChapterContentCache.swift in Sources */,
+				B80B56753C8ADF5680A5528E /* OfflineEditions.swift in Sources */,
 				C1000000000000000000001D /* BookChapterRepository.swift in Sources */,
 				C1000000000000000000001E /* BookUpdateCoordinator.swift in Sources */,
 				C1000000000000000000001F /* BookSourceSwitchService.swift in Sources */,

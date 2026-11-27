@@ -150,6 +150,8 @@ private struct BookshelfView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @EnvironmentObject private var library: BookLibraryModel
     @EnvironmentObject private var sources: SourceLibraryModel
+    private enum ShelfTool { case search, downloads }
+    @State private var shelfTool: ShelfTool?
     @State private var showsLocalImporter = false
     @State private var pendingLocalFiles: [LocalBookImportFile] = []
     @State private var selectedGroupID = BookGroup.idAll
@@ -265,6 +267,15 @@ private struct BookshelfView: View {
             guard selectedGroup.enableRefresh else { return }
             await library.checkForUpdates(sources: sources.sources, group: selectedGroup)
         }
+        .readingNavigationDestination(isPresented: Binding(
+            get: { shelfTool != nil }, set: { if !$0 { shelfTool = nil } }
+        )) {
+            switch shelfTool {
+            case .search: LibraryPassageView()
+            case .downloads: OfflineBooksView()
+            case nil: EmptyView()
+            }
+        }
         .readingLocalBookFileImporter(isPresented: $showsLocalImporter) { files in
             pendingLocalFiles = files
         } onError: { error in
@@ -369,6 +380,8 @@ private struct BookshelfView: View {
                 Button("更新目录", systemImage: "arrow.clockwise") {
                     Task { await library.checkForUpdates(sources: sources.sources, group: selectedGroup) }
                 }
+                Button("书架正文搜索", systemImage: "text.magnifyingglass") { shelfTool = .search }
+                Button("整书离线", systemImage: "arrow.down.circle") { shelfTool = .downloads }
                 Button("本地书", systemImage: "plus") { showsLocalImporter = true }
                 Button("书架分组", systemImage: "rectangle.3.group") { showsGroupManager = true }
                 Menu("本分组设置", systemImage: "slider.horizontal.3") {
