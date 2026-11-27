@@ -53,7 +53,7 @@ public struct ChapterImageParser: Sendable {
             if let expression = try? NSRegularExpression(pattern: pattern),
                let match = expression.firstMatch(in: markup, range: NSRange(markup.startIndex..., in: markup)),
                let range = Range(match.range(at: 2), in: markup) {
-                value = try? Parser.unescapeEntities(String(markup[range]), false)
+                value = try? Parser.unescapeEntities(String(markup[range]), true)
             } else if let element = try? SwiftSoup.parseBodyFragment(markup).select("img,mip-img").first() {
                 value = try? element.attr(name)
             }
@@ -159,5 +159,75 @@ public struct ChapterImageLoader: Sendable {
         let response = try await policy.execute(request, source: source, transport: transport, timeout: 30)
         guard !response.data.isEmpty else { throw ChapterImageError.emptyImage }
         return response.data
+    }
+}
+
+/// Source ranges are UTF-16 offsets in the cached chapter, including its HTML.
+/// TextKit represents each embedded image with a single attachment character.
+public struct ChapterInlineMedia: Equatable, Sendable {
+    public struct Item: Equatable, Sendable {
+        public let range: NSRange
+        public let request: String
+        public let action: String?
+        public let textSized: Bool
+        public let isCard: Bool
+    }
+    public private(set) var items: [Item] = []
+
+    public init() {}
+
+    public init(_ body: String, baseURL: URL? = nil) {
+        guard body.contains("<") else { return }
+        let parser = ChapterImageParser()
+        for range in ChapterImageMarkup.ranges(in: body) {
+            guard let raw = parser.imageSource(in: String(body[range])) else { continue }
+            let address = baseURL.map { LegadoURLBuilder.resolve(raw, against: $0) } ?? raw
+            var request = address
+            var action: String?
+            var textSized = false
+            let svg = address.lowercased().hasPrefix("data:image/svg+xml")
+            for candidate in LegadoURLBuilder().splitOptions(address) where !candidate.options.isEmpty {
+                guard case .object(var options) = try? LegadoURLBuilder.decodeLenientJSON(candidate.options) else { continue }
+                textSized = options["style"]?.stringValue.uppercased() == "TEXT"
+                action = options.removeValue(forKey: "click")?.stringValue
+                if svg || textSized { action = action ?? options.removeValue(forKey: "js")?.stringValue }
+                options.removeValue(forKey: "style")
+                request = candidate.url
+                if !options.isEmpty { request += "," + JSONValue.object(options).stringValue }
+                break
+            }
+            guard ["https", "http", "data"].contains(request.prefix(while: { $0 != ":" }).lowercased()) else { continue }
+            items.append(Item(range: NSRange(range, in: body), request: request, action: action,
+                              textSized: textSized, isCard: svg || textSized || action != nil))
+        }
+    }
+
+    public func textForReading(_ body: NSString, range: NSRange) -> String {
+        let text = NSMutableString(string: body.substring(with: range))
+        for item in items.reversed() {
+            let overlap = NSIntersectionRange(range, item.range)
+            if overlap.length > 0 {
+                text.deleteCharacters(in: NSRange(location: overlap.location - range.location, length: overlap.length))
+            }
+        }
+        return text as String
+    }
+
+    public func displayedOffset(_ original: Int) -> Int {
+        var removed = 0
+        for item in items {
+            if original < NSMaxRange(item.range) { return min(original, item.range.location) - removed }
+            removed += item.range.length - 1
+        }
+        return original - removed
+    }
+
+    public func sourceOffset(_ displayed: Int) -> Int {
+        var original = max(0, displayed)
+        for item in items {
+            if original <= item.range.location { break }
+            original += item.range.length - 1
+        }
+        return original
     }
 }

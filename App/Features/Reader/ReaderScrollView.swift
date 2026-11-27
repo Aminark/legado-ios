@@ -90,6 +90,14 @@ struct ReaderScrollView: UIViewRepresentable {
             applying = true
             defer { applying = false }
             let config = parent.configuration
+            let overlap = CGFloat(config.headerInset + config.footerInset) + CGFloat(config.fontSize * 2)
+            config.hardwareInput?.turn = { [weak view] direction in
+                guard let view else { return }
+                let bottom = max(0, view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
+                let stride = max(1, view.bounds.height - overlap)
+                let y = min(max(0, view.contentOffset.y + CGFloat(direction) * stride), bottom)
+                view.setContentOffset(CGPoint(x: 0, y: y), animated: true)
+            }
             if wasLoadingAhead, !parent.loadingAhead { requestedAhead = nil }
             if wasLoadingBehind, !parent.loadingBehind { requestedBehind = nil }
             wasLoadingAhead = parent.loadingAhead
@@ -106,7 +114,7 @@ struct ReaderScrollView: UIViewRepresentable {
                 lastPageKey = ""
             }
             let anchor = reset ? nil : captureAnchor()
-            let newStyleKey = config.scrollTypographyKey + "|\(view.bounds.width)"
+            let newStyleKey = config.scrollTypographyKey + "|\(config.media.revision)|\(view.bounds.width)"
             let styleChanged = styleKey != newStyleKey
             let contentChanged = styleChanged || viewportHeight != view.bounds.height || parent.chapters.count != chapterLayouts.count
                 || parent.chapters.contains { chapterLayouts[$0.id]?.chapter != $0 }
@@ -298,7 +306,7 @@ struct ReaderScrollView: UIViewRepresentable {
             let lineY = chapter.manager.lineFragmentRect(forGlyphAt: safeGlyph, effectiveRange: nil).minY
             return Anchor(
                 chapter: chapter.chapter.id,
-                position: min(max(character - chapter.bodyStart, 0), chapter.chapter.content.utf16.count),
+                position: min(chapter.inline.sourceOffset(character - chapter.bodyStart), chapter.chapter.content.utf16.count),
                 inHeading: character < chapter.bodyStart,
                 screenY: layout.frames[row].minY + lineY - block.top - view.contentOffset.y
             )
@@ -307,7 +315,7 @@ struct ReaderScrollView: UIViewRepresentable {
         private func offset(for anchor: Anchor, blocks: [ReaderScrollBlock], frames: [CGRect]) -> CGFloat? {
             guard let chapter = blocks.first(where: { $0.chapter.chapter.id == anchor.chapter })?.chapter else { return nil }
             let character = anchor.inHeading ? 0 : ReaderPositionResolver.renderedLocation(
-                position: anchor.position, prefixLength: chapter.bodyStart, renderedLength: chapter.storage.length
+                position: chapter.inline.displayedOffset(anchor.position), prefixLength: chapter.bodyStart, renderedLength: chapter.storage.length
             )
             let glyph = chapter.manager.glyphIndexForCharacter(at: character)
             guard let row = blocks.firstIndex(where: {
@@ -345,6 +353,12 @@ struct ReaderScrollView: UIViewRepresentable {
                blocks[row].chapter.chapter.error != nil {
                 parent.configuration.onTapAction(0)
                 return
+            }
+            if let layout = view.collectionViewLayout as? ReaderContinuousLayout, let row = layout.row(at: point.y),
+               blocks.indices.contains(row) {
+                let block = blocks[row]
+                let local = CGPoint(x: point.x - block.chapter.left, y: point.y - layout.frames[row].minY + block.top)
+                if parent.configuration.media.activate(at: local, manager: block.chapter.manager, container: block.chapter.container) { return }
             }
             let x = point.x - view.bounds.minX, y = point.y - view.bounds.minY
             let column = min(max(Int(x / max(view.bounds.width / 3, 1)), 0), 2)
@@ -466,6 +480,7 @@ final class ReaderScrollChapterLayout {
     let storage: NSTextStorage
     let manager = NSLayoutManager()
     let container: NSTextContainer
+    let inline: ChapterInlineMedia
     let bodyStart: Int
     let left: CGFloat
     static let commentsHeight: CGFloat = 44
@@ -487,7 +502,9 @@ final class ReaderScrollChapterLayout {
         }
         bodyStart = attributed.length
         let body = chapter.error.map { "本章加载失败\n\n\($0)\n\n轻点打开阅读菜单。\n" } ?? (chapter.content.isEmpty ? "本章暂无正文\n" : chapter.content)
-        attributed.append(NSAttributedString(string: body, attributes: typography.bodyAttributes))
+        inline = configuration.media.document(body, chapter: chapter.id)
+        attributed.append(configuration.media.render(body, inline: inline, attributes: typography.bodyAttributes,
+                                                      width: textWidth, chapter: chapter.id))
         storage = NSTextStorage(attributedString: attributed)
         storage.addLayoutManager(manager)
         manager.addTextContainer(container)

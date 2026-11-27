@@ -98,10 +98,11 @@ final class ReaderViewModel: ObservableObject {
         }
     }
     @Published private(set) var imageBlocks: [ChapterContentBlock] = []
-    var hasImageContent: Bool { imageBlocks.contains { if case .image = $0.content { return true }; return false } }
+    private(set) var hasImageContent = false
     var imageSource: BookSource { source ?? BookSource(bookSourceUrl: book.origin, bookSourceName: book.originName) }
 
     private func updateImageBlocks() {
+        hasImageContent = false
         let allowBareURLs = source?.bookSourceType == 2 || source?.ruleContent?.imageStyle?.uppercased() == "FULL"
         guard allowBareURLs || content.range(of: "<img", options: .caseInsensitive) != nil
                 || content.range(of: "<mip-img", options: .caseInsensitive) != nil
@@ -112,6 +113,11 @@ final class ReaderViewModel: ObservableObject {
         imageBlocks = ChapterImageParser().blocks(in: content,
             baseURL: currentChapter.flatMap { URL(string: $0.baseUrl.isEmpty ? $0.url : $0.baseUrl) },
             allowBareURLs: allowBareURLs)
+        let hasPictures = imageBlocks.contains { if case .image = $0.content { return true }; return false }
+        let hasProse = imageBlocks.contains { if case .text = $0.content { return true }; return false }
+        let mixedText = source?.bookSourceType != 2 && hasProse && hasPictures &&
+            (source?.ruleContent?.imageStyle?.uppercased() == "TEXT" || ChapterInlineMedia(content).items.contains(where: \.isCard))
+        hasImageContent = hasPictures && !mixedText
     }
     @Published private(set) var diagnostics: [RuleDiagnostic] = []
     @Published private(set) var currentIndex: Int
@@ -995,13 +1001,16 @@ final class ReaderViewModel: ObservableObject {
     }
 
     private static func makeParagraphs(_ content: String) -> [ReaderParagraph] {
+        let media = ChapterInlineMedia(content)
+        let body = content as NSString
         var position = 0
         var output: [ReaderParagraph] = []
         for line in content.components(separatedBy: .newlines) {
-            if !line.isEmpty { output.append(.init(id: position, text: line)) }
+            let text = media.items.isEmpty ? line : media.textForReading(body, range: NSRange(location: position, length: line.utf16.count))
+            if !text.isEmpty { output.append(.init(id: position, text: text)) }
             position += line.utf16.count + 1
         }
-        if output.isEmpty, !content.isEmpty { output.append(.init(id: 0, text: content)) }
+        if output.isEmpty, media.items.isEmpty, !content.isEmpty { output.append(.init(id: 0, text: content)) }
         return output
     }
 

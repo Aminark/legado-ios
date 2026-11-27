@@ -143,3 +143,31 @@ enum ReaderFontStore {
         return base
     }
 }
+
+struct ReadingPalettePreference: DynamicProperty {
+    @Environment(\.colorScheme) private var systemAppearance
+    @AppStorage("themeMode") private var applicationMode = "0"
+    @AppStorage("readerTheme") private var preset = "wechat"
+    @AppStorage("readerPreviousDayTheme") private var savedDay = "wechat"
+    @AppStorage("linkReadingAppearance") var linked = false
+
+    var day: String { savedDay == "night" ? "wechat" : savedDay }
+    var resolved: ReaderStylePreset {
+        if applicationMode == "3" { return .eInk }
+        guard linked else { return .resolve(preset) }
+        let dark = applicationMode == "2" || (applicationMode == "0" && systemAppearance == .dark)
+        return .resolve(dark ? "night" : (preset == "night" ? day : preset))
+    }
+
+    func choose(_ id: String) {
+        if id != "night" { savedDay = id }
+        else if resolved.id != "night" && resolved.id != "eink" { savedDay = resolved.id }
+        preset = id
+        guard linked else { return }
+        if applicationMode == "0" {
+            if (id == "night") != (systemAppearance == .dark) { linked = false }
+        } else if applicationMode != "3" {
+            applicationMode = id == "night" ? "2" : "1"
+        }
+    }
+}

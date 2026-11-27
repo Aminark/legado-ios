@@ -26,6 +26,12 @@ struct ReaderView: View {
     @State private var activeSheet: ReaderSheet?
     @State private var showsTableOfContents = false
     @State private var readerSessionActive = false
+    private var palette = ReadingPalettePreference()
+    @AppStorage("readerVolumePaging") private var volumePaging = false
+    @StateObject private var hardwareInput = ReaderPageInput()
+    @StateObject private var inlineImages = ReaderMediaLibrary()
+    @StateObject private var interaction = SourceInteractionSession()
+    @State private var cardAction: Task<Void, Never>?
     @State private var chapterCommentsTarget: ReaderChapterCommentsTarget?
     @State private var illustrationChapter: BookChapter?
     @State private var isAutoReading = false
@@ -96,8 +102,6 @@ struct ReaderView: View {
     @AppStorage("tipFooterRight") private var tipFooterRight = 6
     @AppStorage("headerMode") private var headerMode = 0
     @AppStorage("footerMode") private var footerMode = 0
-    @AppStorage("readerTheme") private var theme = "wechat"
-    @AppStorage("readerPreviousDayTheme") private var previousDayTheme = "wechat"
     @AppStorage("autoReadSpeed") private var autoReadSpeed = 10
     @AppStorage("ttsFollowSys") private var ttsFollowSystem = true
     @AppStorage("ttsSpeechRate") private var ttsSpeechRate = 5
@@ -229,7 +233,7 @@ struct ReaderView: View {
 
     private var textReaderBody: some View {
         readerCanvas
-        .preferredColorScheme(resolvedStyle.id == "night" ? .dark : .light)
+        .preferredColorScheme(palette.linked ? nil : (resolvedStyle.id == "night" ? .dark : .light))
         .readingTabBarHidden()
         .navigationBarBackButtonHidden(true)
         .background {
@@ -344,6 +348,18 @@ struct ReaderView: View {
         }
         .background { readerLoadingTasks }
         .background { readerObservers }
+        .background {
+            if volumePaging && readerSessionActive && scenePhase == .active && !pausesAutoReading &&
+                !speech.isSpeaking && !speech.isPaused && !model.hasImageContent && sourceSwitchBook == nil &&
+                !interaction.isPresenting && !waitingForChapter {
+                ReaderVolumeInput(input: hardwareInput).frame(width: 1, height: 1)
+            }
+        }
+        .sourceInteraction(interaction, source: model.imageSource)
+        .task(id: MediaWindow(source: model.imageSource.id, book: book.id, chapters: mediaChapters)) {
+            await inlineImages.prepare(mediaChapters, directory: model.chapters, book: model.book, source: model.imageSource)
+        }
+        .onDisappear { cardAction?.cancel() }
     }
 
     private var readerLoadingTasks: some View {
@@ -662,6 +678,38 @@ struct ReaderView: View {
         }
     }
 
+    private struct MediaWindow: Equatable {
+        let source: String
+        let book: Book.ID
+        let chapters: [ReaderScrollChapter]
+    }
+
+    private var mediaChapters: [ReaderScrollChapter] {
+        guard !model.hasImageContent else { return [] }
+        let chapters = pageAnimation == 3 ? model.visibleScrollChapters :
+            [ReaderScrollChapter(id: model.currentIndex, title: model.title, content: model.content)]
+        return chapters.filter { $0.content.contains("<") }
+    }
+
+    private func activateCard(chapter index: Int, item: ChapterInlineMedia.Item) {
+        guard model.chapters.indices.contains(index), let action = item.action, cardAction == nil else { return }
+        let chapter = model.chapters[index], book = model.book, source = model.imageSource
+        cardAction = Task { @MainActor in
+            defer { cardAction = nil }
+            do {
+                let decoder = JSONDecoder()
+                func variables(_ raw: String?) -> [String: String] {
+                    raw.flatMap { try? decoder.decode([String: String].self, from: Data($0.utf8)) } ?? [:]
+                }
+                let scope = variables(book.variable).merging(variables(chapter.variable)) { _, value in value }
+                _ = try await interaction.evaluator.evaluateAsync(script: action, result: .string(item.request),
+                    executionContext: .init(variables: scope, baseURL: chapter.baseUrl.isEmpty ? chapter.url : chapter.baseUrl,
+                                            source: source, book: book, chapter: chapter))
+            } catch where !Task.isCancelled { interaction.message = error.localizedDescription }
+            catch {}
+        }
+    }
+
     private var readerTextConfiguration: ReaderTextView {
         ReaderTextView(
             text: readerDisplayText,
@@ -717,8 +765,7 @@ struct ReaderView: View {
                 }
                 if model.canGoNext {
                     showsReaderMenu = false
-                    readerPosition = boundaryPosition
-                    saveProgress(immediate: true)
+                    saveProgress(immediate: true, at: boundaryPosition)
                     readerJumpPosition = nil
                     // Keep every chapter in its own TextKit document. Appending
                     // text here makes the absolute UTF-16 offset belong to the
@@ -736,8 +783,7 @@ struct ReaderView: View {
                 }
                 guard model.canGoPrevious else { return }
                 showsReaderMenu = false
-                readerPosition = boundaryPosition
-                saveProgress(immediate: true)
+                saveProgress(immediate: true, at: boundaryPosition)
                 readerJumpPosition = nil
                 model.goPrevious(position: Int.max)
                 if model.hasLoadedCurrentChapter { readerPosition = max(0, model.content.utf16.count - 1) }
@@ -761,7 +807,8 @@ struct ReaderView: View {
             onPageChanged: pageDidChange,
             onTapAction: handleTapAction,
             holdsDisplayedPage: waitingForChapter,
-            chapterGeneration: model.displayedChapterGeneration
+            chapterGeneration: model.displayedChapterGeneration,
+            media: inlineImages.presentation(activate: activateCard), chapterIndex: model.currentIndex, hardwareInput: hardwareInput
         )
     }
 
@@ -814,7 +861,7 @@ struct ReaderView: View {
     }
 
     private var resolvedStyle: ReaderStylePreset {
-        themeMode == "3" ? .eInk : ReaderStylePreset.resolve(theme)
+        palette.resolved
     }
 
     private var headerVisible: Bool {
@@ -1105,12 +1152,7 @@ struct ReaderView: View {
     }
 
     private func toggleNightTheme() {
-        if resolvedStyle.id == "night" {
-            theme = previousDayTheme == "night" ? "wechat" : previousDayTheme
-        } else {
-            previousDayTheme = resolvedStyle.id
-            theme = "night"
-        }
+        palette.choose(resolvedStyle.id == "night" ? palette.day : "night")
     }
 
     private func moveChapter(_ direction: Int) {
@@ -1281,7 +1323,7 @@ struct ReaderView: View {
                                 let isSelected = resolvedStyle.id == preset.id && activeBackgroundImage == nil
                                 Button {
                                     useBackgroundImage = false
-                                    theme = preset.id
+                                    palette.choose(preset.id)
                                 } label: {
                                     VStack(spacing: 6) {
                                         RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -1713,6 +1755,10 @@ struct ReaderView: View {
                     }
                 }
 
+                Section("翻页与外观") {
+                    Toggle("音量键翻页", isOn: $volumePaging)
+                    Toggle("阅读配色与应用联动", isOn: palette.$linked)
+                }
                 Section("屏幕") {
                     Picker("屏幕方向", selection: $screenOrientation) {
                         Text("跟随系统").tag("0")
@@ -1998,9 +2044,9 @@ struct ReaderView: View {
         }
     }
 
-    private func saveProgress(immediate: Bool = false) {
+    private func saveProgress(immediate: Bool = false, at boundary: Int? = nil) {
         guard model.hasLoadedCurrentChapter, let chapter = model.currentChapter else { return }
-        let position = readerPosition
+        let position = boundary ?? readerPosition
         let currentBook = book
         progressSaveGeneration &+= 1
         progressSaveTask?.cancel()
@@ -2099,7 +2145,8 @@ struct ReaderView: View {
             continueSpeechToNextPage()
             return
         }
-        let pageText = (model.content as NSString).substring(with: pageRange)
+        let pageText = ChapterInlineMedia(model.content).textForReading(model.content as NSString, range: pageRange)
+        if pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continueSpeechToNextPage(); return }
         if let engine = selectedHTTPEngine {
             speech.speakHTTP(
                 engine: engine,
@@ -2141,7 +2188,9 @@ struct ReaderView: View {
                generation == model.chapterLoadGeneration,
                speechGeneration == speechStartGeneration,
                bookURL == model.book.bookUrl, chapterIndex == model.currentIndex else { return }
-            speech.prefetchHTTP(engine: engine, text: content, limit: 10)
+            let body = content as NSString
+            let prose = ChapterInlineMedia(content).textForReading(body, range: NSRange(location: 0, length: body.length))
+            speech.prefetchHTTP(engine: engine, text: prose, limit: 10)
         }
     }
 

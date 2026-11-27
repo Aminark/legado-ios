@@ -158,3 +158,31 @@ struct ChapterImageTests {
         #expect(await transport.requests.count == 1)
     }
 }
+
+extension ChapterImageTests {
+    @Test func cardsPreserveImageHeadersAndTranslateUTF16Offsets() throws {
+        let raw = #"<img src="data:image/svg+xml;base64,PHN2Zy8+,{&quot;js&quot;:&quot;open('review?a=1&para=12')&quot;,&quot;style&quot;:&quot;TEXT&quot;}">"#
+        let picture = #"<img src="/art.png,{&quot;headers&quot;:{&quot;X-Edition&quot;:&quot;2&quot;}}">"#
+        let body = "🌙前" + raw + "中" + picture + "章末"
+        let media = ChapterInlineMedia(body, baseURL: URL(string: "https://media.invalid/book"))
+        #expect(media.items.count == 2)
+        let card = try #require(media.items.first)
+        let art = try #require(media.items.last)
+        #expect(card.action == "open('review?a=1&para=12')")
+        #expect(card.textSized)
+        #expect(card.request == "data:image/svg+xml;base64,PHN2Zy8+")
+        #expect(art.request.hasPrefix("https://media.invalid/art.png,"))
+        #expect(art.request.contains("X-Edition"))
+        #expect(art.action == nil)
+        let whole = NSRange(location: 0, length: body.utf16.count)
+        #expect(media.textForReading(body as NSString, range: whole) == "🌙前中章末")
+        for item in media.items {
+            let start = item.range.location
+            let display = media.displayedOffset(start)
+            #expect(media.displayedOffset(start + 5) == display)
+            #expect(media.sourceOffset(display) == start)
+            #expect(media.sourceOffset(display + 1) == NSMaxRange(item.range))
+        }
+        #expect(media.sourceOffset("🌙前□中□章末".utf16.count) == body.utf16.count)
+    }
+}

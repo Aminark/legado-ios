@@ -469,7 +469,7 @@ public struct LegadoURLBuilder: Sendable {
         )
     }
 
-    private func splitOptions(_ value: String) -> [(url: String, options: String)] {
+    func splitOptions(_ value: String) -> [(url: String, options: String)] {
         guard let expression = try? NSRegularExpression(pattern: #"\s*,\s*(?=\{)"#) else {
             return [(value.trimmingCharacters(in: .whitespacesAndNewlines), "")]
         }

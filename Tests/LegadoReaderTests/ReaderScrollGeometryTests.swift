@@ -1,6 +1,7 @@
 import ImageIO
 import SwiftUI
 import UIKit
+@preconcurrency import WebKit
 import XCTest
 @testable import Legado
 
@@ -86,6 +87,50 @@ final class ReaderPagingGeometryTests: XCTestCase {
         XCTAssertEqual(view.contentOffset.y, pages[pages.count - 2].offset, accuracy: 0.5)
     }
 
+    func testShortChapterStartsAtHeadingAfterImmediateOrDeferredReplacement() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        defer { window.isHidden = true }
+        for delay in [false, true] {
+            let long = pagedReader(text: String(repeating: "山下的雨已经停了。🌿\n", count: 300), title: "长章")
+            let host = UIHostingController(rootView: long)
+            window.rootViewController = host
+            window.makeKeyAndVisible()
+            host.view.layoutIfNeeded()
+            await Task.yield()
+            let textView = try XCTUnwrap(findTextView(host.view))
+            let coordinator = try XCTUnwrap(textView.delegate as? ReaderTextView.Coordinator)
+            for _ in 0..<4 { coordinator.turnPage(1) }
+            let firstVisible = coordinator.contentCharacter(at: textView.contentOffset, in: textView)
+            host.rootView = pagedReader(text: long.text, title: long.title, lineSpacing: 18)
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            await Task.yield()
+            let reflowed = ReaderTextPage.layout(in: textView, height: textView.bounds.height - 32)
+            let visible = try XCTUnwrap(reflowed.last { $0.offset <= textView.contentOffset.y + 0.5 })
+            XCTAssertTrue(NSLocationInRange(firstVisible + long.title.utf16.count + 1, visible.characterRange))
+            let last = try XCTUnwrap(ReaderTextPage.layout(in: textView, height: textView.bounds.height - 32).last)
+            XCTAssertGreaterThan(last.offset, textView.bounds.height)
+            textView.setContentOffset(CGPoint(x: 0, y: last.offset), animated: false)
+            if delay {
+                var loading = long
+                loading.holdsDisplayedPage = true
+                host.rootView = loading
+                host.view.layoutIfNeeded()
+                await Task.yield()
+            }
+            var short = pagedReader(text: String(repeating: "清晨。\n", count: 32), title: "新章")
+            short.chapterGeneration = 1
+            host.rootView = short
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            await Task.yield()
+            XCTAssertTrue(textView.text.hasPrefix("新章"))
+            XCTAssertEqual(textView.contentOffset.y, 0, accuracy: 0.5)
+            coordinator.turnPage(1)
+            XCTAssertGreaterThan(textView.contentOffset.y, 0)
+        }
+    }
+
     func testCoverTurnKeepsNewChapterHeadingVisibleDuringReflow() async throws {
         let text = String(repeating: "这是一段用来测试覆盖翻页的正文。\n", count: 100)
         let first = pagedReader(text: text, title: "第一章 雨夜", animation: 0)
@@ -130,13 +175,14 @@ final class ReaderPagingGeometryTests: XCTestCase {
     }
 
     private func pagedReader(text: String, title: String, animation: Int = 4,
+                             lineSpacing: Double = 8,
                              ranges: Binding<[NSRange]> = .constant([]),
                              currentPage: Binding<Int> = .constant(1),
                              totalPages: Binding<Int> = .constant(1)) -> ReaderTextView {
         ReaderTextView(
             text: text, title: title, previousTitle: nil, previousText: "", isPreviousReady: false,
             continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
-            fontSize: 32, fontPath: "", letterSpacing: 0, lineSpacing: 8, paragraphSpacing: 12,
+            fontSize: 32, fontPath: "", letterSpacing: 0, lineSpacing: lineSpacing, paragraphSpacing: 12,
             paragraphIndent: "　　", paddingLeft: 18, paddingRight: 18, paddingTop: 16, paddingBottom: 16,
             headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
             titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
@@ -581,5 +627,101 @@ final class ReaderComicGeometryTests: XCTestCase {
         try await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(lastPage, 3)
         XCTAssertGreaterThan(lastPosition, blocks[2].range.location)
+    }
+}
+
+@MainActor
+final class ReaderInlineInteractionTests: XCTestCase {
+    func testRemoteIllustrationAndVectorActionShareOneTextLayout() async throws {
+        struct Transport: HTTPTransport {
+            let png: Data
+            func data(for request: URLRequest) async throws -> HTTPResponse {
+                let url = try XCTUnwrap(request.url)
+                XCTAssertEqual(url.lastPathComponent, "illustration.png")
+                return .init(data: png, statusCode: 200, headers: [:], finalURL: url)
+            }
+        }
+
+        let svg = #"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="30"><rect width="120" height="30" fill="red"/></svg>"#
+        let body = "开头🌱<img src='data:image/svg+xml;base64," + Data(svg.utf8).base64EncodedString()
+            + #",{"click":"showDiscussion()","style":"TEXT"}'>插图<img src="https://media.invalid/illustration.png">结尾"#
+        let source = BookSource(bookSourceUrl: "https://media.invalid", bookSourceName: "图文")
+        let book = Book(bookUrl: "https://media.invalid/novel", name: "插画集", author: "", origin: source.id)
+        let chapter = BookChapter(url: book.bookUrl + "/1", title: "春日", bookUrl: book.bookUrl, index: 0)
+        let png = UIGraphicsImageRenderer(size: CGSize(width: 30, height: 60)).pngData { context in
+            UIColor.blue.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 30, height: 60))
+        }
+        let library = ReaderMediaLibrary(loader: .init(transport: Transport(png: png)))
+        await library.prepare([.init(id: 0, title: chapter.title, content: body)], directory: [chapter], book: book, source: source)
+        var tapped: String?
+        let display = library.presentation { index, item in
+            XCTAssertEqual(index, 0)
+            tapped = item.action
+        }
+        let doc = display.document(body, chapter: 0)
+        let rich = display.render(body, inline: doc, attributes: [.font: UIFont.systemFont(ofSize: 18)],
+                                  width: 300, chapter: 0)
+        XCTAssertEqual(rich.string, "开头🌱\u{fffc}插图\u{fffc}结尾")
+        let storage = NSTextStorage(attributedString: rich)
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: CGSize(width: 300, height: 900))
+        storage.addLayoutManager(manager)
+        manager.addTextContainer(container)
+        manager.ensureLayout(for: container)
+        let items = doc.items
+        XCTAssertEqual(items.count, 2)
+        for (index, item) in items.enumerated() {
+            let location = doc.displayedOffset(item.range.location)
+            let token = try XCTUnwrap(rich.attribute(.attachment, at: location, effectiveRange: nil) as? NSTextAttachment)
+            let image = try XCTUnwrap(token.image)
+            XCTAssertEqual(image.size.width / image.size.height, index == 0 ? 4 : 0.5, accuracy: 0.1)
+            let glyph = manager.glyphIndexForCharacter(at: location)
+            let frame = manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+            XCTAssertEqual(display.activate(at: CGPoint(x: frame.midX, y: frame.midY), manager: manager, container: container),
+                           index == 0)
+        }
+        XCTAssertEqual(tapped, "showDiscussion()")
+    }
+}
+
+extension ReaderInlineInteractionTests {
+    func testAuthenticatedScriptBrowserFinishesOnDismissal() async throws {
+        let session = SourceInteractionSession()
+        let source = BookSource(bookSourceUrl: "https://reader.invalid", bookSourceName: "表单测试")
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let host = UIHostingController(rootView: Text("账户").sourceInteraction(session, source: source))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        host.view.layoutIfNeeded()
+        await Task.yield()
+        let page = Data("<html><body>account-ready</body></html>".utf8).base64EncodedString()
+        let job = Task {
+            try await session.evaluator.evaluateAsync(script: "java.startBrowserAwait(result, '账户').body()",
+                                                      result: .string("data:text/html;base64," + page),
+                                                      executionContext: .init(source: source))
+        }
+        defer { job.cancel() }
+        func browser(in controller: UIViewController) -> UINavigationController? {
+            if let nav = controller as? UINavigationController, nav.topViewController?.view is WKWebView { return nav }
+            return controller.children.lazy.compactMap(browser(in:)).first
+        }
+        var presented: UINavigationController?
+        for _ in 0..<120 {
+            if let sheet = host.presentedViewController, let nav = browser(in: sheet),
+               let web = nav.topViewController?.view as? WKWebView,
+               (try? await web.evaluateJavaScript("document.body.textContent") as? String) == "account-ready" {
+                presented = nav
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let done = try XCTUnwrap(presented?.topViewController?.navigationItem.rightBarButtonItem)
+        let selector = try XCTUnwrap(done.action)
+        XCTAssertTrue(UIApplication.shared.sendAction(selector, to: done.target, from: done, for: nil))
+        let reply = try await job.value
+        XCTAssertTrue(reply.value.stringValue.contains("account-ready"))
+        XCTAssertFalse(session.isPresenting)
     }
 }

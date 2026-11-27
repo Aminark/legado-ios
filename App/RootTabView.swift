@@ -2203,8 +2203,9 @@ private struct ReadingPreferencesView: View {
     @AppStorage("titleTopSpacing") private var titleTopSpacing = 0.0
     @AppStorage("titleBottomSpacing") private var titleBottomSpacing = ReaderTypography.defaultTitleBottomSpacing
     @AppStorage("underlineMode") private var underlineMode = 0
-    @AppStorage("readerTheme") private var theme = "wechat"
+    private var palette = ReadingPalettePreference()
     @AppStorage("pageAnim") private var pageAnimation = 0
+    @AppStorage("readerVolumePaging") private var volumePaging = false
     @AppStorage("readerKeepScreenOn") private var keepScreenOn = false
     @AppStorage("readerHideHomeIndicator") private var hideHomeIndicator = false
 
@@ -2267,13 +2268,15 @@ private struct ReadingPreferencesView: View {
                 }
             }
             Section("屏幕") {
+                Toggle("音量键翻页", isOn: $volumePaging)
+                Toggle("阅读配色与应用联动", isOn: palette.$linked)
                 Toggle("阅读时不自动锁屏", isOn: $keepScreenOn)
                 Toggle("阅读时隐藏小横条", isOn: $hideHomeIndicator)
             }
             Section("阅读背景") {
                 ForEach(ReaderStylePreset.legadoDefaults) { preset in
                     Button {
-                        theme = preset.id
+                        palette.choose(preset.id)
                     } label: {
                         HStack {
                             RoundedRectangle(cornerRadius: 5)
@@ -2284,7 +2287,7 @@ private struct ReadingPreferencesView: View {
                                 }
                             Text(preset.name).foregroundStyle(.primary)
                             Spacer()
-                            if ReaderStylePreset.resolve(theme).id == preset.id {
+                            if palette.resolved.id == preset.id {
                                 Image(systemName: "checkmark").foregroundStyle(ReadingTheme.accent)
                             }
                         }
@@ -2296,9 +2299,9 @@ private struct ReadingPreferencesView: View {
                     .tracking(letterSpacing * fontSize)
                     .font(.system(size: fontSize, design: .serif))
                     .lineSpacing(lineSpacing)
-                    .foregroundStyle(Color(uiColor: ReaderStylePreset.resolve(theme).foreground))
+                    .foregroundStyle(Color(uiColor: palette.resolved.foreground))
                     .padding(.vertical, 12)
-                    .listRowBackground(Color(uiColor: ReaderStylePreset.resolve(theme).background))
+                    .listRowBackground(Color(uiColor: palette.resolved.background))
             }
         }
         .navigationTitle("阅读设置")

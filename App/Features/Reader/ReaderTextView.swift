@@ -110,6 +110,10 @@ struct ReaderTextView: UIViewRepresentable {
     var holdsDisplayedPage = false
     var chapterGeneration = 0
 
+    var media = ReaderMediaPresentation()
+    var chapterIndex = 0
+    var hardwareInput: ReaderPageInput?
+
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     func makeUIView(context: Context) -> UITextView {
@@ -123,7 +127,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
         view.onLayout = { [weak coordinator = context.coordinator] view in
             guard let coordinator, !coordinator.parent.holdsDisplayedPage, !coordinator.isApplyingContent else { return }
-            coordinator.restorePendingPage(in: view)
+            coordinator.restoreLayoutAnchor(in: view)
             coordinator.reportPage(in: view)
             coordinator.reportPageRanges(in: view)
         }
@@ -149,6 +153,7 @@ struct ReaderTextView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: UITextView, context: Context) {
+        hardwareInput?.turn = { [weak coordinator = context.coordinator] direction in coordinator?.turnPage(direction) }
         let wasHoldingPage = context.coordinator.parent.holdsDisplayedPage
         let chapterChanged = context.coordinator.parent.chapterGeneration != chapterGeneration
         context.coordinator.parent = self
@@ -192,7 +197,8 @@ struct ReaderTextView: UIViewRepresentable {
         let displaysTitle = titleMode != 2 || isVolume
         let titlePrefix = displaysTitle && !title.isEmpty ? title + "\n" : ""
         let styleKey = "\(contentKey)|\(adjacentContentKey)|\(title)|\(isVolume)|\(fontSize)|\(fontPath)|\(fontRevision)|\(letterSpacing)|\(lineSpacing)|\(paragraphSpacing)|\(paragraphIndent)|\(paddingLeft)|\(paddingRight)|\(paddingTop)|\(paddingBottom)|\(headerInset)|\(footerInset)|\(fontWeight)|\(titleMode)|\(titleSize)|\(titleTopSpacing)|\(titleBottomSpacing)|\(underlineMode)|\(isSelectable)|\(fullJustify)|\(effectivePageAnimation)|\(foregroundColor.hash)"
-        if chapterChanged || context.coordinator.styleKey != styleKey {
+        if chapterChanged || context.coordinator.styleKey != styleKey || context.coordinator.mediaRevision != media.revision
+            || (viewportSizeChanged && !context.coordinator.inline.items.isEmpty) {
             if context.coordinator.shouldDeferRender(in: view) {
                 context.coordinator.needsDeferredRender = true
                 return
@@ -205,6 +211,7 @@ struct ReaderTextView: UIViewRepresentable {
             context.coordinator.contentKey = contentKey
             context.coordinator.primaryContentKey = primaryContentKey
             context.coordinator.styleKey = styleKey
+            context.coordinator.mediaRevision = media.revision
             let typography = ReaderTypography(configuration: self)
             let bodyAttributes = typography.bodyAttributes
             let rendered = NSMutableAttributedString(string: "")
@@ -228,7 +235,11 @@ struct ReaderTextView: UIViewRepresentable {
                 rendered.append(NSAttributedString(string: titlePrefix, attributes: typography.headingAttributes))
             }
             context.coordinator.renderedPrefixLength = rendered.length
-            rendered.append(NSAttributedString(string: text, attributes: bodyAttributes))
+            let inline = media.document(text, chapter: chapterIndex)
+            context.coordinator.inline = inline
+            rendered.append(media.render(text, inline: inline, attributes: bodyAttributes,
+                                        width: view.bounds.width - CGFloat(paddingLeft + paddingRight + 8),
+                                        chapter: chapterIndex))
             context.coordinator.currentBodyEnd = rendered.length
             if showsContinuation {
                 rendered.append(NSAttributedString(string: "\n\n", attributes: bodyAttributes))
@@ -288,6 +299,8 @@ struct ReaderTextView: UIViewRepresentable {
         var parent: ReaderTextView
         var contentKey = 0
         var primaryContentKey = 0
+        var mediaRevision = -1
+        var inline = ChapterInlineMedia()
         var styleKey = ""
         var renderedPrefixLength = 0
         var currentSectionStart = 0
@@ -296,6 +309,7 @@ struct ReaderTextView: UIViewRepresentable {
         var previousBodyEnd: Int?
         var continuationSectionStart: Int?
         var continuationBodyStart: Int?
+        private var layoutAnchor: Int?
         var lastJumpPosition: Int?
         private(set) var pendingPagePosition: Int?
         private(set) var layoutGeneration = 0
@@ -429,6 +443,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         func holdDisplayedPage() {
+            layoutAnchor = nil
             layoutGeneration &+= 1
             isAutoReadPaused = true
         }
@@ -474,6 +489,7 @@ struct ReaderTextView: UIViewRepresentable {
             if parent.pageAnimation != 3 {
                 // Another layout pass may already be reading the visible page when
                 // this update returns. Apply the chapter position before that pass.
+                layoutAnchor = characterPosition
                 pendingPagePosition = characterPosition
                 restorePendingPage(in: view)
                 return
@@ -481,7 +497,7 @@ struct ReaderTextView: UIViewRepresentable {
             let generation = layoutGeneration
             let prefix = characterPosition == 0 ? currentSectionStart : renderedPrefixLength
             let location = ReaderPositionResolver.renderedLocation(
-                position: characterPosition,
+                position: inline.displayedOffset(characterPosition),
                 prefixLength: prefix,
                 renderedLength: view.text.utf16.count
             )
@@ -503,6 +519,12 @@ struct ReaderTextView: UIViewRepresentable {
             }
         }
 
+        func restoreLayoutAnchor(in view: UITextView) {
+            guard parent.pageAnimation != 3, let layoutAnchor else { return }
+            pendingPagePosition = layoutAnchor
+            restorePendingPage(in: view)
+        }
+
         func restorePendingPage(in view: UITextView) {
             guard let position = pendingPagePosition, !isApplyingContent,
                   view.bounds.width > 0, view.bounds.height > 0 else { return }
@@ -514,7 +536,7 @@ struct ReaderTextView: UIViewRepresentable {
             let pages = pages(in: view)
             guard let first = pages.first, let last = pages.last else { return }
             let location = ReaderPositionResolver.renderedLocation(
-                position: position, prefixLength: renderedPrefixLength, renderedLength: view.textStorage.length
+                position: inline.displayedOffset(position), prefixLength: renderedPrefixLength, renderedLength: view.textStorage.length
             )
             // Chapter start includes the heading, even when it fills a page of its own.
             let page = position == 0 ? first : pages.first { NSLocationInRange(location, $0.characterRange) } ?? last
@@ -584,7 +606,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         private func pages(in view: UITextView) -> [ReaderTextPage] {
-            let key = "\(styleKey)|\(view.bounds.size)|\(view.textContainerInset)|\(view.textContainer.size.width)"
+            let key = "\(mediaRevision)|\(styleKey)|\(view.bounds.size)|\(view.textContainerInset)|\(view.textContainer.size.width)"
             if paginationKey != key || cachedPages.isEmpty {
                 cachedPages = ReaderTextPage.layout(in: view, height: readingViewportHeight(for: view))
                 paginationKey = key
@@ -644,7 +666,7 @@ struct ReaderTextView: UIViewRepresentable {
 
         func contentCharacter(at offset: CGPoint, in view: UITextView) -> Int {
             let character = renderedCharacter(at: offset, in: view)
-            return min(max(character - renderedPrefixLength, 0), parent.text.utf16.count)
+            return min(inline.sourceOffset(character - renderedPrefixLength), parent.text.utf16.count)
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -758,9 +780,9 @@ struct ReaderTextView: UIViewRepresentable {
             var ranges: [NSRange] = []
             for page in pages(in: view) {
                 let characterRange = page.characterRange
-                let start = max(characterRange.location - renderedPrefixLength, 0)
+                let start = min(inline.sourceOffset(characterRange.location - renderedPrefixLength), parent.text.utf16.count)
                 let end = min(
-                    characterRange.location + characterRange.length - renderedPrefixLength,
+                    inline.sourceOffset(NSMaxRange(characterRange) - renderedPrefixLength),
                     parent.text.utf16.count
                 )
                 ranges.append(NSRange(location: start, length: max(end - start, 0)))
@@ -789,6 +811,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            layoutAnchor = nil
             isUserDragging = true
             lastDragOffsetY = scrollView.contentOffset.y
             dragDirection = 0
@@ -859,6 +882,8 @@ struct ReaderTextView: UIViewRepresentable {
         @objc private func tapped(_ gesture: UITapGestureRecognizer) {
             guard let view = textView, gesture.state == .ended else { return }
             let point = gesture.location(in: view)
+            let local = CGPoint(x: point.x - view.textContainerInset.left, y: point.y - view.textContainerInset.top)
+            if parent.media.activate(at: local, manager: view.layoutManager, container: view.textContainer) { return }
             // UIScrollView changes its bounds origin as content scrolls, and
             // gesture locations use that content coordinate space. Convert
             // back to viewport coordinates before dividing the visible screen
@@ -888,6 +913,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         func turnPage(_ direction: Int) {
+            layoutAnchor = nil
             guard !isTurningPage, let view = textView else { return }
             if isAutoReading { resetAutoReadForPageChange() }
             let (minimum, maximum) = scrollLimits(for: view)
@@ -975,6 +1001,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         private func advancePagedAutoRead(in view: UITextView, elapsed: CFTimeInterval) {
+            layoutAnchor = nil
             if autoPageOverlay == nil, !prepareAutoPage(in: view) {
                 guard !didReachEnd else { return }
                 didReachEnd = true
@@ -1003,6 +1030,7 @@ struct ReaderTextView: UIViewRepresentable {
         }
 
         private func advanceEInkAutoRead(in view: UITextView, elapsed: CFTimeInterval) {
+            layoutAnchor = nil
             eInkElapsed += elapsed
             guard eInkElapsed >= eInkPageInterval else { return }
             eInkElapsed = 0
