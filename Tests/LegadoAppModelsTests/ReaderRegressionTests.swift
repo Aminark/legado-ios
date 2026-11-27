@@ -719,7 +719,10 @@ struct ReaderRegressionTests {
         var otherChapter = saved
         otherChapter.chapterIndex = 1
         otherChapter.chapterName = chapters[1].title
-        let bookmarks = [saved, otherBook, otherChapter]
+        var originalEPUB = saved
+        originalEPUB.chapterPosition = 0
+        originalEPUB.epubLocation = #"{"href":"chapter.xhtml","locations":{"progression":0.6}}"#
+        let bookmarks = [saved, otherBook, otherChapter, originalEPUB]
         let reopened = ReaderViewModel(demoBook: book, chapters: chapters, initialIndex: 0, content: "正文")
 
         #expect(reopened.bookmarks(at: 40, in: bookmarks) == [saved])

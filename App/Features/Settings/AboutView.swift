@@ -81,6 +81,8 @@ private struct OpenSourceLicensesView: View {
             license("Kanna", resource: "Kanna-LICENSE", detail: "MIT License")
             license("Readium 及其依赖", resource: "Readium-LICENSE", detail: "组件、依赖与字体许可证")
             license("ZIPFoundation", resource: "ZIPFoundation-LICENSE", detail: "MIT License")
+            license("离线中文语音", resource: "OfflineTTS-LICENSE", detail: "sherpa-onnx、ONNX Runtime 与 MeloTTS")
+            license("MsEdgeTTS", resource: "MsEdgeTTS-LICENSE", detail: "MIT License")
         }.navigationTitle("开源许可").navigationBarTitleDisplayMode(.inline)
     }
 

@@ -5,6 +5,16 @@ import LegadoCore
 
 @MainActor
 struct ReadingActivityRegressionTests {
+    @Test func removingPageBookmarksPersistsOnlyTheSelectedIDs() async throws {
+        let bookmarks = (1...3).map { Bookmark(time: Int64($0), bookName: "测试书") }
+        let repository = InMemoryReadingActivityRepository(bookmarks: bookmarks)
+        let model = ReadingActivityModel(repository: repository, deviceID: "test")
+        await model.load()
+        await model.removeBookmarks([bookmarks[0], bookmarks[2]])
+        #expect(model.bookmarks == [bookmarks[1]])
+        #expect(await repository.loadBookmarks() == [bookmarks[1]])
+    }
+
     @Test func overlappingBookmarkAddsKeepBothEntriesOnDisk() async throws {
         let repository = PausedActivityRepository(pauseBookmarks: true)
         let model = ReadingActivityModel(repository: repository, deviceID: "test")

@@ -72,6 +72,16 @@ struct LegadoApp: App {
                         await bookLibrary.checkForUpdates(sources: sourceLibrary.sources, onlyRead: UserDefaults.standard.bool(forKey: "onlyUpdateRead"))
                     }
                     await ruleSubscriptions.checkAutomaticUpdates(bookSources: sourceLibrary, rssSources: rssLibrary, replaceRules: replaceRuleLibrary)
+                    if !ProcessInfo.processInfo.arguments.contains("-uiDemo") {
+                        WebDAVBackupCoordinator.shared.runAutomaticBackupIfDue {
+                            await bookLibrary.waitForLibraryWrites()
+                            await sourceLibrary.waitForLibraryWrites()
+                            await replaceRuleLibrary.waitForLibraryWrites()
+                            await readingActivity.waitForLibraryWrites()
+                            await rssLibrary.waitForLibraryWrites()
+                            await ruleSubscriptions.waitForLibraryWrites()
+                        }
+                    }
                 }
                 .onOpenURL { url in
                     Task {

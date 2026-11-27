@@ -6,7 +6,17 @@
 
 - 项目：<https://github.com/LegadoTeam/legado>。
 - 许可：GNU General Public License v3，完整文本见 [Legado-LICENSE.txt](App/Resources/Legado-LICENSE.txt)。
-- 材料：部分业务模块、默认 TXT 目录规则 [txtTocRule.json](App/Resources/txtTocRule.json) 和 HTTP TTS 配置 [httpTTS.json](App/Resources/httpTTS.json)。两份配置对应 `app/src/main/assets/defaultData/` 下的同名文件，原作者署名保留在配置中。
+- 材料：部分业务模块、默认 TXT 目录规则 [txtTocRule.json](App/Resources/txtTocRule.json) 和用于旧版数据迁移的 [retiredHttpTTS.json](App/Resources/retiredHttpTTS.json)。两份配置源自 `app/src/main/assets/defaultData/`，原作者署名保留在配置中。
+
+## 离线中文语音
+
+- [sherpa-onnx 2.0.3](https://github.com/k2-fsa/sherpa-onnx/tree/v2.0.3)（Apache-2.0）和 [ONNX Runtime](https://github.com/microsoft/onnxruntime)（MIT）用于设备上的语音合成。
+- [MeloTTS 中文模型](https://huggingface.co/csukuangfj/vits-melo-tts-zh_en)（MIT，Copyright 2024 MyShell.ai）由用户在 App 内下载，模型许可证随模型一并保存。
+- 许可文本见 [OfflineTTS-LICENSE.txt](App/Resources/OfflineTTS-LICENSE.txt)。
+
+## MsEdgeTTS
+
+- [MsEdgeTTS 2.1.1](https://github.com/Migushthe2nd/MsEdgeTTS) 的 `SecMsGec.js` 原样用于 Edge 在线朗读连接。许可见 [MsEdgeTTS-LICENSE.txt](App/Resources/MsEdgeTTS-LICENSE.txt)。
 - 版权归 Legado 原作者及其贡献者。Aminark 于 2026-10-13 起修改应用品牌、界面与公开文档；后续修改日期和内容见 [CHANGELOG](CHANGELOG.md) 与 Git 历史。
 
 ## SwiftSoup
@@ -29,7 +39,7 @@
 
 ## Readium EPUB 阅读组件
 
-- 项目：<https://github.com/readium/swift-toolkit>，固定版本 `3.8.0`，兼容 iOS 15。
+- 项目：<https://github.com/readium/swift-toolkit>，固定版本 `3.11.1`，兼容 iOS 15。
 - 用途：渲染 EPUB 的 XHTML/CSS、SVG、内嵌插图、表格、目录与阅读位置。
 - 许可：BSD-3-Clause。随 App 使用的 Zip、Readium Fuzi、Readium ZIPFoundation、CryptoSwift、DifferenceKit 的完整版权及许可一并收录在 [Readium-LICENSE.txt](App/Resources/Readium-LICENSE.txt)，可在 App「关于 → 开源许可」中查看。
 - 随阅读组件分发的 OpenDyslexic、iA Writer Duospace、AccessibleDfA 字体保留原始资源，版权及许可说明一并收录在上述许可文件中。

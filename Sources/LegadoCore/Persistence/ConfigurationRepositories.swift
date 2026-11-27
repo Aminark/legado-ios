@@ -88,6 +88,15 @@ public struct HttpTTS: Codable, Hashable, Identifiable, Sendable {
     public var enabledCookieJar: Bool?
     public var loginCheckJs: String?
     public var lastUpdateTime: Int64
+
+    public var isRetiredNextEngine: Bool {
+        if id == 1_768_175_007_437 { return true }
+        let normalizedName = name.folding(options: [.caseInsensitive, .widthInsensitive], locale: nil)
+        let significantScalars = normalizedName.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
+        let identifier = String(significantScalars)
+        return identifier == "next引擎" || identifier == "next引擎长按切换音色"
+    }
+
     public init(id: Int64 = Int64(Date().timeIntervalSince1970 * 1_000), name: String = "", url: String = "") {
         self.id = id; self.name = name; self.url = url; contentType = nil; concurrentRate = "0"
         loginUrl = nil; loginUi = nil; header = nil; jsLib = nil; enabledCookieJar = false

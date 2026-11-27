@@ -15,48 +15,48 @@ struct SourceManagementView: View {
     @State private var showsBatchGroups = false
     @State private var selectedGroup: String?
     @State private var searchText = ""
+    @State private var visibleEntries: [SourceCatalogIndex.Entry] = []
+    @State private var presentedDetailSource: BookSource?
+    @State private var presentedSearchSource: BookSource?
     @State private var isSelecting = false
     @State private var selectedSourceIDs = Set<String>()
     @State private var confirmsBatchDelete = false
     @AppStorage("bookSourceSort") private var sortMode = "manual"
     @AppStorage("bookSourceSortDescending") private var sortDescending = false
 
-    private var filteredSources: [BookSource] {
-        let filtered = library.sources.filter { source in
-            let matchesGroup: Bool
-            if let selectedGroup {
-                matchesGroup = selectedGroup.isEmpty ? source.groups.isEmpty : source.hasGroup(selectedGroup)
-            } else {
-                matchesGroup = true
-            }
-            let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-            return matchesGroup && (query.isEmpty
-                || source.bookSourceName.localizedCaseInsensitiveContains(query)
-                || source.bookSourceUrl.localizedCaseInsensitiveContains(query)
-                || source.groups.contains(where: { $0.localizedCaseInsensitiveContains(query) }))
-        }
-        guard sortMode != "manual" else { return filtered }
-        return filtered.sorted { lhs, rhs in
-            sortDescending ? isOrdered(rhs, before: lhs) : isOrdered(lhs, before: rhs)
-        }
+    private struct QueryKey: Equatable {
+        let revision: Int
+        let group: String?
+        let sortMode: String
+        let sortDescending: Bool
     }
 
-    private func isOrdered(_ lhs: BookSource, before rhs: BookSource) -> Bool {
-        switch sortMode {
-        case "weight":
-            return lhs.weight == rhs.weight ? lhs.bookSourceName.localizedStandardCompare(rhs.bookSourceName) == .orderedAscending : lhs.weight < rhs.weight
-        case "name": return lhs.bookSourceName.localizedStandardCompare(rhs.bookSourceName) == .orderedAscending
-        case "url": return lhs.bookSourceUrl.localizedStandardCompare(rhs.bookSourceUrl) == .orderedAscending
-        case "update": return lhs.lastUpdateTime == rhs.lastUpdateTime ? lhs.bookSourceName < rhs.bookSourceName : lhs.lastUpdateTime > rhs.lastUpdateTime
-        case "respond": return lhs.respondTime == rhs.respondTime ? lhs.bookSourceName < rhs.bookSourceName : lhs.respondTime < rhs.respondTime
-        case "enabled": return lhs.enabled == rhs.enabled ? lhs.bookSourceName < rhs.bookSourceName : lhs.enabled && !rhs.enabled
-        default: return lhs.customOrder < rhs.customOrder
+    private var structuralQueryKey: QueryKey {
+        QueryKey(
+            revision: library.catalogRevision,
+            group: selectedGroup,
+            sortMode: sortMode,
+            sortDescending: sortDescending
+        )
+    }
+
+    private func recomputeVisibleEntries(for query: String) {
+        let index = library.catalogIndex
+        let sort = SourceSortKey(storedValue: sortMode)
+        visibleEntries = index.query(
+            group: selectedGroup,
+            searchText: query,
+            sort: sort,
+            descending: sortDescending
+        )
+        if isSelecting {
+            let visibleSet = Set(visibleEntries.map(\.id))
+            selectedSourceIDs.formIntersection(visibleSet)
         }
     }
 
     var body: some View {
-        let displayed = filteredSources
-        let enabledCount = library.sources.reduce(0) { $0 + ($1.enabled ? 1 : 0) }
+        let displayed = visibleEntries
         VStack(spacing: 0) {
             ReadingPillSearchField(placeholder: "名称、地址或分组", text: $searchText)
             if library.sources.isEmpty, !library.isWorking {
@@ -94,38 +94,39 @@ struct SourceManagementView: View {
                         }
                     }
                     Section {
-                        ForEach(displayed) { source in
+                        ForEach(displayed) { entry in
                             if isSelecting {
                                 Button {
-                                    if !selectedSourceIDs.insert(source.id).inserted { selectedSourceIDs.remove(source.id) }
+                                    if !selectedSourceIDs.insert(entry.id).inserted { selectedSourceIDs.remove(entry.id) }
                                 } label: {
                                     HStack(spacing: 10) {
-                                        Image(systemName: selectedSourceIDs.contains(source.id) ? "checkmark.circle.fill" : "circle")
+                                        Image(systemName: selectedSourceIDs.contains(entry.id) ? "checkmark.circle.fill" : "circle")
                                             .font(.title3)
-                                            .foregroundStyle(selectedSourceIDs.contains(source.id) ? ReadingTheme.accent : .secondary)
-                                        SourceRow(source: source, showsToggle: false) { _ in }
+                                            .foregroundStyle(selectedSourceIDs.contains(entry.id) ? ReadingTheme.accent : .secondary)
+                                        SourceRow(entry: entry, showsToggle: false) { _ in }
                                     }
                                 }
                                 .buttonStyle(.plain)
                             } else {
-                                NavigationLink {
-                                    SourceDetailView(source: source)
-                                } label: {
-                                    SourceRow(source: source) { enabled in
-                                        Task { await library.setEnabled(enabled, for: source.id) }
+                                SourceRow(
+                                    entry: entry,
+                                    showsDisclosure: true,
+                                    onSelect: {
+                                        presentedDetailSource = library.source(id: entry.id)
+                                    },
+                                    onEnabledChanged: { enabled in
+                                        Task { await library.setEnabled(enabled, for: entry.id) }
                                     }
-                                }
+                                )
                                 .contextMenu {
-                                    NavigationLink {
-                                        SearchView(fixedSource: source)
-                                    } label: {
-                                        Label("搜索", systemImage: "magnifyingglass")
+                                    Button("搜索", systemImage: "magnifyingglass") {
+                                        presentedSearchSource = library.source(id: entry.id)
                                     }
-                                    Button(source.enabledExplore ? "停用发现" : "启用发现", systemImage: "safari") {
-                                        Task { await library.setExploreEnabled(!source.enabledExplore, for: source.id) }
+                                    Button(entry.enabledExplore ? "停用发现" : "启用发现", systemImage: "safari") {
+                                        Task { await library.setExploreEnabled(!entry.enabledExplore, for: entry.id) }
                                     }
                                     Button("删除", systemImage: "trash", role: .destructive) {
-                                        Task { await library.remove(sourceIDs: [source.id]) }
+                                        Task { await library.remove(sourceIDs: [entry.id]) }
                                     }
                                 }
                             }
@@ -137,7 +138,7 @@ struct SourceManagementView: View {
                     } header: {
                         Text("\(displayed.count) 个书源")
                     } footer: {
-                        Text("共 \(library.sources.count) 个书源，\(enabledCount) 个已启用")
+                        Text("共 \(library.sources.count) 个书源，\(library.enabledCount) 个已启用")
                     }
                 }
                 .listStyle(.insetGrouped)
@@ -152,6 +153,49 @@ struct SourceManagementView: View {
         .background(ReadingTheme.canvas)
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarHidden(false)
+        .onAppear { recomputeVisibleEntries(for: searchText) }
+        .onChange(of: structuralQueryKey) { _ in
+            recomputeVisibleEntries(for: searchText)
+        }
+        .task(id: searchText) {
+            let query = searchText
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || library.catalogIndex.entries.count < 300 {
+                recomputeVisibleEntries(for: query)
+                return
+            }
+            do {
+                try await Task.sleep(nanoseconds: 140_000_000)
+            } catch { return }
+            guard !Task.isCancelled else { return }
+            let key = structuralQueryKey
+            let index = library.catalogIndex
+            let sort = SourceSortKey(storedValue: key.sortMode)
+            let result = await Task.detached(priority: .userInitiated) {
+                index.query(group: key.group, searchText: query, sort: sort, descending: key.sortDescending)
+            }.value
+            guard !Task.isCancelled, searchText == query, structuralQueryKey == key else { return }
+            visibleEntries = result
+            if isSelecting {
+                selectedSourceIDs.formIntersection(Set(result.map(\.id)))
+            }
+        }
+        .readingNavigationDestination(isPresented: Binding(
+            get: { presentedDetailSource != nil },
+            set: { if !$0 { presentedDetailSource = nil } }
+        )) {
+            if let source = presentedDetailSource {
+                SourceDetailView(source: source)
+            }
+        }
+        .readingNavigationDestination(isPresented: Binding(
+            get: { presentedSearchSource != nil },
+            set: { if !$0 { presentedSearchSource = nil } }
+        )) {
+            if let source = presentedSearchSource {
+                SearchView(fixedSource: source)
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button(isSelecting ? "完成" : "选择") {
@@ -192,10 +236,14 @@ struct SourceManagementView: View {
         .safeAreaInset(edge: .bottom) {
             if isSelecting {
                 HStack(spacing: 12) {
-                    Button(selectedSourceIDs.count == displayed.count ? "取消全选" : "全选") {
-                        if selectedSourceIDs.count == displayed.count { selectedSourceIDs.removeAll() }
-                        else { selectedSourceIDs = Set(displayed.map(\.id)) }
+                    Button(!displayed.isEmpty && selectedSourceIDs.count == displayed.count ? "取消全选" : "全选") {
+                        if !displayed.isEmpty && selectedSourceIDs.count == displayed.count {
+                            selectedSourceIDs.removeAll()
+                        } else {
+                            selectedSourceIDs = Set(displayed.map(\.id))
+                        }
                     }
+                    .disabled(displayed.isEmpty)
                     Spacer()
                     Button("分组", systemImage: "folder") { showsBatchGroups = true }
                         .disabled(selectedSourceIDs.isEmpty)
@@ -362,40 +410,64 @@ private struct SourceTextImportView: View {
 }
 
 private struct SourceRow: View {
-    let source: BookSource
+    let entry: SourceCatalogIndex.Entry
     var showsToggle = true
+    var showsDisclosure = false
+    var onSelect: (() -> Void)? = nil
     let onEnabledChanged: @MainActor @Sendable (Bool) -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: source.enabled ? "network" : "network.slash")
-                .font(.system(size: 20))
-                .frame(width: 28)
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(source.bookSourceName)
-                    .font(.body)
-                    .foregroundStyle(source.enabled ? Color.primary : .secondary)
-                Text(source.groups.isEmpty ? (URL(string: source.bookSourceUrl)?.host ?? source.bookSourceUrl) : source.groups.joined(separator: " · "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
+            rowLabel
+            Spacer(minLength: 8)
             if showsToggle {
                 Toggle("启用", isOn: Binding(
-                    get: { source.enabled },
+                    get: { entry.enabled },
                     set: { enabled in
                         Task { @MainActor in onEnabledChanged(enabled) }
                     }
                 ))
                 .labelsHidden()
                 .tint(.green)
-                .accessibilityLabel("启用\(source.bookSourceName)")
+                .accessibilityLabel("启用\(entry.name)")
+            }
+            if showsDisclosure {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
         }
         .padding(.vertical, 5)
+    }
+
+    @ViewBuilder
+    private var rowLabel: some View {
+        let label = HStack(spacing: 12) {
+            Image(systemName: entry.enabled ? "network" : "network.slash")
+                .font(.system(size: 20))
+                .frame(width: 28)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entry.name)
+                    .font(.body)
+                    .foregroundStyle(entry.enabled ? Color.primary : .secondary)
+                Text(entry.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+
+        if let onSelect {
+            Button(action: onSelect) { label }
+                .buttonStyle(.plain)
+        } else {
+            label
+        }
     }
 }
 
@@ -407,11 +479,7 @@ private struct SourceGroupManagerView: View {
     @State private var renamedValue = ""
 
     var body: some View {
-        let groupCounts = library.sources.reduce(into: [String: Int]()) { counts, source in
-            for group in source.groups {
-                counts[group, default: 0] += 1
-            }
-        }
+        let groupCounts = library.groupCounts
         ReadingNavigationStack {
             List {
                 Section("新建分组") {
@@ -420,7 +488,7 @@ private struct SourceGroupManagerView: View {
                         Button("添加") {
                             let value = newGroup
                             newGroup = ""
-                            let ungrouped = Set(library.sources.filter { $0.groups.isEmpty }.map(\.id))
+                            let ungrouped = Set(library.catalogIndex.ungroupedEntries.map(\.id))
                             Task { await library.addGroup(value, to: ungrouped) }
                         }
                         .disabled(BookSource.parseGroups(newGroup).isEmpty)
@@ -481,29 +549,56 @@ private struct SourceGroupManagerView: View {
 private struct SourceGroupContentsView: View {
     @EnvironmentObject private var library: SourceLibraryModel
     let group: String
+    @State private var isSelecting = false
+    @State private var selectedSourceIDs = Set<String>()
+    @State private var confirmsBatchDelete = false
+    @State private var presentedDetailSource: BookSource?
 
-    private var sources: [BookSource] {
-        library.sources.filter { $0.hasGroup(group) }
+    private var entries: [SourceCatalogIndex.Entry] {
+        library.entries(inGroup: group)
     }
 
     var body: some View {
+        let items = entries
+        let allSelected = !items.isEmpty && selectedSourceIDs.count == items.count
         List {
             Section {
-                ForEach(sources) { source in
-                    NavigationLink {
-                        SourceDetailView(source: source)
-                    } label: {
-                        SourceRow(source: source) { enabled in
-                            Task { await library.setEnabled(enabled, for: source.id) }
+                ForEach(items) { entry in
+                    if isSelecting {
+                        Button {
+                            if !selectedSourceIDs.insert(entry.id).inserted { selectedSourceIDs.remove(entry.id) }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: selectedSourceIDs.contains(entry.id) ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
+                                    .foregroundStyle(selectedSourceIDs.contains(entry.id) ? ReadingTheme.accent : .secondary)
+                                SourceRow(entry: entry, showsToggle: false) { _ in }
+                            }
                         }
+                        .buttonStyle(.plain)
+                    } else {
+                        SourceRow(
+                            entry: entry,
+                            showsDisclosure: true,
+                            onSelect: {
+                                presentedDetailSource = library.source(id: entry.id)
+                            },
+                            onEnabledChanged: { enabled in
+                                Task { await library.setEnabled(enabled, for: entry.id) }
+                            }
+                        )
                     }
                 }
-                if sources.isEmpty {
+                .onDelete { offsets in
+                    let ids = Set(offsets.compactMap { items.indices.contains($0) ? items[$0].id : nil })
+                    Task { await library.remove(sourceIDs: ids) }
+                }
+                if items.isEmpty {
                     Text("该分组暂无书源")
                         .foregroundStyle(.secondary)
                 }
             } header: {
-                Text("\(sources.count) 个书源")
+                Text("\(items.count) 个书源")
             }
         }
         .listStyle(.insetGrouped)
@@ -511,6 +606,71 @@ private struct SourceGroupContentsView: View {
         .background(ReadingTheme.groupedCanvas)
         .navigationTitle(group)
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: library.catalogRevision) { _ in
+            let valid = Set(entries.map(\.id))
+            selectedSourceIDs.formIntersection(valid)
+            if valid.isEmpty { isSelecting = false }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(isSelecting ? "完成" : "选择") {
+                    isSelecting.toggle()
+                    if !isSelecting { selectedSourceIDs.removeAll() }
+                }
+                .disabled(items.isEmpty && !isSelecting)
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if isSelecting {
+                HStack(spacing: 12) {
+                    Button(allSelected ? "取消全选" : "全选") {
+                        if allSelected { selectedSourceIDs.removeAll() }
+                        else { selectedSourceIDs = Set(items.map(\.id)) }
+                    }
+                    .disabled(items.isEmpty)
+                    Spacer()
+                    Button("移出分组") {
+                        let ids = selectedSourceIDs
+                        selectedSourceIDs.removeAll()
+                        Task { await library.removeGroup(group, from: ids) }
+                    }
+                    .disabled(selectedSourceIDs.isEmpty)
+                    Button("启用") {
+                        Task { await library.setEnabled(true, for: selectedSourceIDs) }
+                    }
+                    .disabled(selectedSourceIDs.isEmpty)
+                    Button("停用") {
+                        Task { await library.setEnabled(false, for: selectedSourceIDs) }
+                    }
+                    .disabled(selectedSourceIDs.isEmpty)
+                    Button("删除", role: .destructive) {
+                        confirmsBatchDelete = true
+                    }
+                    .disabled(selectedSourceIDs.isEmpty)
+                }
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 18).padding(.vertical, 12)
+                .background(.ultraThinMaterial)
+            }
+        }
+        .alert("删除所选书源？", isPresented: $confirmsBatchDelete) {
+            Button("删除 \(selectedSourceIDs.count) 个", role: .destructive) {
+                let ids = selectedSourceIDs
+                selectedSourceIDs.removeAll()
+                Task { await library.remove(sourceIDs: ids) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将永久删除已选的 \(selectedSourceIDs.count) 个书源，无法撤销。")
+        }
+        .readingNavigationDestination(isPresented: Binding(
+            get: { presentedDetailSource != nil },
+            set: { if !$0 { presentedDetailSource = nil } }
+        )) {
+            if let source = presentedDetailSource {
+                SourceDetailView(source: source)
+            }
+        }
     }
 }
 

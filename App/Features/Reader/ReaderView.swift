@@ -66,13 +66,21 @@ struct ReaderView: View {
     @State private var isWaitingForNextChapter = false
     @State private var isWaitingForPreviousChapter = false
     @State private var httpTTSEngines: [HttpTTS] = []
+    @State private var hasLoadedSpeechEngines = false
+    @State private var offlineInstallation = OfflineSpeechSynthesizer.InstallationState.checking
     @State private var resumesSpeechAfterChapterLoad = false
+    @State private var pendingEPUBProgression: Double?
     @State private var speechTimerTask: Task<Void, Never>?
     @State private var progressSaveTask: Task<Void, Never>?
     @State private var progressSaveGeneration = 0
     @State private var speechStartGeneration = 0
     @State private var speechTimerRemaining = 0
+    @State private var speechChaptersRemaining = 0
     @State private var isSavingBookmark = false
+    @State private var confirmsPageBookmarkRemoval = false
+    @State private var expandsTitleStyle = false
+    @State private var expandsPageMargins = false
+    @State private var expandsHeaderFooter = false
     @ScaledMetric(relativeTo: .body) private var toolbarIconSize = 21
     @AppStorage("textSize") private var fontSize = 20.0
     @AppStorage("letterSpacing") private var letterSpacing = 0.1
@@ -113,14 +121,17 @@ struct ReaderView: View {
     @AppStorage("ttsFollowSys") private var ttsFollowSystem = true
     @AppStorage("ttsSpeechRate") private var ttsSpeechRate = 5
     @AppStorage("appTtsEngine") private var appTTSEngine = ""
+    @AppStorage("edgeTtsVoice") private var edgeSpeechVoice = EdgeSpeechVoice.xiaoxiao
     @AppStorage("systemTtsVoice") private var systemTTSVoice = ""
     @AppStorage("readAloudByPage") private var readAloudByPage = false
     @AppStorage("streamReadAloudAudio") private var streamReadAloudAudio = true
     @AppStorage("readAloudWakeLock") private var readAloudWakeLock = false
     @AppStorage("ignoreAudioFocus") private var ignoreAudioFocus = false
     @AppStorage("pauseReadAloudWhilePhoneCalls") private var pauseReadAloudWhilePhoneCalls = false
+    @AppStorage("ttsResumeAfterInterruption") private var ttsResumeAfterInterruption = true
     @AppStorage("mediaButtonPerNext") private var mediaButtonPerNext = false
     @AppStorage("ttsTimer") private var ttsTimer = 0
+    @AppStorage("ttsChapterTimer") private var ttsChapterTimer = 0
     @AppStorage("readerFullJustify") private var fullJustify = true
     @AppStorage("readerKeepScreenOn") private var keepScreenOn = false
     @AppStorage("readerHideHomeIndicator") private var hideHomeIndicator = false
@@ -234,7 +245,10 @@ struct ReaderView: View {
     var body: some View {
         if isLocalEPUB, (sessionEPUBMode ?? defaultEPUBMode) == .original {
             EPUBReaderView(book: book, chapters: model.chapters, initialIndex: model.currentIndex,
-                           restoresSavedLocation: sessionEPUBMode == nil) { chapterIndex in
+                           restoresSavedLocation: sessionEPUBMode == nil) { chapterIndex, progression, autoStartSpeech in
+                pendingEPUBProgression = progression
+                resumesSpeechAfterChapterLoad = autoStartSpeech
+                if autoStartSpeech { speechChaptersRemaining = ttsChapterTimer }
                 model.select(index: chapterIndex)
                 sessionEPUBMode = .text
             }
@@ -244,134 +258,162 @@ struct ReaderView: View {
     }
 
     private var textReaderBody: some View {
+        readerStagedModals
+            .background { readerLoadingTasks.readerStageBoundary() }
+            .background { readerObservers.readerStageBoundary() }
+            .background { readerHardwareOverlay }
+            .sourceInteraction(interaction, source: model.imageSource)
+            .task(id: MediaWindow(source: model.imageSource.id, book: book.id, chapters: mediaChapters)) {
+                await inlineImages.prepare(mediaChapters, directory: model.chapters, book: model.book, source: model.imageSource)
+            }
+            .onDisappear { cardAction?.cancel() }
+            .readerStageBoundary()
+    }
+
+    private var readerStagedCanvas: some View {
         readerCanvas
-        .preferredColorScheme(palette.linked ? nil : (resolvedStyle.id == "night" ? .dark : .light))
-        .readingTabBarHidden()
-        .navigationBarBackButtonHidden(true)
-        .background {
-            ReaderInteractivePopEnabler()
-                .frame(width: 0, height: 0)
+            .readerStageBoundary()
+            .modifier(ReaderSystemChromeStage(
+                colorScheme: palette.linked ? nil : (resolvedStyle.id == "night" ? .dark : .light),
+                hidesStatusBar: hideStatusBar,
+                hidesHomeIndicator: hideHomeIndicator
+            ))
+    }
+
+    private var readerStagedChrome: some View {
+        readerStagedCanvas
+            .modifier(ReaderOverlayChromeStage(
+                showsMenu: showsReaderMenu,
+                settingErrorPresented: readerSettingErrorPresented(inSettings: false),
+                settingErrorMessage: readerSettingSaveError ?? "",
+                clearSettingError: { readerSettingSaveError = nil },
+                topChrome: { readerTopChrome },
+                bottomChrome: { readerBottomChrome }
+            ))
+            .onAppear(perform: beginReaderSessionIfNeeded)
+            .onDisappear(perform: endReaderSessionIfNeeded)
+            .readerStageBoundary()
+    }
+
+    private var readerStagedModals: some View {
+        readerStagedChrome
+            .sheet(item: $activeSheet, onDismiss: performPendingSheetTransition) { sheet in
+                readerSheetContent(for: sheet)
+            }
+            .fullScreenCover(isPresented: $showsTableOfContents) { tableOfContents }
+            .sheet(item: $chapterCommentsTarget) { target in
+                ReaderChapterCommentsView(target: target)
+                    .id(target.id)
+            }
+            .sheet(item: $illustrationChapter) { chapter in
+                EPUBIllustrationsView(book: book, chapter: chapter)
+            }
+            .sheet(item: $sourceSwitchBook) { currentBook in
+                readerSourceSwitchSheet(for: currentBook)
+            }
+            .readerStageBoundary()
+    }
+
+    @ViewBuilder
+    private func readerSheetContent(for sheet: ReaderSheet) -> some View {
+        switch sheet {
+        case .bookmarks: bookmarksSheet
+        case .autoRead: autoReadControls
+        case .appearance: styleControls
+        case .search: contentSearchSheet
+        case .settings: readerSettings
+        case .clickActions: clickActionSettings
+        case .editor: contentEditor
         }
-        .statusBarHidden(hideStatusBar)
-        .readingHomeIndicatorHidden(hideHomeIndicator)
-        .overlay(alignment: .top) {
-            if showsReaderMenu {
-                readerTopChrome
-                    .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    private func readerSourceSwitchSheet(for currentBook: Book) -> some View {
+        ReadingNavigationStack {
+            SourceSwitchView(book: currentBook, sources: sourceLibrary.sources) { report, source in
+                await progressSaveTask?.value
+                if library.contains(book) {
+                    guard await library.commitSourceSwitch(oldBookURL: book.bookUrl, report: report) else { return false }
+                }
+                await activity.endReading(book)
+                model.applySourceSwitch(report, source: source)
+                readerPosition = report.book.durChapterPos
+                readerJumpPosition = nil
+                readerPageRanges = []
+                readerRenderRevision &+= 1
+                activity.beginReading(report.book)
+                return true
             }
         }
-        .animation(.easeOut(duration: 0.22), value: showsReaderMenu)
-        .alert("阅读设置未保存", isPresented: readerSettingErrorPresented(inSettings: false)) {
-            Button("好", role: .cancel) { readerSettingSaveError = nil }
-        } message: { Text(readerSettingSaveError ?? "") }
-        .onAppear {
-            guard !readerSessionActive else { return }
-            readerSessionActive = true
-            activity.beginReading(book)
-            speech.onNextChapter = { moveSpeechToChapter(direction: 1) }
-            speech.onPreviousChapter = { moveSpeechToChapter(direction: -1) }
-            speech.onRemoteStop = {
-                speechTimerTask?.cancel()
-                speechTimerRemaining = 0
-                resumesSpeechAfterChapterLoad = false
-            }
-            UIDevice.current.isBatteryMonitoringEnabled = true
-            brightnessBeforeReading = Double(UIScreen.main.brightness)
-            if storedReaderBrightness > 0.05 {
-                followsSystemBrightness = false
-                readerBrightness = storedReaderBrightness
-                UIScreen.main.brightness = CGFloat(storedReaderBrightness)
-            } else {
-                readerBrightness = brightnessBeforeReading
-            }
-            ReaderScreenOrientation.apply(screenOrientation)
-            if ProcessInfo.processInfo.arguments.contains("-uiDemoBookmarks") {
-                activeSheet = .bookmarks
-            }
-            if ProcessInfo.processInfo.arguments.contains("-uiDemoReaderMenu") {
-                showsReaderMenu = true
-            }
-            if ProcessInfo.processInfo.arguments.contains("-uiDemoReaderStyle") {
-                DispatchQueue.main.async { activeSheet = .appearance }
-            }
+    }
+
+    @ViewBuilder
+    private var readerHardwareOverlay: some View {
+        if volumePaging && readerSessionActive && scenePhase == .active && !pausesAutoReading &&
+            !speech.isSpeaking && !speech.isPaused && !model.hasImageContent && sourceSwitchBook == nil &&
+            !interaction.isPresenting && !waitingForChapter {
+            ReaderVolumeInput(input: hardwareInput).frame(width: 1, height: 1)
         }
-        .onDisappear {
-            guard !showsTableOfContents else { return }
-            readerSessionActive = false
-            model.stopBackgroundReading()
-            isAutoReading = false
-            UIApplication.shared.isIdleTimerDisabled = false
-            if speech.isSpeaking || speech.isPaused { speech.toggle(text: "") }
-            saveProgress(immediate: true)
-            ReaderScreenOrientation.restoreApplicationDefault()
-            if sessionEPUBMode != .original { activity.cancelReading(book) }
-            UIDevice.current.isBatteryMonitoringEnabled = false
-            if !followsSystemBrightness {
-                UIScreen.main.brightness = CGFloat(brightnessBeforeReading)
-            }
+    }
+
+    private func beginReaderSessionIfNeeded() {
+        guard !readerSessionActive else { return }
+        readerSessionActive = true
+        activity.beginReading(book)
+        speech.onNextChapter = { moveSpeechToChapter(direction: 1) }
+        speech.onPreviousChapter = { moveSpeechToChapter(direction: -1) }
+        speech.onRemoteStop = {
             speechTimerTask?.cancel()
             speechTimerRemaining = 0
-            speech.onNextChapter = nil
-            speech.onPreviousChapter = nil
-            speech.onRemoteStop = nil
+            resumesSpeechAfterChapterLoad = false
         }
-        .overlay(alignment: .bottom) {
-            if showsReaderMenu {
-                readerBottomChrome
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        brightnessBeforeReading = Double(UIScreen.main.brightness)
+        if storedReaderBrightness > 0.05 {
+            followsSystemBrightness = false
+            readerBrightness = storedReaderBrightness
+            UIScreen.main.brightness = CGFloat(storedReaderBrightness)
+        } else {
+            readerBrightness = brightnessBeforeReading
         }
-        .sheet(item: $activeSheet, onDismiss: performPendingSheetTransition) { sheet in
-            switch sheet {
-            case .bookmarks: bookmarksSheet
-            case .autoRead: autoReadControls
-            case .appearance: styleControls
-            case .search: contentSearchSheet
-            case .settings: readerSettings
-            case .clickActions: clickActionSettings
-            case .editor: contentEditor
-            }
+        ReaderScreenOrientation.apply(screenOrientation)
+        if ProcessInfo.processInfo.arguments.contains("-uiDemoBookmarks") {
+            activeSheet = .bookmarks
         }
-        .fullScreenCover(isPresented: $showsTableOfContents) { tableOfContents }
-        .sheet(item: $chapterCommentsTarget) { target in
-            ReaderChapterCommentsView(target: target)
-                .id(target.id)
+        if ProcessInfo.processInfo.arguments.contains("-uiDemoReaderMenu") {
+            showsReaderMenu = true
         }
-        .sheet(item: $illustrationChapter) { chapter in
-            EPUBIllustrationsView(book: book, chapter: chapter)
+        if ProcessInfo.processInfo.arguments.contains("-uiDemoAutoReadingActive") {
+            isAutoReading = true
         }
-        .sheet(item: $sourceSwitchBook) { currentBook in
-            ReadingNavigationStack {
-                SourceSwitchView(book: currentBook, sources: sourceLibrary.sources) { report, source in
-                    await progressSaveTask?.value
-                    if library.contains(book) {
-                        guard await library.commitSourceSwitch(oldBookURL: book.bookUrl, report: report) else { return false }
-                    }
-                    await activity.endReading(book)
-                    model.applySourceSwitch(report, source: source)
-                    readerPosition = report.book.durChapterPos
-                    readerJumpPosition = nil
-                    readerPageRanges = []
-                    readerRenderRevision &+= 1
-                    activity.beginReading(report.book)
-                    return true
-                }
-            }
+        if ProcessInfo.processInfo.arguments.contains("-uiDemoReaderStyle") {
+            DispatchQueue.main.async { activeSheet = .appearance }
         }
-        .background { readerLoadingTasks }
-        .background { readerObservers }
-        .background {
-            if volumePaging && readerSessionActive && scenePhase == .active && !pausesAutoReading &&
-                !speech.isSpeaking && !speech.isPaused && !model.hasImageContent && sourceSwitchBook == nil &&
-                !interaction.isPresenting && !waitingForChapter {
-                ReaderVolumeInput(input: hardwareInput).frame(width: 1, height: 1)
-            }
+        if ProcessInfo.processInfo.arguments.contains("-uiDemoAutoRead") {
+            DispatchQueue.main.async { activeSheet = .autoRead }
         }
-        .sourceInteraction(interaction, source: model.imageSource)
-        .task(id: MediaWindow(source: model.imageSource.id, book: book.id, chapters: mediaChapters)) {
-            await inlineImages.prepare(mediaChapters, directory: model.chapters, book: model.book, source: model.imageSource)
+    }
+
+    private func endReaderSessionIfNeeded() {
+        guard !showsTableOfContents else { return }
+        readerSessionActive = false
+        speechStartGeneration &+= 1
+        resumesSpeechAfterChapterLoad = false
+        model.stopBackgroundReading()
+        isAutoReading = false
+        UIApplication.shared.isIdleTimerDisabled = false
+        if speech.isSpeaking || speech.isPaused { speech.stop() }
+        saveProgress(immediate: true)
+        ReaderScreenOrientation.restoreApplicationDefault()
+        if sessionEPUBMode != .original { activity.cancelReading(book) }
+        UIDevice.current.isBatteryMonitoringEnabled = false
+        if !followsSystemBrightness {
+            UIScreen.main.brightness = CGFloat(brightnessBeforeReading)
         }
-        .onDisappear { cardAction?.cancel() }
+        speechTimerTask?.cancel()
+        speechTimerRemaining = 0
+        speech.onNextChapter = nil
+        speech.onPreviousChapter = nil
+        speech.onRemoteStop = nil
     }
 
     private var readerLoadingTasks: some View {
@@ -389,7 +431,15 @@ struct ReaderView: View {
             if needsInitialPosition { readerPosition = model.requestedPosition }
             await model.load(rules: model.usesReplaceRules ? replaceRules.rules : [])
             guard !Task.isCancelled else { return }
-            if needsInitialPosition {
+            if let progression = pendingEPUBProgression {
+                pendingEPUBProgression = nil
+                let clamped = min(max(progression, 0), 1)
+                let mapped = Int((Double(max(model.content.utf16.count - 1, 0)) * clamped).rounded())
+                readerPosition = pageAnimation == 3
+                    ? continuousPosition(mapped, content: model.content)
+                    : min(mapped, max(model.content.utf16.count - 1, 0))
+                readerJumpPosition = readerPosition
+            } else if needsInitialPosition {
                 readerPosition = pageAnimation == 3
                     ? continuousPosition(model.requestedPosition, content: model.content)
                     : min(model.requestedPosition, max(model.content.utf16.count - 1, 0))
@@ -402,7 +452,11 @@ struct ReaderView: View {
                 await library.updateProgress(for: book, chapter: chapter, position: readerPosition)
             }
             if resumesSpeechAfterChapterLoad, !model.content.isEmpty {
+                if !hasLoadedSpeechEngines { await loadHTTPEngines() }
+                guard !Task.isCancelled, resumesSpeechAfterChapterLoad else { return }
                 resumesSpeechAfterChapterLoad = false
+                configureSpeech()
+                if speechTimerRemaining == 0 && ttsTimer > 0 { scheduleSpeechTimer() }
                 startConfiguredSpeech()
             }
         }
@@ -415,84 +469,93 @@ struct ReaderView: View {
         }
         .task { await loadHTTPEngines() }
         .task {
+            for await state in await OfflineSpeechSynthesizer.shared.installationUpdates() {
+                offlineInstallation = state
+            }
+        }
+        .task {
             let storedImage = await Task.detached(priority: .utility) { ReaderBackgroundStore.load() }.value
             if !Task.isCancelled, backgroundImage == nil { backgroundImage = storedImage }
         }
     }
 
     private var readerObservers: some View {
+        ZStack {
+            readerRuntimeObservers.readerStageBoundary()
+            readerSpeechObservers.readerStageBoundary()
+        }
+    }
+
+    private var readerRuntimeObservers: some View {
         Color.clear
-        .onAppear { updateIdleTimer() }
-        .onChange(of: keepScreenOn) { _ in
-            updateIdleTimer()
-        }
-        .onChange(of: adjacentReadiness) { _ in
-            if model.isContinuationWindowReady, isWaitingForNextChapter {
-                isWaitingForNextChapter = false
-                readerRenderRevision &+= 1
-            }
-            if model.isPreviousWindowReady, isWaitingForPreviousChapter {
-                advanceToPreparedPreviousChapter()
-            }
-        }
-        .onChange(of: isAutoReading) { _ in
-            updateIdleTimer()
-        }
-        .onChange(of: speech.isSpeaking) { _ in
-            updateIdleTimer()
-        }
-        .onChange(of: speech.completionCount) { _ in
-            if readAloudByPage {
-                continueSpeechToNextPage()
-            } else {
-                continueSpeechToNextChapter()
-            }
-        }
-        .onChange(of: speech.currentSegmentIndex) { index in
-            guard model.paragraphs.indices.contains(index), !readAloudByPage else { return }
-            readerJumpPosition = nil
-            DispatchQueue.main.async { readerJumpPosition = model.paragraphs[index].id }
-        }
-        .onChange(of: readAloudByPage) { _ in
-            restartSpeechAfterReaderLayoutChange()
-        }
-        .onChange(of: readAloudWakeLock) { _ in
-            updateIdleTimer()
-        }
-        .onChange(of: scenePhase) { phase in
-            if phase == .active {
-                if !followsSystemBrightness {
-                    UIScreen.main.brightness = CGFloat(readerBrightness)
+            .onAppear { updateIdleTimer() }
+            .onChange(of: keepScreenOn) { _ in updateIdleTimer() }
+            .onChange(of: isAutoReading) { _ in updateIdleTimer() }
+            .onChange(of: adjacentReadiness) { _ in
+                if model.isContinuationWindowReady, isWaitingForNextChapter {
+                    isWaitingForNextChapter = false
+                    readerRenderRevision &+= 1
                 }
-                activity.beginReading(book)
-            } else {
+                if model.isPreviousWindowReady, isWaitingForPreviousChapter {
+                    advanceToPreparedPreviousChapter()
+                }
+            }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active {
+                    if !followsSystemBrightness {
+                        UIScreen.main.brightness = CGFloat(readerBrightness)
+                    }
+                    activity.beginReading(book)
+                } else {
+                    isAutoReading = false
+                    if !followsSystemBrightness {
+                        UIScreen.main.brightness = CGFloat(brightnessBeforeReading)
+                    }
+                    saveProgress(immediate: true)
+                    activity.cancelReading(book)
+                }
+            }
+            .onChange(of: screenOrientation) { value in
+                ReaderScreenOrientation.apply(value)
+            }
+            .onChange(of: themeMode) { _ in
                 isAutoReading = false
-                if !followsSystemBrightness {
-                    UIScreen.main.brightness = CGFloat(brightnessBeforeReading)
-                }
-                saveProgress(immediate: true)
-                activity.cancelReading(book)
+                readerJumpPosition = nil
+                currentPage = 1
+                totalPages = 1
             }
-        }
-        .onChange(of: screenOrientation) { value in
-            ReaderScreenOrientation.apply(value)
-        }
-        .onChange(of: themeMode) { _ in
-            isAutoReading = false
-            readerJumpPosition = nil
-            currentPage = 1
-            totalPages = 1
-        }
-        .onChange(of: pageAnimation) { value in
-            isAutoReading = false
-            saveProgress(immediate: true)
-            readerJumpPosition = readerPosition
-            currentPage = 1
-            totalPages = 1
-            UserDefaults.standard.set(value, forKey: "pageAnim")
-            let updatedBook = model.useGlobalPageAnimation()
-            saveReaderSetting(updatedBook) { $0.pageAnim = -1 }
-        }
+            .onChange(of: pageAnimation) { value in
+                isAutoReading = false
+                saveProgress(immediate: true)
+                readerJumpPosition = readerPosition
+                currentPage = 1
+                totalPages = 1
+                UserDefaults.standard.set(value, forKey: "pageAnim")
+                let updatedBook = model.useGlobalPageAnimation()
+                saveReaderSetting(updatedBook) { $0.pageAnim = -1 }
+            }
+    }
+
+    private var readerSpeechObservers: some View {
+        Color.clear
+            .onChange(of: speech.isSpeaking) { _ in updateIdleTimer() }
+            .onChange(of: readAloudWakeLock) { _ in updateIdleTimer() }
+            .onChange(of: speech.completionCount) { _ in
+                if readAloudByPage {
+                    continueSpeechToNextPage()
+                } else {
+                    continueSpeechToNextChapter()
+                }
+            }
+            .onChange(of: speech.currentSegmentIndex) { index in
+                guard model.paragraphs.indices.contains(index), !readAloudByPage else { return }
+                let position = model.paragraphs[index].id
+                readerJumpPosition = nil
+                DispatchQueue.main.async { readerJumpPosition = position }
+            }
+            .onChange(of: readAloudByPage) { _ in
+                restartSpeechAfterReaderLayoutChange()
+            }
     }
 
 
@@ -537,12 +600,16 @@ struct ReaderView: View {
             .background(backgroundColor.ignoresSafeArea())
         } else {
             VStack(spacing: 0) {
-                if headerVisible { readerTipBar(isHeader: true) }
+                if headerVisible {
+                    readerTipBar(isHeader: true)
+                        .opacity(showsReaderMenu ? 0 : 1)
+                }
                 readerSurface
                     .transaction { $0.animation = nil }
                     .allowsHitTesting(!waitingForChapter)
                     .accessibilityHidden(waitingForChapter)
                 readerFooter
+                    .opacity(showsReaderMenu ? 0 : 1)
             }
             .frame(maxWidth: readingColumnMaxWidth)
             .frame(maxWidth: .infinity)
@@ -820,7 +887,9 @@ struct ReaderView: View {
             onTapAction: handleTapAction,
             holdsDisplayedPage: waitingForChapter,
             chapterGeneration: model.displayedChapterGeneration,
-            media: inlineImages.presentation(activate: activateCard), chapterIndex: model.currentIndex, hardwareInput: hardwareInput
+            media: inlineImages.presentation(activate: activateCard), chapterIndex: model.currentIndex, hardwareInput: hardwareInput,
+            paperColor: resolvedStyle.background, paperImage: activeBackgroundImage, adjacentChapterIndex: model.navigationIndex,
+            chapterPreview: model.pageTurnPreview
         )
     }
 
@@ -977,12 +1046,12 @@ struct ReaderView: View {
         .primary
     }
 
-    @ViewBuilder private var readerChromeBackground: some View {
-        if resolvedStyle.id == "night" {
-            Color(uiColor: .secondarySystemBackground)
-        } else {
-            Color(uiColor: .systemBackground)
-        }
+    private var isNightChrome: Bool {
+        resolvedStyle.id == "night"
+    }
+
+    private var isEInkChrome: Bool {
+        themeMode == "3"
     }
 
     private var chapterProgress: Double {
@@ -999,39 +1068,90 @@ struct ReaderView: View {
 
 
     private var readerTopChrome: some View {
-        HStack(spacing: 4) {
-            readerChromeIconButton("chevron.backward", label: "返回") { dismiss() }
-            VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 10) {
+            ReaderChromeCircleButton(
+                icon: "chevron.backward",
+                label: "返回",
+                isNight: isNightChrome,
+                isEInk: isEInkChrome
+            ) {
+                dismiss()
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
                 Text(book.name)
-                    .font(.subheadline.weight(.medium))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
-                HStack(spacing: 4) {
-                    Text(model.title).lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(model.title)
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                     if model.loadedFromCache {
-                        Image(systemName: "arrow.down.circle")
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.tertiary)
                             .accessibilityLabel("已缓存")
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityElement(children: .combine)
-            readerChromeIconButton(bookmarkSaved ? "bookmark.fill" : "bookmark", label: "书签") {
-                addBookmark()
+
+            HStack(spacing: 2) {
+                let bookmarks = currentBookmarks
+                let bookmarkSaved = !bookmarks.isEmpty
+                ReaderChromeCircleButton(
+                    icon: bookmarkSaved ? "bookmark.fill" : "bookmark",
+                    label: "书签",
+                    isNight: isNightChrome,
+                    isEInk: isEInkChrome,
+                    isAccent: bookmarkSaved,
+                    iconSize: 14
+                ) {
+                    switch bookmarks.count {
+                    case 0: addBookmark()
+                    case 1: removeBookmarks(bookmarks)
+                    default: confirmsPageBookmarkRemoval = true
+                    }
+                }
+                .accessibilityValue(bookmarkSaved ? "已添加" : "添加当前位置")
+                .accessibilityHint(bookmarkSaved ? "移除当前位置的书签" : "保存当前位置")
+                .disabled(isSavingBookmark || !model.hasLoadedCurrentChapter)
+                .confirmationDialog(
+                    "移除本页的 \(bookmarks.count) 个书签？",
+                    isPresented: $confirmsPageBookmarkRemoval,
+                    titleVisibility: .visible,
+                    presenting: bookmarks
+                ) { matches in
+                    Button("移除这些书签", role: .destructive) { removeBookmarks(matches) }
+                    Button("取消", role: .cancel) {}
+                }
+
+                readerMoreMenu
             }
-            .accessibilityValue(bookmarkSaved ? "已添加" : "添加当前位置")
-            .disabled(isSavingBookmark)
-            readerMoreMenu
         }
         .foregroundStyle(readerChromeTint)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        .padding(.bottom, 8)
         .frame(maxWidth: .infinity)
         .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-        .background { readerChromeBackground.ignoresSafeArea(edges: .top) }
+        .background {
+            ReaderFrostedChromeBackground(isNight: isNightChrome, isEInk: isEInkChrome)
+                .ignoresSafeArea(edges: .top)
+                .shadow(
+                    color: isEInkChrome ? .clear : Color.black.opacity(isNightChrome ? 0.34 : 0.05),
+                    radius: 12,
+                    x: 0,
+                    y: 4
+                )
+        }
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color(uiColor: .separator).opacity(0.35)).frame(height: 0.5)
+            Rectangle()
+                .fill(isEInkChrome ? Color.primary.opacity(0.2) : ReaderChromePalette.hairline)
+                .frame(height: 0.5)
         }
     }
 
@@ -1061,45 +1181,79 @@ struct ReaderView: View {
                 showsReaderMenu = false
                 activeSheet = .bookmarks
             }
-            Button(isAutoReading ? "停止自动阅读" : "自动阅读", systemImage: isAutoReading ? "stop" : "play") {
-                if isAutoReading {
-                    isAutoReading = false
-                } else {
+            if isAutoReading {
+                Button("自动阅读调速", systemImage: "gauge.with.needle") {
                     showsReaderMenu = false
                     activeSheet = .autoRead
                 }
+                .disabled(model.hasImageContent)
+                Button("停止自动阅读", systemImage: "stop", role: .destructive) {
+                    isAutoReading = false
+                }
+            } else {
+                Button("自动阅读", systemImage: "play") {
+                    showsReaderMenu = false
+                    activeSheet = .autoRead
+                }
+                .disabled(model.hasImageContent)
             }
-            .disabled(model.hasImageContent)
             Divider()
             Button(resolvedStyle.id == "night" ? "切换为日间" : "切换为夜间", systemImage: resolvedStyle.id == "night" ? "sun.max" : "moon") {
                 toggleNightTheme()
             }
             .disabled(themeMode == "3")
         } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 20, weight: .regular))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+            ReaderChromeCircleIcon(
+                systemName: "ellipsis",
+                isNight: isNightChrome,
+                isEInk: isEInkChrome,
+                iconSize: 15
+            )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ReaderTactileButtonStyle())
         .accessibilityLabel("更多")
     }
 
     private var readerBottomChrome: some View {
-        VStack(spacing: 12) {
-            readerChapterControls
-            Rectangle().fill(Color(uiColor: .separator).opacity(0.35)).frame(height: 0.5)
-            LazyVGrid(columns: readerToolbarColumns, spacing: 12) {
+        VStack(spacing: 0) {
+            if isAutoReading {
+                readerAutoReadBanner
+                ReaderStyleDivider(isEInk: isEInkChrome, inset: 16)
+            }
+
+            ReaderChapterSlider(
+                directory: model.directory,
+                currentNumber: model.currentChapterNumber,
+                progress: chapterProgress,
+                canGoPrevious: model.canGoPrevious,
+                canGoNext: model.canGoNext,
+                isNight: isNightChrome,
+                isEInk: isEInkChrome,
+                onStepChapter: { direction in moveChapter(direction) }
+            ) { index in
+                if index != model.currentIndex { navigate(to: index) }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
+
+            ReaderStyleDivider(isEInk: isEInkChrome, inset: 16)
+
+            LazyVGrid(columns: readerToolbarColumns, spacing: 6) {
                 readerChromeAction("list.bullet", "目录") {
                     showsReaderMenu = false
                     showsTableOfContents = true
                 }
                 if model.canEditContent {
                     readerChromeAction("arrow.triangle.2.circlepath", "换源", action: openSourceSwitch)
-                    .accessibilityIdentifier("reader.changeSource")
-                    .accessibilityValue(book.originName)
+                        .accessibilityIdentifier("reader.changeSource")
+                        .accessibilityValue(book.originName)
                 }
-                readerChromeAction(speech.isSpeaking ? "stop" : "headphones", speech.isSpeaking ? "停止" : "朗读", isActive: speech.isSpeaking) { toggleSpeech() }
+                readerChromeAction(
+                    speech.isSpeaking ? "stop.fill" : "headphones",
+                    speech.isSpeaking ? "停止" : "朗读",
+                    isActive: speech.isSpeaking
+                ) { toggleSpeech() }
                     .disabled(model.hasImageContent)
                 readerChromeAction("textformat.size", "外观") {
                     showsReaderMenu = false
@@ -1110,17 +1264,23 @@ struct ReaderView: View {
                     activeSheet = .settings
                 }
             }
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+            .padding(.bottom, 10)
         }
         .foregroundStyle(readerChromeTint)
-        .padding(.horizontal, 20)
-        .padding(.top, 12)
-        .padding(.bottom, 10)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: 560)
         .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-        .background { readerChromeBackground.ignoresSafeArea(edges: .bottom) }
-        .overlay(alignment: .top) {
-            Rectangle().fill(Color(uiColor: .separator).opacity(0.35)).frame(height: 0.5)
+        .background {
+            ReaderFrostedChromeBackground(
+                isNight: isNightChrome,
+                isEInk: isEInkChrome,
+                cornerRadius: 26
+            )
         }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+        .frame(maxWidth: .infinity)
     }
 
     private var readerToolbarColumns: [GridItem] {
@@ -1128,46 +1288,27 @@ struct ReaderView: View {
         return Array(repeating: GridItem(.flexible(), spacing: 0), count: count)
     }
 
-    private var readerChapterControls: some View {
-        HStack(spacing: 16) {
-            readerChromeIconButton("chevron.left", label: "上一章") { moveChapter(-1) }
-                .disabled(!model.canGoPrevious)
-                .opacity(model.canGoPrevious ? 1 : 0.25)
-            ReaderChapterSlider(directory: model.directory, currentNumber: model.currentChapterNumber,
-                                progress: chapterProgress) { index in
-                if index != model.currentIndex { navigate(to: index) }
-            }
-            readerChromeIconButton("chevron.right", label: "下一章") { moveChapter(1) }
-                .disabled(!model.canGoNext)
-                .opacity(model.canGoNext ? 1 : 0.25)
-        }
-    }
-
-    private func readerChromeIconButton(_ icon: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 19, weight: .regular))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(label)
-    }
-
     private func readerChromeAction(_ icon: String, _ title: String, isActive: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 8) {
+            VStack(spacing: 5) {
                 Image(systemName: icon)
-                    .font(.system(size: min(toolbarIconSize, 28), weight: .regular))
-                    .frame(height: 28)
+                    .font(.system(size: min(toolbarIconSize - 2, 23), weight: .medium))
+                    .foregroundStyle(isActive ? ReadingTheme.coral : Color.primary.opacity(0.9))
+                    .frame(width: 44, height: 28)
+                    .background {
+                        if isActive {
+                            Capsule().fill(ReadingTheme.coral.opacity(isNightChrome ? 0.22 : 0.14))
+                        }
+                    }
                 Text(title)
-                    .font(.caption)
-                    .foregroundStyle(isActive ? Color.primary : .secondary)
+                    .font(.system(size: 11, weight: isActive ? .semibold : .medium))
+                    .foregroundStyle(isActive ? ReadingTheme.coral : Color.secondary)
+                    .lineLimit(1)
             }
-            .frame(maxWidth: .infinity, minHeight: 58)
+            .frame(maxWidth: .infinity, minHeight: 54)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ReaderTactileButtonStyle())
         .accessibilityLabel(title)
     }
 
@@ -1251,15 +1392,196 @@ struct ReaderView: View {
     }
 
 
+    private var readerAutoReadBanner: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(isEInkChrome ? Color.primary : ReadingTheme.coral)
+                Text("自动阅读中")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text("\(autoReadSpeed)s/屏")
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(
+                        Color.primary.opacity(isNightChrome ? 0.10 : 0.06),
+                        in: Capsule()
+                    )
+            }
+            Spacer(minLength: 6)
+            Button {
+                showsReaderMenu = false
+                activeSheet = .autoRead
+            } label: {
+                Text("调速")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 11)
+                    .frame(minHeight: 28)
+                    .background(
+                        Color.primary.opacity(isNightChrome ? 0.11 : 0.065),
+                        in: Capsule()
+                    )
+            }
+            .buttonStyle(ReaderTactileButtonStyle())
+            .accessibilityLabel("调整自动阅读速度")
+
+            Button {
+                isAutoReading = false
+            } label: {
+                Text("停止")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(isEInkChrome ? Color.primary : Color.red)
+                    .padding(.horizontal, 11)
+                    .frame(minHeight: 28)
+                    .background(
+                        isEInkChrome
+                            ? Color.primary.opacity(0.08)
+                            : Color.red.opacity(isNightChrome ? 0.20 : 0.11),
+                        in: Capsule()
+                    )
+            }
+            .buttonStyle(ReaderTactileButtonStyle())
+            .accessibilityLabel("停止自动阅读")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
     private var autoReadControls: some View {
         ReadingNavigationStack {
-            Form {
-                Section {
-                    HStack {
-                        Text("自动翻页速度")
-                        Spacer()
-                        Text("\(autoReadSpeed)s").monospacedDigit().foregroundStyle(.secondary)
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 14) {
+                    autoReadSpeedCard
+                    autoReadPrimaryActions
+                    autoReadShortcutCard
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 6)
+                .padding(.bottom, 24)
+            }
+            .background(ReaderChromePalette.sheetBackground(isEInk: isEInkChrome).ignoresSafeArea())
+            .navigationTitle("自动阅读")
+            .navigationBarTitleDisplayMode(.inline)
+            .readerStyleNavigationBar(isEInk: isEInkChrome)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        activeSheet = nil
+                    } label: {
+                        Text("继续阅读")
+                            .font(.system(size: 15, weight: .semibold))
                     }
+                }
+            }
+        }
+        .readingPresentationDetents([.medium])
+        .readingPresentationDragIndicator()
+        .readerSheetAllowsInlineScrolling()
+        .readerStageBoundary()
+    }
+
+    private var autoReadSpeedCard: some View {
+        ReaderStyleCard(
+            title: "自动翻页速度",
+            detail: autoReadPaceDescription,
+            isEInk: isEInkChrome
+        ) {
+            VStack(spacing: 11) {
+                HStack(spacing: 0) {
+                    Button {
+                        autoReadSpeed = max(1, autoReadSpeed - 1)
+                    } label: {
+                        Image(systemName: "minus")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(autoReadSpeed <= 1 ? Color.secondary.opacity(0.4) : Color.primary)
+                            .frame(maxWidth: .infinity, minHeight: 42)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(ReaderTactileButtonStyle())
+                    .disabled(autoReadSpeed <= 1)
+                    .accessibilityLabel("加快翻页速度")
+
+                    Rectangle()
+                        .fill(Color.primary.opacity(isEInkChrome ? 0.2 : 0.11))
+                        .frame(width: 0.5, height: 18)
+
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text("\(autoReadSpeed)")
+                            .font(.system(size: 20, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.primary)
+                            .readingNumericTransition()
+                        Text("秒 / 屏")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(minWidth: 108)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("每屏 \(autoReadSpeed) 秒")
+
+                    Rectangle()
+                        .fill(Color.primary.opacity(isEInkChrome ? 0.2 : 0.11))
+                        .frame(width: 0.5, height: 18)
+
+                    Button {
+                        autoReadSpeed = min(120, autoReadSpeed + 1)
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(autoReadSpeed >= 120 ? Color.secondary.opacity(0.4) : Color.primary)
+                            .frame(maxWidth: .infinity, minHeight: 42)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(ReaderTactileButtonStyle())
+                    .disabled(autoReadSpeed >= 120)
+                    .accessibilityLabel("减慢翻页速度")
+                }
+                .background(
+                    ReaderChromePalette.controlWellColor(isEInk: isEInkChrome),
+                    in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+                )
+
+                HStack(spacing: 8) {
+                    ForEach(Self.autoReadSpeedPresets, id: \.seconds) { preset in
+                        let isSelected = autoReadSpeed == preset.seconds
+                        Button {
+                            autoReadSpeed = preset.seconds
+                        } label: {
+                            VStack(spacing: 1) {
+                                Text("\(preset.seconds)s")
+                                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                                Text(preset.label)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .opacity(isSelected ? 0.85 : 0.72)
+                            }
+                            .foregroundStyle(isSelected ? ReadingTheme.onAccent : Color.primary.opacity(0.86))
+                            .frame(maxWidth: .infinity, minHeight: 38)
+                            .background(
+                                isSelected
+                                    ? ReadingTheme.accentFill
+                                    : ReaderChromePalette.controlWellColor(isEInk: isEInkChrome),
+                                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .strokeBorder(isSelected ? ReadingTheme.selectionBorder : .clear, lineWidth: 0.75)
+                            }
+                        }
+                        .buttonStyle(ReaderTactileButtonStyle())
+                        .accessibilityLabel("\(preset.label)，\(preset.seconds) 秒")
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    Image(systemName: "hare")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+
                     Slider(
                         value: Binding(
                             get: { Double(autoReadSpeed) },
@@ -1268,300 +1590,213 @@ struct ReaderView: View {
                         in: 1...120,
                         step: 1
                     )
-                } footer: {
-                    Text("数值表示自动阅读一屏所用的秒数，范围 1–120 秒。")
+                    .tint(ReadingTheme.accent)
+                    .accessibilityLabel("自动翻页速度")
+                    .accessibilityValue("\(autoReadSpeed) 秒每屏")
+
+                    Image(systemName: "tortoise")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
                 }
-                Section {
-                    Button("目录", systemImage: "list.bullet") {
-                        pendingSheetTransition = .tableOfContents
-                        activeSheet = nil
-                    }
-                    Button("开始自动阅读", systemImage: "play.fill") {
-                        activeSheet = nil
-                        startAutoReading()
-                    }
-                    Button("主菜单", systemImage: "menubar.rectangle") {
-                        pendingSheetTransition = .readerMenu
-                        activeSheet = nil
-                    }
-                    Button("停止自动阅读", systemImage: "stop.fill", role: .destructive) {
-                        isAutoReading = false
-                        activeSheet = nil
-                    }
-                    Button("设置", systemImage: "gearshape") {
-                        pendingSheetTransition = .sheet(.appearance)
-                        activeSheet = nil
-                    }
-                }
+
+                Text("数值越小翻页越快，表示自动阅读一屏所用的秒数（1–120 秒）。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .navigationTitle("自动阅读")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("继续阅读") { activeSheet = nil }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private var autoReadPrimaryActions: some View {
+        HStack(spacing: 10) {
+            if isAutoReading {
+                Button {
+                    activeSheet = nil
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("继续自动阅读")
+                            .font(.system(size: 15, weight: .semibold))
+                    }
+                    .foregroundStyle(ReadingTheme.onAccent)
+                    .frame(maxWidth: .infinity, minHeight: 46)
+                    .background(
+                        ReadingTheme.accentFill,
+                        in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 15, style: .continuous)
+                            .strokeBorder(ReadingTheme.selectionBorder, lineWidth: 0.75)
+                    }
                 }
+                .buttonStyle(ReaderTactileButtonStyle())
+
+                Button(role: .destructive) {
+                    isAutoReading = false
+                    activeSheet = nil
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("停止自动阅读")
+                            .font(.system(size: 15, weight: .semibold))
+                    }
+                    .foregroundStyle(isEInkChrome ? Color.primary : Color.red)
+                    .frame(maxWidth: .infinity, minHeight: 46)
+                    .background(
+                        isEInkChrome
+                            ? ReaderChromePalette.cardBackground(isEInk: true)
+                            : Color.red.opacity(isNightChrome ? 0.18 : 0.10),
+                        in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 15, style: .continuous)
+                            .strokeBorder(
+                                isEInkChrome ? Color.primary.opacity(0.28) : Color.red.opacity(0.26),
+                                lineWidth: 0.75
+                            )
+                    }
+                }
+                .buttonStyle(ReaderTactileButtonStyle())
+            } else {
+                Button {
+                    activeSheet = nil
+                    startAutoReading()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("开始自动阅读")
+                            .font(.system(size: 15, weight: .semibold))
+                    }
+                    .foregroundStyle(ReadingTheme.onAccent)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .background(
+                        ReadingTheme.accentFill,
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(ReadingTheme.selectionBorder, lineWidth: 0.75)
+                    }
+                }
+                .buttonStyle(ReaderTactileButtonStyle())
             }
         }
-        .readingPresentationDetents([.medium])
+    }
+
+    private var autoReadShortcutCard: some View {
+        HStack(spacing: 8) {
+            autoReadShortcutButton("list.bullet", "目录") {
+                pendingSheetTransition = .tableOfContents
+                activeSheet = nil
+            }
+            autoReadShortcutButton("menubar.rectangle", "主菜单") {
+                pendingSheetTransition = .readerMenu
+                activeSheet = nil
+            }
+            autoReadShortcutButton("textformat.size", "外观") {
+                pendingSheetTransition = .sheet(.appearance)
+                activeSheet = nil
+            }
+            autoReadShortcutButton("gearshape", "设置") {
+                pendingSheetTransition = .sheet(.settings)
+                activeSheet = nil
+            }
+        }
+        .padding(10)
+        .background(
+            ReaderChromePalette.cardBackground(isEInk: isEInkChrome),
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(
+                    isEInkChrome ? Color.primary.opacity(0.22) : ReaderChromePalette.hairline,
+                    lineWidth: isEInkChrome ? 0.75 : 0.5
+                )
+        }
+        .shadow(
+            color: isEInkChrome ? .clear : Color.black.opacity(0.03),
+            radius: 10,
+            x: 0,
+            y: 3
+        )
+    }
+
+    private func autoReadShortcutButton(_ icon: String, _ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(Color.primary.opacity(0.88))
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, minHeight: 54)
+            .background(
+                ReaderChromePalette.controlWellColor(isEInk: isEInkChrome),
+                in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        }
+        .buttonStyle(ReaderTactileButtonStyle())
+        .accessibilityLabel(title)
+    }
+
+    private static let autoReadSpeedPresets: [(seconds: Int, label: String)] = [
+        (5, "极快"),
+        (10, "适中"),
+        (18, "舒适"),
+        (30, "慢读")
+    ]
+
+    private var autoReadPaceDescription: String {
+        switch autoReadSpeed {
+        case ...6: "快速 · \(autoReadSpeed)s/屏"
+        case 7...15: "适中 · \(autoReadSpeed)s/屏"
+        case 16...35: "舒适 · \(autoReadSpeed)s/屏"
+        default: "舒缓 · \(autoReadSpeed)s/屏"
+        }
     }
 
 
     private var styleControls: some View {
         ReadingNavigationStack {
-            Form {
-                Section("快速排版") {
-                    HStack(spacing: 12) {
-                        Button {
-                            fontSize = max(5, fontSize - 1)
-                        } label: {
-                            Image(systemName: "textformat.size.smaller")
-                                .frame(width: 38, height: 32)
-                        }
-                        .readingSecondaryButtonStyle()
-
-                        VStack(spacing: 2) {
-                            Text("字号")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text("\(Int(fontSize))")
-                                .font(.headline.monospacedDigit())
-                        }
-                        .frame(maxWidth: .infinity)
-
-                        Button {
-                            fontSize = min(50, fontSize + 1)
-                        } label: {
-                            Image(systemName: "textformat.size.larger")
-                                .frame(width: 38, height: 32)
-                        }
-                        .readingSecondaryButtonStyle()
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 14) {
+                    styleQuickLayoutCard
+                    styleBackgroundCard
+                    if showBrightness && !isEInkChrome {
+                        styleBrightnessCard
                     }
-
-                    HStack(spacing: 8) {
-                        Text("行距")
-                            .font(.subheadline)
-                        Spacer(minLength: 8)
-                        readerChoiceChip("紧凑", selected: lineSpacing <= 7) { lineSpacing = 6 }
-                        readerChoiceChip("标准", selected: lineSpacing > 7 && lineSpacing < 18) { lineSpacing = 12 }
-                        readerChoiceChip("宽松", selected: lineSpacing >= 18) { lineSpacing = 22 }
-                    }
-                    Toggle("两端对齐", isOn: $fullJustify)
+                    stylePageAnimationCard
+                    styleTypographyCard
+                    styleAdvancedLayoutSection
                 }
-
-                Section("阅读背景") {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 12) {
-                            ForEach(ReaderStylePreset.legadoDefaults) { preset in
-                                let isSelected = resolvedStyle.id == preset.id && activeBackgroundImage == nil
-                                Button {
-                                    useBackgroundImage = false
-                                    palette.choose(preset.id)
-                                } label: {
-                                    VStack(spacing: 6) {
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .fill(Color(uiColor: preset.background))
-                                            .frame(width: 54, height: 72)
-                                            .overlay {
-                                                Text("文字")
-                                                    .font(.caption)
-                                                    .foregroundStyle(Color(uiColor: preset.foreground))
-                                            }
-                                            .overlay {
-                                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                    .strokeBorder(
-                                                        Color(uiColor: preset.foreground).opacity(isSelected ? 0.4 : 0.12),
-                                                        lineWidth: isSelected ? 1.25 : 0.75
-                                                    )
-                                            }
-                                            .overlay(alignment: .topTrailing) {
-                                                if isSelected {
-                                                    Image(systemName: "checkmark")
-                                                        .font(.system(size: 10, weight: .semibold))
-                                                        .foregroundStyle(Color(uiColor: preset.foreground))
-                                                        .padding(6)
-                                                }
-                                            }
-                                        Text(preset.name)
-                                            .font(.caption2)
-                                            .foregroundStyle(isSelected ? .primary : .secondary)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(preset.name)
-                                .accessibilityAddTraits(isSelected ? .isSelected : [])
-                            }
-                        }
-                    }
-                    Button("选择背景图片", systemImage: "photo") {
-                        backgroundError = nil
-                        showsBackgroundPicker = true
-                    }
-                    if backgroundImage != nil {
-                        HStack(spacing: 0) {
-                            Text("使用背景图片")
-                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .onTapGesture { useBackgroundImage.toggle() }
-                                .accessibilityHidden(true)
-                            Toggle("使用背景图片", isOn: $useBackgroundImage)
-                                .labelsHidden()
-                                .fixedSize()
-                        }
-                        Button("删除背景图片", systemImage: "trash", role: .destructive) {
-                            ReaderBackgroundStore.remove()
-                            backgroundImage = nil
-                            useBackgroundImage = false
-                        }
-                    }
-                    if let backgroundError {
-                        Text(backgroundError).font(.footnote).foregroundStyle(.red)
-                    }
-                }
-
-                Section("文字") {
-                    valueSlider("字号", value: $fontSize, range: 5...50, format: { "\(Int($0))" })
-                    valueSlider("字间距", value: $letterSpacing, range: -0.5...0.5, step: 0.01, format: { String(format: "%.2f", $0) })
-                    valueSlider("行间距", value: $lineSpacing, range: 0...50, format: { "\(Int($0))" })
-                    valueSlider("段距", value: $paragraphSpacing, range: 0...50, format: { String(format: "%.1f", $0) })
-                    Picker("字重", selection: $fontWeight) {
-                        Text("正常").tag(0)
-                        Text("粗体").tag(1)
-                        Text("细体").tag(2)
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("段落缩进")
-                        TextField("请输入缩进字符", text: $paragraphIndent)
-                            .textInputAutocapitalization(.never)
-                            .accessibilityLabel("段落缩进字符")
-                        Text("控制每段开头的缩进，默认两个全角空格；清空后不缩进。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button(fontPath.isEmpty ? "选择字体文件" : "更换字体文件", systemImage: "textformat") {
-                        presentFontPicker()
-                    }
-                    .disabled(isInstallingFont)
-                    if isInstallingFont {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                            Text("正在导入字体…")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    if !fontPath.isEmpty {
-                        HStack {
-                            Text("当前字体")
-                            Spacer()
-                            Text(URL(fileURLWithPath: fontPath).lastPathComponent)
-                                .foregroundStyle(.secondary)
-                        }
-                        Button("恢复默认字体", role: .destructive) { fontPath = "" }
-                    }
-                    if let fontError {
-                        Text(fontError).font(.footnote).foregroundStyle(.red)
-                    }
-                    Picker("下划线", selection: $underlineMode) {
-                        Text("关闭").tag(0)
-                        Text("实线").tag(1)
-                        Text("虚线").tag(2)
-                    }
-                }
-
-                Section("章节标题") {
-                    Picker("标题模式", selection: $titleMode) {
-                        Text("左对齐").tag(0)
-                        Text("居中").tag(1)
-                        Text("隐藏").tag(2)
-                    }
-                    .pickerStyle(.segmented)
-                    valueSlider("标题字号增量", value: $titleSize, range: -10...30, format: { String(format: "%+.0f", $0) })
-                    valueSlider("标题上间距", value: $titleTopSpacing, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("标题下间距", value: $titleBottomSpacing, range: 0...100, format: { "\(Int($0))" })
-                }
-
-                Section("翻页动画") {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(Self.pageAnimationChoices, id: \.0) { choice in
-                                Button {
-                                    pageAnimation = choice.value
-                                } label: {
-                                    VStack(spacing: 6) {
-                                        Image(systemName: choice.icon)
-                                            .font(.headline)
-                                        Text(choice.title)
-                                            .font(.caption2)
-                                    }
-                                    .foregroundStyle(pageAnimation == choice.value ? ReadingTheme.onAccent : Color.primary)
-                                    .frame(width: 58, height: 54)
-                                    .background(
-                                        pageAnimation == choice.value ? ReadingTheme.accentFill : Color.secondary.opacity(0.1),
-                                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    )
-                                    .overlay {
-                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                            .strokeBorder(pageAnimation == choice.value ? ReadingTheme.selectionBorder : .clear, lineWidth: 1)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityAddTraits(pageAnimation == choice.value ? .isSelected : [])
-                            }
-                        }
-                    }
-                    Text(pageAnimation == 3
-                         ? "滚动模式连续滚动；其余模式按整屏翻页。左右滑动或点击左右三分之一区域翻页，点击中间区域打开菜单。"
-                         : "当前模式按整屏翻页；左右滑动或点击左右三分之一区域翻页，点击中间区域打开菜单。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("正文边距") {
-                    valueSlider("左边距", value: $paddingLeft, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("右边距", value: $paddingRight, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("上边距", value: $paddingTop, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("下边距", value: $paddingBottom, range: 0...100, format: { "\(Int($0))" })
-                }
-
-                Section("页眉页脚") {
-                    Picker("页眉显示", selection: $headerMode) {
-                        Text("状态栏显示时隐藏").tag(0)
-                        Text("显示").tag(1)
-                        Text("隐藏").tag(2)
-                    }
-                    Picker("页脚显示", selection: $footerMode) {
-                        Text("显示").tag(0)
-                        Text("隐藏").tag(1)
-                    }
-                    tipPicker("页眉左", selection: $tipHeaderLeft)
-                    tipPicker("页眉中", selection: $tipHeaderMiddle)
-                    tipPicker("页眉右", selection: $tipHeaderRight)
-                    tipPicker("页脚左", selection: $tipFooterLeft)
-                    tipPicker("页脚中", selection: $tipFooterMiddle)
-                    tipPicker("页脚右", selection: $tipFooterRight)
-                    Toggle("页眉分隔线", isOn: $showHeaderLine)
-                    Toggle("页脚分隔线", isOn: $showFooterLine)
-                }
-
-                Section("页眉边距") {
-                    valueSlider("左边距", value: $headerPaddingLeft, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("右边距", value: $headerPaddingRight, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("上边距", value: $headerPaddingTop, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("下边距", value: $headerPaddingBottom, range: 0...100, format: { "\(Int($0))" })
-                }
-
-                Section("页脚边距") {
-                    valueSlider("左边距", value: $footerPaddingLeft, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("右边距", value: $footerPaddingRight, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("上边距", value: $footerPaddingTop, range: 0...100, format: { "\(Int($0))" })
-                    valueSlider("下边距", value: $footerPaddingBottom, range: 0...100, format: { "\(Int($0))" })
-                }
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+                .padding(.bottom, 28)
             }
+            .background(ReaderChromePalette.sheetBackground(isEInk: isEInkChrome).ignoresSafeArea())
+            .readingScrollDismissesKeyboard()
             .navigationTitle("阅读样式")
             .navigationBarTitleDisplayMode(.inline)
+            .readerStyleNavigationBar(isEInk: isEInkChrome)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { activeSheet = nil }
+                    Button {
+                        activeSheet = nil
+                    } label: {
+                        Text("完成")
+                            .font(.system(size: 15, weight: .semibold))
+                    }
                 }
             }
         }
@@ -1578,6 +1813,732 @@ struct ReaderView: View {
         }
         .readingPresentationDetents([.medium, .large])
         .readingPresentationDragIndicator()
+        .readerSheetAllowsInlineScrolling()
+        .readerStageBoundary()
+    }
+
+    private var styleQuickLayoutCard: some View {
+        ReaderStyleCard(
+            title: "快速排版",
+            detail: "\(Int(fontSize)) pt · \(lineSpacingPresetTitle)",
+            isEInk: isEInkChrome
+        ) {
+            HStack(spacing: 0) {
+                Button {
+                    fontSize = max(5, fontSize - 1)
+                } label: {
+                    Image(systemName: "textformat.size.smaller")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(fontSize <= 5 ? Color.secondary.opacity(0.4) : Color.primary)
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(ReaderTactileButtonStyle())
+                .disabled(fontSize <= 5)
+                .accessibilityLabel("减小字号")
+
+                Rectangle()
+                    .fill(Color.primary.opacity(isEInkChrome ? 0.2 : 0.11))
+                    .frame(width: 0.5, height: 18)
+
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Text("\(Int(fontSize))")
+                        .font(.system(size: 16, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.primary)
+                        .readingNumericTransition()
+                    Text("字号")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(minWidth: 76)
+                .accessibilityElement(children: .combine)
+
+                Rectangle()
+                    .fill(Color.primary.opacity(isEInkChrome ? 0.2 : 0.11))
+                    .frame(width: 0.5, height: 18)
+
+                Button {
+                    fontSize = min(50, fontSize + 1)
+                } label: {
+                    Image(systemName: "textformat.size.larger")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(fontSize >= 50 ? Color.secondary.opacity(0.4) : Color.primary)
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(ReaderTactileButtonStyle())
+                .disabled(fontSize >= 50)
+                .accessibilityLabel("增大字号")
+            }
+            .background(
+                ReaderChromePalette.controlWellColor(isEInk: isEInkChrome),
+                in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+            )
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 9)
+
+            ReaderStyleDivider(isEInk: isEInkChrome)
+
+            HStack(spacing: 10) {
+                Text("行距")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                ReaderStyleSegmentedPill(
+                    options: [
+                        .init(value: 0, title: "紧凑"),
+                        .init(value: 1, title: "标准"),
+                        .init(value: 2, title: "宽松")
+                    ],
+                    selectedValue: lineSpacingPresetIndex,
+                    isEInk: isEInkChrome
+                ) { preset in
+                    switch preset {
+                    case 0: lineSpacing = 6
+                    case 1: lineSpacing = 12
+                    default: lineSpacing = 22
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+
+            ReaderStyleDivider(isEInk: isEInkChrome)
+
+            HStack(spacing: 10) {
+                ReaderStyleIconBadge(systemName: "text.alignleft", isEInk: isEInkChrome)
+                Text("两端对齐")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                Toggle("两端对齐", isOn: $fullJustify)
+                    .labelsHidden()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+        }
+    }
+
+    private var styleBackgroundCard: some View {
+        ReaderStyleCard(
+            title: "阅读背景",
+            detail: activeBackgroundImage != nil ? "自定义图片" : resolvedStyle.name,
+            isEInk: isEInkChrome
+        ) {
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(ReaderStylePreset.legadoDefaults) { preset in
+                            let isSelected = resolvedStyle.id == preset.id && activeBackgroundImage == nil
+                            ReaderStylePresetSwatch(
+                                preset: preset,
+                                isSelected: isSelected,
+                                isEInk: isEInkChrome
+                            ) {
+                                useBackgroundImage = false
+                                palette.choose(preset.id)
+                            }
+                            .id(preset.id)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 12)
+                    .padding(.bottom, 10)
+                }
+                .onAppear {
+                    if activeBackgroundImage == nil {
+                        proxy.scrollTo(resolvedStyle.id, anchor: .center)
+                    }
+                }
+            }
+
+            ReaderStyleDivider(isEInk: isEInkChrome)
+
+            Button {
+                backgroundError = nil
+                showsBackgroundPicker = true
+            } label: {
+                HStack(spacing: 12) {
+                    ReaderStyleIconBadge(systemName: "photo", isEInk: isEInkChrome)
+                    Text("选择背景图片")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 8)
+                    if let backgroundImage {
+                        Image(uiImage: backgroundImage)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 26, height: 26)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .strokeBorder(ReaderChromePalette.hairline, lineWidth: 0.5)
+                            }
+                            .accessibilityHidden(true)
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(ReaderTactileButtonStyle())
+            .accessibilityLabel("选择背景图片")
+
+            if backgroundImage != nil {
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                HStack(spacing: 12) {
+                    HStack(spacing: 12) {
+                        ReaderStyleIconBadge(systemName: "photo.fill", isEInk: isEInkChrome)
+                        Text("使用背景图片")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.primary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { useBackgroundImage.toggle() }
+                    .accessibilityHidden(true)
+
+                    Toggle("使用背景图片", isOn: $useBackgroundImage)
+                        .labelsHidden()
+                        .fixedSize()
+                }
+                .padding(.horizontal, 14)
+
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                Button(role: .destructive) {
+                    ReaderBackgroundStore.remove()
+                    backgroundImage = nil
+                    useBackgroundImage = false
+                } label: {
+                    HStack(spacing: 12) {
+                        ReaderStyleIconBadge(systemName: "trash", isDestructive: true, isEInk: isEInkChrome)
+                        Text("删除背景图片")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.red)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(ReaderTactileButtonStyle())
+                .accessibilityLabel("删除背景图片")
+            }
+
+            if let backgroundError {
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                Text(backgroundError)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+            }
+        }
+    }
+
+    private var styleBrightnessCard: some View {
+        ReaderStyleCard(
+            title: "屏幕亮度",
+            detail: followsSystemBrightness ? "跟随系统" : "\(Int((readerBrightness * 100).rounded()))%",
+            isEInk: isEInkChrome
+        ) {
+            HStack(spacing: 10) {
+                Image(systemName: "sun.min")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+
+                Slider(value: readerBrightnessBinding, in: 0.05...1.0)
+                    .tint(ReadingTheme.accent)
+                    .accessibilityLabel("阅读亮度")
+
+                Image(systemName: "sun.max")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .accessibilityHidden(true)
+
+                Button {
+                    followsSystemBrightness = true
+                    storedReaderBrightness = 0
+                    UIScreen.main.brightness = CGFloat(brightnessBeforeReading)
+                    readerBrightness = brightnessBeforeReading
+                } label: {
+                    Text("自动")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(followsSystemBrightness ? ReadingTheme.onAccent : Color.primary.opacity(0.85))
+                        .padding(.horizontal, 11)
+                        .frame(minHeight: 30)
+                        .background(
+                            followsSystemBrightness
+                                ? ReadingTheme.accentFill
+                                : ReaderChromePalette.controlWellColor(isEInk: isEInkChrome),
+                            in: Capsule()
+                        )
+                        .overlay {
+                            if followsSystemBrightness {
+                                Capsule().strokeBorder(ReadingTheme.selectionBorder, lineWidth: 0.75)
+                            }
+                        }
+                }
+                .buttonStyle(ReaderTactileButtonStyle())
+                .accessibilityLabel("跟随系统亮度")
+                .accessibilityAddTraits(followsSystemBrightness ? .isSelected : [])
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+    }
+
+    private var stylePageAnimationCard: some View {
+        ReaderStyleCard(
+            title: "翻页动画",
+            detail: Self.pageAnimationChoices.first(where: { $0.value == pageAnimation })?.title,
+            isEInk: isEInkChrome
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                if dynamicTypeSize.isAccessibilitySize {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(Self.pageAnimationChoices, id: \.0) { choice in
+                                pageAnimationOptionButton(choice, fixedWidth: 72)
+                            }
+                        }
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        ForEach(Self.pageAnimationChoices, id: \.0) { choice in
+                            pageAnimationOptionButton(choice, fixedWidth: nil)
+                        }
+                    }
+                }
+
+                Text(pageAnimation == 3
+                     ? "滚动模式连续滚动；左右滑动或点击左右三分之一区域翻页，点击中间区域打开菜单。"
+                     : "当前模式按整屏翻页；左右滑动或点击左右三分之一区域翻页，点击中间区域打开菜单。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+        }
+    }
+
+    private func pageAnimationOptionButton(
+        _ choice: (value: Int, title: String, icon: String),
+        fixedWidth: CGFloat?
+    ) -> some View {
+        let isSelected = pageAnimation == choice.value
+        return Button {
+            pageAnimation = choice.value
+        } label: {
+            VStack(spacing: 6) {
+                Image(systemName: choice.icon)
+                    .font(.system(size: 16, weight: .medium))
+                Text(choice.title)
+                    .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(isSelected ? ReadingTheme.onAccent : Color.primary.opacity(0.88))
+            .frame(maxWidth: fixedWidth == nil ? .infinity : nil)
+            .frame(width: fixedWidth, height: 58)
+            .background(
+                isSelected ? ReadingTheme.accentFill : ReaderChromePalette.controlWellColor(isEInk: isEInkChrome),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(isSelected ? ReadingTheme.selectionBorder : .clear, lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(ReaderTactileButtonStyle())
+        .accessibilityLabel(choice.title)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private var styleTypographyCard: some View {
+        ReaderStyleCard(
+            title: "文字与字体",
+            detail: fontPath.isEmpty ? "系统默认" : URL(fileURLWithPath: fontPath).lastPathComponent,
+            isEInk: isEInkChrome
+        ) {
+            Button {
+                presentFontPicker()
+            } label: {
+                HStack(spacing: 12) {
+                    ReaderStyleIconBadge(systemName: "textformat", isEInk: isEInkChrome)
+                    Text(fontPath.isEmpty ? "选择字体文件" : "更换字体文件")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(ReaderTactileButtonStyle())
+            .disabled(isInstallingFont)
+            .accessibilityLabel(fontPath.isEmpty ? "选择字体文件" : "更换字体文件")
+
+            if isInstallingFont {
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在导入字体…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+
+            if !fontPath.isEmpty {
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                HStack(spacing: 10) {
+                    Text("当前字体")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 8)
+                    Text(URL(fileURLWithPath: fontPath).lastPathComponent)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(ReaderChromePalette.controlWellColor(isEInk: isEInkChrome), in: Capsule())
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                Button(role: .destructive) {
+                    fontPath = ""
+                } label: {
+                    HStack(spacing: 12) {
+                        ReaderStyleIconBadge(systemName: "arrow.uturn.backward", isDestructive: true, isEInk: isEInkChrome)
+                        Text("恢复默认字体")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.red)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(ReaderTactileButtonStyle())
+                .accessibilityLabel("恢复默认字体")
+            }
+
+            if let fontError {
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                Text(fontError)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+            }
+
+            ReaderStyleDivider(isEInk: isEInkChrome)
+
+            HStack(spacing: 10) {
+                Text("字重")
+                    .font(.system(size: 14, weight: .medium))
+                Spacer(minLength: 8)
+                ReaderStyleSegmentedPill(
+                    options: [
+                        .init(value: 0, title: "正常"),
+                        .init(value: 1, title: "粗体"),
+                        .init(value: 2, title: "细体")
+                    ],
+                    selectedValue: fontWeight,
+                    isEInk: isEInkChrome
+                ) { fontWeight = $0 }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+
+            ReaderStyleDivider(isEInk: isEInkChrome)
+
+            HStack(spacing: 10) {
+                Text("下划线")
+                    .font(.system(size: 14, weight: .medium))
+                Spacer(minLength: 8)
+                ReaderStyleSegmentedPill(
+                    options: [
+                        .init(value: 0, title: "关闭"),
+                        .init(value: 1, title: "实线"),
+                        .init(value: 2, title: "虚线")
+                    ],
+                    selectedValue: underlineMode,
+                    isEInk: isEInkChrome
+                ) { underlineMode = $0 }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+
+            ReaderStyleDivider(isEInk: isEInkChrome)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("段落缩进")
+                        .font(.system(size: 14, weight: .medium))
+                    Spacer(minLength: 8)
+                    HStack(spacing: 6) {
+                        indentQuickChip("无", value: "")
+                        indentQuickChip("两格", value: "　　")
+                        indentQuickChip("四格", value: "　　　　")
+                    }
+                }
+                TextField("请输入缩进字符", text: $paragraphIndent)
+                    .font(.system(size: 14))
+                    .textInputAutocapitalization(.never)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(
+                        ReaderChromePalette.controlWellColor(isEInk: isEInkChrome),
+                        in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    )
+                    .accessibilityLabel("段落缩进字符")
+                Text("控制每段开头的缩进，默认两个全角空格；清空后不缩进。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+
+            ReaderStyleDivider(isEInk: isEInkChrome)
+            ReaderStyleValueSlider(title: "字号", value: $fontSize, range: 5...50, isEInk: isEInkChrome) { "\(Int($0))" }
+            ReaderStyleDivider(isEInk: isEInkChrome)
+            ReaderStyleValueSlider(title: "字间距", value: $letterSpacing, range: -0.5...0.5, step: 0.01, isEInk: isEInkChrome) { String(format: "%.2f", $0) }
+            ReaderStyleDivider(isEInk: isEInkChrome)
+            ReaderStyleValueSlider(title: "行间距", value: $lineSpacing, range: 0...50, isEInk: isEInkChrome) { "\(Int($0))" }
+            ReaderStyleDivider(isEInk: isEInkChrome)
+            ReaderStyleValueSlider(title: "段距", value: $paragraphSpacing, range: 0...50, isEInk: isEInkChrome) { String(format: "%.1f", $0) }
+        }
+    }
+
+    private func indentQuickChip(_ title: String, value: String) -> some View {
+        let isSelected = paragraphIndent == value
+        return Button {
+            paragraphIndent = value
+        } label: {
+            Text(title)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .foregroundStyle(isSelected ? ReadingTheme.onAccent : .secondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(
+                    isSelected
+                        ? ReadingTheme.accentFill
+                        : ReaderChromePalette.controlWellColor(isEInk: isEInkChrome),
+                    in: Capsule()
+                )
+        }
+        .buttonStyle(ReaderTactileButtonStyle())
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private var styleAdvancedLayoutSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("高级版式")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .accessibilityAddTraits(.isHeader)
+
+            ReaderStyleCollapsibleCard(
+                title: "章节标题",
+                icon: "textformat.abc",
+                summary: titleModeSummary,
+                isEInk: isEInkChrome,
+                isExpanded: $expandsTitleStyle
+            ) {
+                HStack(spacing: 10) {
+                    Text("标题模式")
+                        .font(.system(size: 14, weight: .medium))
+                    Spacer(minLength: 8)
+                    ReaderStyleSegmentedPill(
+                        options: [
+                            .init(value: 0, title: "左对齐"),
+                            .init(value: 1, title: "居中"),
+                            .init(value: 2, title: "隐藏")
+                        ],
+                        selectedValue: titleMode,
+                        isEInk: isEInkChrome
+                    ) { titleMode = $0 }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "标题字号增量", value: $titleSize, range: -10...30, isEInk: isEInkChrome) { String(format: "%+.0f", $0) }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "标题上间距", value: $titleTopSpacing, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "标题下间距", value: $titleBottomSpacing, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+            }
+
+            ReaderStyleCollapsibleCard(
+                title: "正文边距",
+                icon: "arrow.up.left.and.arrow.down.right",
+                summary: "\(Int(paddingLeft)) · \(Int(paddingRight)) · \(Int(paddingTop)) · \(Int(paddingBottom))",
+                isEInk: isEInkChrome,
+                isExpanded: $expandsPageMargins
+            ) {
+                ReaderStyleValueSlider(title: "左边距", value: $paddingLeft, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "右边距", value: $paddingRight, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "上边距", value: $paddingTop, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "下边距", value: $paddingBottom, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+            }
+
+            ReaderStyleCollapsibleCard(
+                title: "页眉与页脚",
+                icon: "rectangle.split.1x2",
+                summary: headerFooterSummary,
+                isEInk: isEInkChrome,
+                isExpanded: $expandsHeaderFooter
+            ) {
+                stylePickerRow("页眉显示", selection: $headerMode) {
+                    Text("状态栏显示时隐藏").tag(0)
+                    Text("显示").tag(1)
+                    Text("隐藏").tag(2)
+                }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                stylePickerRow("页脚显示", selection: $footerMode) {
+                    Text("显示").tag(0)
+                    Text("隐藏").tag(1)
+                }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                tipPickerRow("页眉左", selection: $tipHeaderLeft)
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                tipPickerRow("页眉中", selection: $tipHeaderMiddle)
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                tipPickerRow("页眉右", selection: $tipHeaderRight)
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                tipPickerRow("页脚左", selection: $tipFooterLeft)
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                tipPickerRow("页脚中", selection: $tipFooterMiddle)
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                tipPickerRow("页脚右", selection: $tipFooterRight)
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                styleToggleRow("页眉分隔线", isOn: $showHeaderLine)
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                styleToggleRow("页脚分隔线", isOn: $showFooterLine)
+                ReaderStyleDivider(isEInk: isEInkChrome)
+
+                styleSubgroupLabel("页眉边距")
+                ReaderStyleValueSlider(title: "左边距", value: $headerPaddingLeft, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "右边距", value: $headerPaddingRight, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "上边距", value: $headerPaddingTop, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "下边距", value: $headerPaddingBottom, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+
+                styleSubgroupLabel("页脚边距")
+                ReaderStyleValueSlider(title: "左边距", value: $footerPaddingLeft, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "右边距", value: $footerPaddingRight, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "上边距", value: $footerPaddingTop, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+                ReaderStyleDivider(isEInk: isEInkChrome)
+                ReaderStyleValueSlider(title: "下边距", value: $footerPaddingBottom, range: 0...100, isEInk: isEInkChrome) { "\(Int($0))" }
+            }
+        }
+    }
+
+    private var lineSpacingPresetIndex: Int {
+        if lineSpacing <= 7 { return 0 }
+        if lineSpacing < 18 { return 1 }
+        return 2
+    }
+
+    private var lineSpacingPresetTitle: String {
+        switch lineSpacingPresetIndex {
+        case 0: "紧凑"
+        case 1: "标准"
+        default: "宽松"
+        }
+    }
+
+    private var titleModeSummary: String {
+        switch titleMode {
+        case 1: "居中"
+        case 2: "隐藏"
+        default: "左对齐"
+        }
+    }
+
+    private var headerFooterSummary: String {
+        let header = headerMode == 1 ? "页眉开" : (headerMode == 2 ? "页眉关" : "页眉自动")
+        let footer = footerMode == 0 ? "页脚开" : "页脚关"
+        return "\(header) · \(footer)"
+    }
+
+    private func styleSubgroupLabel(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 2)
+    }
+
+    private func styleToggleRow(_ title: String, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 8)
+            Toggle(title, isOn: isOn)
+                .labelsHidden()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+    }
+
+    private func stylePickerRow<SelectionValue: Hashable, Content: View>(
+        _ title: String,
+        selection: Binding<SelectionValue>,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 8)
+            Picker(title, selection: selection, content: content)
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .tint(ReadingTheme.accent)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+    }
+
+    private func tipPickerRow(_ title: String, selection: Binding<Int>) -> some View {
+        stylePickerRow(title, selection: selection) {
+            ForEach(Self.readerTipChoices, id: \.0) { value, name in
+                Text(name).tag(value)
+            }
+        }
     }
 
     private func presentFontPicker() {
@@ -1639,52 +2600,11 @@ struct ReaderView: View {
         (4, "无动画", "rectangle")
     ]
 
-    private func readerChoiceChip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(selected ? ReadingTheme.onAccent : Color.primary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(selected ? ReadingTheme.accentFill : Color.secondary.opacity(0.1), in: Capsule())
-                .overlay {
-                    Capsule().strokeBorder(selected ? ReadingTheme.selectionBorder : .clear, lineWidth: 1)
-                }
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-
-    private func valueSlider(
-        _ title: String,
-        value: Binding<Double>,
-        range: ClosedRange<Double>,
-        step: Double = 1,
-        format: @escaping (Double) -> String
-    ) -> some View {
-        VStack(spacing: 6) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(format(value.wrappedValue)).monospacedDigit().foregroundStyle(.secondary)
-            }
-            Slider(value: value, in: range, step: step)
-        }
-    }
-
     private static let readerTipChoices: [(Int, String)] = [
         (0, "无"), (7, "书名"), (1, "标题"), (2, "时间"), (3, "电量"),
         (10, "电量%"), (4, "页数"), (5, "进度(%)"), (11, "进度(xx/yyy)"),
         (6, "页数及进度"), (8, "时间及电量"), (9, "时间及电量%")
     ]
-
-    private func tipPicker(_ title: String, selection: Binding<Int>) -> some View {
-        Picker(title, selection: selection) {
-            ForEach(Self.readerTipChoices, id: \.0) { value, name in
-                Text(name).tag(value)
-            }
-        }
-    }
 
 
     private var clickActions: [Int] {
@@ -1786,12 +2706,10 @@ struct ReaderView: View {
             showsReaderMenu = false
             activeSheet = .search
         case 13:
-            isAutoReading = false
-            configureSpeech()
-            if let engine = selectedHTTPEngine {
-                speech.pauseOrResumeHTTP(engine: engine, text: model.content, continuesAcrossChapters: true)
+            if speech.isSpeaking || speech.isPaused {
+                speech.togglePlaybackPause()
             } else {
-                speech.pauseOrResume(text: model.content, continuesAcrossChapters: true)
+                toggleSpeech()
             }
         default: break
         }
@@ -1861,8 +2779,12 @@ struct ReaderView: View {
                 }
 
                 Section("朗读") {
-                    Picker("全局朗读引擎", selection: $appTTSEngine) {
+                    Picker("全局朗读引擎", selection: globalTTSEngineBinding) {
                         Text("系统 TTS").tag("")
+                        Text(EdgeSpeechSynthesizer.engineName).tag(EdgeSpeechSynthesizer.engineTag)
+                        if offlineInstallation.isInstalled {
+                            Text(OfflineSpeechSynthesizer.engineName).tag(OfflineSpeechSynthesizer.engineTag)
+                        }
                         ForEach(httpTTSEngines) { engine in
                             Text(engine.name).tag(String(engine.id))
                         }
@@ -1870,9 +2792,19 @@ struct ReaderView: View {
                     Picker("本书朗读引擎", selection: bookTTSEngineBinding) {
                         Text("跟随全局").tag("__global__")
                         Text("系统 TTS").tag("")
+                        Text(EdgeSpeechSynthesizer.engineName).tag(EdgeSpeechSynthesizer.engineTag)
+                        if offlineInstallation.isInstalled {
+                            Text(OfflineSpeechSynthesizer.engineName).tag(OfflineSpeechSynthesizer.engineTag)
+                        }
                         ForEach(httpTTSEngines) { engine in
                             Text(engine.name).tag(String(engine.id))
                         }
+                    }
+                    if activeTTSEngineTag == EdgeSpeechSynthesizer.engineTag {
+                        EdgeSpeechVoicePicker(selection: $edgeSpeechVoice)
+                    }
+                    if !offlineInstallation.isInstalled {
+                        OfflineSpeechModelControls(installation: offlineInstallation)
                     }
                     Picker("系统声音", selection: $systemTTSVoice) {
                         Text("系统默认中文声音").tag("")
@@ -1886,13 +2818,27 @@ struct ReaderView: View {
                     Toggle("按页朗读", isOn: $readAloudByPage)
                     Toggle("流式播放在线音频", isOn: $streamReadAloudAudio)
                     Toggle("朗读时保持亮屏", isOn: $readAloudWakeLock)
+                    Toggle("导航/提示中断后自动续播", isOn: $ttsResumeAfterInterruption)
                     Toggle("忽略音频焦点", isOn: $ignoreAudioFocus)
                     Toggle("忽略焦点时仍在来电时暂停", isOn: $pauseReadAloudWhilePhoneCalls)
                         .disabled(!ignoreAudioFocus)
                     Toggle("媒体上一首/下一首切换章节", isOn: $mediaButtonPerNext)
-                    Stepper("默认定时：\(ttsTimer) 分钟", value: $ttsTimer, in: 0...180)
+                    Stepper("按时间定时：\(ttsTimer) 分钟", value: $ttsTimer, in: 0...180)
+                    Picker("按章节定时停止", selection: $ttsChapterTimer) {
+                        Text("关闭").tag(0)
+                        Text("读完本章停止").tag(1)
+                        Text("读完 2 章停止").tag(2)
+                        Text("读完 3 章停止").tag(3)
+                        Text("读完 5 章停止").tag(5)
+                        Text("读完 10 章停止").tag(10)
+                    }
                     if speechTimerRemaining > 0 {
                         Text("本次朗读还剩 \(speechTimerRemaining) 分钟")
+                            .font(.footnote.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    if speechChaptersRemaining > 0 {
+                        Text("将在读完剩余 \(speechChaptersRemaining) 章后自动停止")
                             .font(.footnote.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
@@ -2083,26 +3029,32 @@ struct ReaderView: View {
         }
     }
 
-    private var bookmarkSaved: Bool {
+    private var currentBookmarks: [Bookmark] {
         let page = currentPage - 1
         let range = pageAnimation != 3 && readerPageRanges.indices.contains(page) ? readerPageRanges[page] : nil
-        return !model.bookmarks(at: readerPosition, in: activity.bookmarks, pageRange: range).isEmpty
+        return model.bookmarks(at: readerPosition, in: activity.bookmarks, pageRange: range)
     }
 
     private func addBookmark() {
-        guard !isSavingBookmark, !bookmarkSaved, let chapter = model.currentChapter else { return }
+        guard currentBookmarks.isEmpty, model.hasLoadedCurrentChapter, let chapter = model.currentChapter else { return }
         let currentBook = book
         let position = readerPosition
         let content = model.content
+        saveBookmarkChange {
+            await activity.addBookmark(book: currentBook, chapter: chapter, position: position, content: content)
+        }
+    }
+
+    private func removeBookmarks(_ bookmarks: [Bookmark]) {
+        saveBookmarkChange { await activity.removeBookmarks(bookmarks) }
+    }
+
+    private func saveBookmarkChange(_ change: @escaping @MainActor () async -> Void) {
+        guard !isSavingBookmark else { return }
         isSavingBookmark = true
         Task {
             defer { isSavingBookmark = false }
-            await activity.addBookmark(
-                book: currentBook,
-                chapter: chapter,
-                position: position,
-                content: content
-            )
+            await change()
         }
     }
 
@@ -2157,6 +3109,7 @@ struct ReaderView: View {
         speech.stop()
         speechTimerTask?.cancel()
         speechTimerRemaining = 0
+        speechChaptersRemaining = 0
         isAutoReading = false
     }
 
@@ -2177,8 +3130,10 @@ struct ReaderView: View {
             speech.stop()
             speechTimerTask?.cancel()
             speechTimerRemaining = 0
+            speechChaptersRemaining = 0
             return
         }
+        speechChaptersRemaining = ttsChapterTimer
         scheduleSpeechTimer()
         startConfiguredSpeech()
     }
@@ -2208,7 +3163,14 @@ struct ReaderView: View {
         let text = model.paragraphs.indices.contains(start)
             ? model.paragraphs[start...].map(\.text).joined(separator: "\n")
             : model.content
-        if let engine = selectedHTTPEngine {
+        if let engine = selectedSynthesisEngine {
+            speech.speakSynthesized(
+                engine,
+                text: text,
+                continuesAcrossChapters: true,
+                segmentIndexOffset: start
+            )
+        } else if let engine = selectedHTTPEngine {
             speech.speakHTTP(
                 engine: engine,
                 text: text,
@@ -2235,7 +3197,14 @@ struct ReaderView: View {
         }
         let pageText = ChapterInlineMedia(model.content).textForReading(model.content as NSString, range: pageRange)
         if pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continueSpeechToNextPage(); return }
-        if let engine = selectedHTTPEngine {
+        if let engine = selectedSynthesisEngine {
+            speech.speakSynthesized(
+                engine,
+                text: pageText,
+                continuesAcrossChapters: true,
+                segmentIndexOffset: 0
+            )
+        } else if let engine = selectedHTTPEngine {
             speech.speakHTTP(
                 engine: engine,
                 text: pageText,
@@ -2283,9 +3252,19 @@ struct ReaderView: View {
     }
 
     private func continueSpeechToNextChapter() {
+        if speechChaptersRemaining > 0 {
+            speechChaptersRemaining -= 1
+            if speechChaptersRemaining == 0 {
+                speechTimerTask?.cancel()
+                speechTimerRemaining = 0
+                resumesSpeechAfterChapterLoad = false
+                return
+            }
+        }
         guard model.canGoNext else {
             speechTimerTask?.cancel()
             speechTimerRemaining = 0
+            speechChaptersRemaining = 0
             return
         }
         saveProgress(immediate: true)
@@ -2337,6 +3316,7 @@ struct ReaderView: View {
             voiceIdentifier: systemTTSVoice,
             ignoresAudioFocus: ignoreAudioFocus,
             pausesForPhoneCalls: pauseReadAloudWhilePhoneCalls,
+            resumeTransientInterruptions: ttsResumeAfterInterruption,
             mediaButtonPerNext: mediaButtonPerNext,
             bookName: model.book.name,
             chapterTitle: model.title,
@@ -2353,9 +3333,41 @@ struct ReaderView: View {
         return defaults.integer(forKey: "pageAnim")
     }
 
+    private var activeTTSEngineTag: String {
+        bookTTSEngineTag ?? globalTTSEngineTag
+    }
+
+    private var globalTTSEngineTag: String {
+        supportsTTSEngine(appTTSEngine) ? appTTSEngine : ""
+    }
+
+    private var globalTTSEngineBinding: Binding<String> {
+        Binding(get: { globalTTSEngineTag }, set: { value in
+            if supportsTTSEngine(value) { appTTSEngine = value }
+        })
+    }
+
+    private var selectedSynthesisEngine: ReaderSpeechController.SynthesisEngine? {
+        switch activeTTSEngineTag {
+        case EdgeSpeechSynthesizer.engineTag: .edge(edgeSpeechVoice)
+        case OfflineSpeechSynthesizer.engineTag: .offline
+        default: nil
+        }
+    }
+
+    private var bookTTSEngineTag: String? {
+        guard let tag = model.book.readConfig?.ttsEngine, supportsTTSEngine(tag) else { return nil }
+        return tag
+    }
+
+    private func supportsTTSEngine(_ tag: String) -> Bool {
+        if tag == OfflineSpeechSynthesizer.engineTag { return offlineInstallation.isInstalled }
+        return tag.isEmpty || tag == EdgeSpeechSynthesizer.engineTag
+            || httpTTSEngines.contains { String($0.id) == tag }
+    }
+
     private var selectedHTTPEngine: HttpTTS? {
-        let value = model.book.readConfig?.ttsEngine ?? appTTSEngine
-        guard let id = Int64(value) else { return nil }
+        guard let id = Int64(activeTTSEngineTag) else { return nil }
         return httpTTSEngines.first { $0.id == id }
     }
 
@@ -2367,8 +3379,9 @@ struct ReaderView: View {
 
     private var bookTTSEngineBinding: Binding<String> {
         Binding(
-            get: { model.book.readConfig?.ttsEngine ?? "__global__" },
+            get: { bookTTSEngineTag ?? "__global__" },
             set: { value in
+                guard value == "__global__" || supportsTTSEngine(value) else { return }
                 let updated = model.setTTSEngine(value == "__global__" ? nil : value)
                 saveReaderSetting(updated) { $0.ttsEngine = updated.readConfig?.ttsEngine }
             }
@@ -2390,24 +3403,17 @@ struct ReaderView: View {
     }
 
     private func loadHTTPEngines() async {
-        let values = await Self.storedHTTPEngines()
+        if offlineInstallation == .checking {
+            let snapshot = await OfflineSpeechSynthesizer.shared.currentInstallationState()
+            if !Task.isCancelled, offlineInstallation == .checking { offlineInstallation = snapshot }
+        }
+        let values = try? await HttpTTSLibraryModel.loadStoredEngines()
         guard !Task.isCancelled, let values else { return }
         httpTTSEngines = values
-        if !appTTSEngine.isEmpty, selectedHTTPEngine == nil { appTTSEngine = "" }
-    }
-
-    private nonisolated static func storedHTTPEngines() async -> [HttpTTS]? {
-        guard let database = try? LegadoDatabase.shared() else { return nil }
-        let repository = SQLiteConfigurationRepository(database: database)
-        var values = (try? await repository.loadHttpTTS()) ?? []
-        if values.isEmpty,
-           let url = Bundle.main.url(forResource: "httpTTS", withExtension: "json"),
-           let data = try? Data(contentsOf: url),
-           let defaults = try? JSONDecoder().decode([HttpTTS].self, from: data) {
-            values = defaults
-            try? await repository.saveHttpTTS(values)
+        hasLoadedSpeechEngines = true
+        if appTTSEngine != OfflineSpeechSynthesizer.engineTag, !supportsTTSEngine(appTTSEngine) {
+            appTTSEngine = ""
         }
-        return values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 }
 

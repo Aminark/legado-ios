@@ -111,6 +111,13 @@ struct LocalBackupView: View {
             } header: { Text("恢复") } footer: {
                 Text("选择 .legadobackup 文件后先预览，再合并。同一本书保留较新的阅读进度，重复书源、净化规则、RSS 与书签保留本机版本。")
             }
+            if incomingURL == nil {
+                Section("云端同步") {
+                    NavigationLink("WebDAV 自动备份与历史恢复") {
+                        WebDAVBackupView()
+                    }
+                }
+            }
             if working {
                 HStack(spacing: 10) {
                     ProgressView()

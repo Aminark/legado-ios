@@ -111,7 +111,15 @@ struct RootTabView: View {
                 .tag(Tab.my)
         }
         .readingTabBarBackground()
-        .preferredColorScheme(themeMode == "2" ? .dark : (themeMode == "1" || themeMode == "3" ? .light : nil))
+        // A reader can request its own appearance for the entire presentation, including the status bar.
+        .transformPreference(PreferredColorSchemeKey.self) { scheme in
+            guard scheme == nil else { return }
+            switch themeMode {
+            case "2": scheme = .dark
+            case "1", "3": scheme = .light
+            default: break
+            }
+        }
         .transaction { transaction in
             if themeMode == "3" { transaction.animation = nil }
         }
@@ -173,13 +181,13 @@ private struct BookshelfView: View {
     @State private var pendingLocalFiles: [LocalBookImportFile] = []
     @State private var selectedGroupID = BookGroup.idAll
     @EnvironmentObject private var replaceRules: ReplaceRuleLibraryModel
-    @State private var opening: Task<Void, Never>?
     @State private var warmedReader: ReaderViewModel?
     @State private var readerDestination: ShelfReaderDestination?
 
-    private enum ShelfReaderDestination {
-        case prepared(ReaderViewModel)
-        case book(Book, BookSource?)
+    private struct ShelfReaderDestination {
+        let book: Book
+        let source: BookSource?
+        let warmedReader: ReaderViewModel?
     }
     @State private var showsGroupManager = false
     @State private var showsBookOrder = false
@@ -197,6 +205,8 @@ private struct BookshelfView: View {
         let books = library.books(in: currentGroup, defaultSort: bookshelfSort)
         let recent = books.filter(BookReadingPresentation.hasStarted)
             .max { $0.durChapterTime < $1.durChapterTime }
+        let recentSource = recent.flatMap { sources.source(id: $0.origin) }
+        let bookToWarm = readerDestination == nil && recentSource != nil ? recent : nil
         GeometryReader { geometry in
             ScrollView {
                 VStack(spacing: 0) {
@@ -259,17 +269,16 @@ private struct BookshelfView: View {
         .readingNavigationDestination(isPresented: Binding(
             get: { readerDestination != nil }, set: { if !$0 { readerDestination = nil } }
         )) {
-            switch readerDestination {
-            case let .prepared(reader): ReaderView(prepared: reader)
-            case let .book(book, source): BookshelfBookDestination(book: book, source: source)
-            case nil: EmptyView()
+            if let destination = readerDestination {
+                BookshelfBookDestination(book: destination.book, source: destination.source,
+                                         warmedReader: destination.warmedReader)
+                    .id(destination.book.id)
             }
         }
-        .onDisappear { opening?.cancel(); warmedReader = nil }
-        .task(id: recent) {
+        .onDisappear { warmedReader = nil }
+        .task(id: bookToWarm) {
             warmedReader = nil
-            guard let book = recent, book.origin != "local",
-                  let source = sources.sources.first(where: { $0.id == book.origin }),
+            guard let book = bookToWarm, book.origin != "local", let source = recentSource,
                   !ProcessInfo.processInfo.arguments.contains("-uiDemo") else { return }
             let chapters = await library.updateCoordinator.storedChapters(bookURL: book.bookUrl)
             guard !Task.isCancelled, let restored = BookshelfReadViewModel.restoredBook(book, chapters: chapters) else { return }
@@ -330,27 +339,8 @@ private struct BookshelfView: View {
     }
 
     private func open(_ book: Book) {
-        opening?.cancel()
-        let source = sources.sources.first { $0.id == book.origin }
-        guard book.origin != "local", let source, !ProcessInfo.processInfo.arguments.contains("-uiDemo") else {
-            readerDestination = .book(book, source)
-            return
-        }
-        opening = Task {
-            let chapters = await library.updateCoordinator.storedChapters(bookURL: book.bookUrl)
-            guard !Task.isCancelled else { return }
-            if let restored = BookshelfReadViewModel.restoredBook(book, chapters: chapters) {
-                let reader = await ReaderViewModel.cachedOpening(book: restored, chapters: chapters, source: source,
-                                                                 rules: replaceRules.rules, reusing: warmedReader)
-                guard !Task.isCancelled else { return }
-                var transaction = Transaction()
-                transaction.disablesAnimations = reader.hasLoadedCurrentChapter
-                withTransaction(transaction) { readerDestination = .prepared(reader) }
-            } else {
-                readerDestination = .book(book, source)
-            }
-            opening = nil
-        }
+        readerDestination = ShelfReaderDestination(book: book, source: sources.source(id: book.origin),
+                                                  warmedReader: warmedReader?.book.id == book.id ? warmedReader : nil)
     }
 
     private func bookshelfSummary(group: BookGroup, count: Int) -> some View {
@@ -527,7 +517,7 @@ private struct BookshelfBookLink: View {
     let open: () -> Void
     @State private var showsGroupSelector = false
 
-    private var source: BookSource? { sources.sources.first { $0.bookSourceUrl == book.origin } }
+    private var source: BookSource? { sources.source(id: book.origin) }
 
     var body: some View {
         Button(action: open) {
@@ -600,12 +590,13 @@ private struct BookshelfBookDestination: View {
     @EnvironmentObject private var library: BookLibraryModel
     let book: Book
     let source: BookSource?
+    let warmedReader: ReaderViewModel?
 
     var body: some View {
         if ProcessInfo.processInfo.arguments.contains("-uiDemo"), book.origin != "local" {
             ReaderView(demoBook: book, chapters: DemoContent.readerChapters, initialIndex: 0, content: DemoContent.readerText)
         } else {
-            BookshelfReadView(book: book, source: source, coordinator: library.updateCoordinator)
+            BookshelfReadView(book: book, source: source, coordinator: library.updateCoordinator, warmedReader: warmedReader)
         }
     }
 }
@@ -921,40 +912,39 @@ private struct EmptyBookshelfHero: View {
 struct BookshelfReadView: View {
     let book: Book
     let source: BookSource?
+    let warmedReader: ReaderViewModel?
     @EnvironmentObject private var library: BookLibraryModel
+    @EnvironmentObject private var replaceRules: ReplaceRuleLibraryModel
     @StateObject private var model: BookshelfReadViewModel
+    @State private var reader: ReaderViewModel?
 
-    init(book: Book, source: BookSource?, coordinator: BookUpdateCoordinator) {
+    init(book: Book, source: BookSource?, coordinator: BookUpdateCoordinator, warmedReader: ReaderViewModel? = nil) {
         self.book = book
         self.source = source
+        self.warmedReader = warmedReader
         _model = StateObject(wrappedValue: BookshelfReadViewModel(updateCoordinator: coordinator))
     }
 
     var body: some View {
-        Group {
-            if !model.chapters.isEmpty, let resolvedBook = model.resolvedBook {
-                if let source {
-                    ReaderView(
-                        book: resolvedBook,
-                        chapters: model.chapters,
-                        initialIndex: resolvedBook.durChapterIndex,
-                        source: source
-                    )
-                } else {
-                    ReaderView(book: resolvedBook, chapters: model.chapters, initialIndex: resolvedBook.durChapterIndex)
-                }
-            } else if model.isLoading {
-                ProgressView("正在打开…")
+        ZStack {
+            if let reader {
+                ReaderView(prepared: reader)
             } else if let errorMessage = model.errorMessage {
                 ReadingUnavailableView("无法打开书籍", systemImage: "book.closed", description: Text(errorMessage))
             } else {
                 ProgressView("正在打开…")
+                    .readingTabBarHidden()
             }
         }
         .task {
+            guard reader == nil else { return }
             await model.load(book: book, source: source) { report in
                 await library.commitPreparedUpdate(requestedBook: book, report: report)
             }
+            guard !Task.isCancelled, let resolved = model.resolvedBook, !model.chapters.isEmpty else { return }
+            let opening = await ReaderViewModel.cachedOpening(book: resolved, chapters: model.chapters, source: source,
+                                                              rules: replaceRules.rules, reusing: warmedReader)
+            if !Task.isCancelled { reader = opening }
         }
     }
 }
@@ -1847,6 +1837,7 @@ private struct AllBookmarksView: View {
     @EnvironmentObject private var library: BookLibraryModel
     @EnvironmentObject private var sources: SourceLibraryModel
     @State private var editingBookmark: Bookmark?
+    @State private var openedBookmark: (bookmark: Bookmark, book: Book, source: BookSource?)?
     @State private var exportsJSON = false
     @State private var exportsMarkdown = false
 
@@ -1889,6 +1880,13 @@ private struct AllBookmarksView: View {
             }
         }
         .navigationTitle("书签")
+        .readingNavigationDestination(isPresented: Binding(
+            get: { openedBookmark != nil }, set: { if !$0 { openedBookmark = nil } }
+        )) {
+            if let openedBookmark {
+                BookmarkReaderDestination(book: openedBookmark.book, bookmark: openedBookmark.bookmark, source: openedBookmark.source)
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if !activity.bookmarks.isEmpty {
@@ -1918,13 +1916,17 @@ private struct AllBookmarksView: View {
 
     @ViewBuilder private func bookmarkLink(_ bookmark: Bookmark, book: Book?, source: BookSource?) -> some View {
         if let book {
-            NavigationLink {
-                BookmarkReaderDestination(
-                    book: book,
-                    bookmark: bookmark,
-                    source: source
-                )
-            } label: { bookmarkRow(bookmark) }
+            Button { openedBookmark = (bookmark, book, source) } label: {
+                HStack {
+                    bookmarkRow(bookmark)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         } else {
             Button { editingBookmark = bookmark } label: { bookmarkRow(bookmark) }
         }
@@ -2047,18 +2049,22 @@ private struct BookmarkReaderDestination: View {
                 } else {
                     ReadingUnavailableView("书源不可用", systemImage: "network.slash", description: Text("请先恢复或启用这本书对应的书源。"))
                 }
-            } else if isLoading {
-                ProgressView("正在恢复书签位置…")
             } else {
-                ReadingUnavailableView(
-                    "无法打开书签",
-                    systemImage: "bookmark.slash",
-                    description: Text(errorMessage ?? "当前目录中找不到书签对应章节。")
-                )
+                Group {
+                    if isLoading {
+                        ProgressView("正在恢复书签位置…")
+                    } else {
+                        ReadingUnavailableView(
+                            "无法打开书签",
+                            systemImage: "bookmark.slash",
+                            description: Text(errorMessage ?? "当前目录中找不到书签对应章节。")
+                        )
+                    }
+                }
+                .navigationTitle(bookmark.chapterName.isEmpty ? book.name : bookmark.chapterName)
+                .navigationBarTitleDisplayMode(.inline)
             }
         }
-        .navigationTitle(bookmark.chapterName.isEmpty ? book.name : bookmark.chapterName)
-        .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
     }
 

@@ -9,7 +9,7 @@ source_packages_path=${LEGADO_SOURCE_PACKAGES_PATH:-"$derived_data_path/SourcePa
 
 echo "[1/5] Validate bundled resources and application source"
 python3 -m json.tool App/Resources/txtTocRule.json >/dev/null
-python3 -m json.tool App/Resources/httpTTS.json >/dev/null
+python3 -m json.tool App/Resources/retiredHttpTTS.json >/dev/null
 python3 -m json.tool docs/altstore.json >/dev/null
 python3 -m unittest discover -s scripts/tests -v
 

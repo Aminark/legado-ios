@@ -1,6 +1,6 @@
 import SwiftUI
 import UIKit
-// Readium 3.8 predates Swift 6 Sendable annotations; ownership stays in this
+// Readium 3.11 predates full Swift 6 Sendable annotations; ownership stays in this
 // main-actor model and publication operations are awaited before presentation.
 @preconcurrency import ReadiumShared
 @preconcurrency import ReadiumStreamer
@@ -65,13 +65,47 @@ final class EPUBReaderModel: ObservableObject, EPUBNavigatorDelegate {
 
     var progress: Double { location?.locations.totalProgression ?? 0 }
 
+    func textReaderPosition() async -> (index: Int, progression: Double?) {
+        await visibleChapterTask?.value
+        guard let chapter = currentChapter else { return (initialIndex, nil) }
+        guard let path = chapter.resourceUrl, chapters.contains(where: { $0.index != chapter.index && $0.resourceUrl == path }) else {
+            return (chapter.index, location?.locations.progression)
+        }
+        // Readium measures progression across the entire spine item. The text
+        // reader splits that same document at TOC anchors.
+        guard let navigator, let visible = await navigator.firstVisibleElementLocator(),
+              Self.path(visible.href.string) == path, let selector = visible.locations.cssSelector else {
+            return (chapter.index, 0)
+        }
+        let arguments = [chapter.startFragmentId, chapter.endFragmentId, selector]
+        guard let json = try? JSONEncoder().encode(arguments) else { return (chapter.index, 0) }
+        let script = """
+        (([startID, endID, selector]) => {
+            const anchor = id => id && (document.getElementById(id) || document.getElementsByName(id)[0]);
+            const start = anchor(startID), end = anchor(endID), first = document.querySelector(selector);
+            if (!first || !document.body.contains(first)) return 0;
+            const chapter = document.createRange();
+            chapter.selectNodeContents(document.body);
+            if (start) chapter.setStartBefore(start);
+            if (end) chapter.setEndBefore(end);
+            const length = chapter.toString().trim().length;
+            if (!length || chapter.comparePoint(first, 0) < 0) return 0;
+            if (chapter.comparePoint(first, 0) > 0) return 1;
+            chapter.setEnd(first, 0);
+            return chapter.toString().trim().length / length;
+        })(\(String(decoding: json, as: UTF8.self)))
+        """
+        let fraction = try? await navigator.evaluateJavaScript(script).get() as? Double
+        return (chapter.index, fraction ?? 0)
+    }
+
     func open(preferences: EPUBPreferences) async {
         guard navigator == nil, !isLoading else { return }
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
         do {
-            guard let url = URL(string: book.bookUrl), url.isFileURL,
+            guard let url = LocalBookService.resolveLocalFileURL(for: book.bookUrl),
                   let file = FileURL(url: url) else { throw LocalBookError.missingFile }
             let retriever = AssetRetriever(httpClient: httpClient)
             let opener = PublicationOpener(parser: DefaultPublicationParser(
@@ -241,38 +275,98 @@ struct EPUBReaderView: View {
     @EnvironmentObject private var library: BookLibraryModel
     @EnvironmentObject private var activity: ReadingActivityModel
     @StateObject private var model: EPUBReaderModel
+    private var readingPalette = ReadingPalettePreference()
     @State private var showsTOC = false
     @State private var showsSettings = false
     @State private var showsBookmarks = false
-    let onReadText: (Int) -> Void
+    let onReadText: (Int, Double?, Bool) -> Void
     @State private var switchingToText = false
+    @State private var textPositionTask: Task<Void, Never>?
     @State private var collapsedTOCEntries: Set<Int> = []
     @State private var sliderProgress = 0.0
-    @State private var isScrubbing = false
+    @State private var previewProgress: Double?
     @State private var saveTask: Task<Void, Never>?
     @AppStorage("epubFontScale") private var fontScale = 1.0
     @AppStorage("epubScroll") private var scroll = false
     @AppStorage("epubPublisherStyles") private var publisherStyles = true
-    @AppStorage("epubTheme") private var theme = "system"
+    @AppStorage("epubTheme") private var theme = "reader"
 
     init(book: Book, chapters: [BookChapter], initialIndex: Int, restoresSavedLocation: Bool,
-         onReadText: @escaping (Int) -> Void) {
+         onReadText: @escaping (Int, Double?, Bool) -> Void) {
         self.onReadText = onReadText
         _model = StateObject(wrappedValue: EPUBReaderModel(book: book, chapters: chapters, initialIndex: initialIndex,
                                                          restoresSavedLocation: restoresSavedLocation))
     }
 
+    private var resolvedReadiumTheme: ReadiumNavigator.Theme {
+        switch theme {
+        case "reader":
+            let style = readingPalette.resolved
+            if style.id == "night" { return .dark }
+            if style.id == "preset2" { return .sepia }
+            return .light
+        case "sepia":
+            return .sepia
+        case "dark":
+            return .dark
+        case "light":
+            return .light
+        default:
+            return colorScheme == .dark ? .dark : .light
+        }
+    }
+
+    private var isDarkChrome: Bool {
+        resolvedReadiumTheme == .dark
+    }
+
+    private var preferredChromeScheme: ColorScheme? {
+        if theme == "system" || (theme == "reader" && readingPalette.linked) { return nil }
+        return isDarkChrome ? .dark : .light
+    }
+
+    private var pageCanvasBackground: SwiftUI.Color {
+        switch resolvedReadiumTheme {
+        case .dark:
+            return SwiftUI.Color(uiColor: ReaderStylePreset.resolve("night").background)
+        case .sepia:
+            return SwiftUI.Color(red: 0.96, green: 0.93, blue: 0.86)
+        default:
+            return SwiftUI.Color(uiColor: theme == "reader" ? readingPalette.resolved.background : .systemBackground)
+        }
+    }
+
     private var preferences: EPUBPreferences {
-        EPUBPreferences(fontSize: fontScale, publisherStyles: publisherStyles, scroll: scroll,
-                        theme: theme == "sepia" ? .sepia : (theme == "dark" || (theme == "system" && colorScheme == .dark) ? .dark : .light))
+        let activeTheme = resolvedReadiumTheme
+        if theme == "reader", !publisherStyles {
+            let preset = readingPalette.resolved
+            return EPUBPreferences(
+                backgroundColor: ReadiumNavigator.Color(uiColor: preset.background),
+                fontSize: fontScale,
+                publisherStyles: publisherStyles,
+                scroll: scroll,
+                textColor: ReadiumNavigator.Color(uiColor: preset.foreground),
+                theme: activeTheme
+            )
+        }
+        return EPUBPreferences(
+            fontSize: fontScale,
+            publisherStyles: publisherStyles,
+            scroll: scroll,
+            theme: activeTheme
+        )
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if model.showsControls { topBar }
+        ZStack {
+            pageCanvasBackground.ignoresSafeArea()
             Group {
                 if let navigator = model.navigator {
+                    // Keep the Readium viewport invariant whether overlay bars
+                    // are shown or hidden so toggling chrome never repaginates
+                    // or clips bottom lines.
                     EPUBNavigatorHost(navigator: navigator)
+                        .ignoresSafeArea(edges: .horizontal)
                 } else if let error = model.errorMessage {
                     VStack(spacing: 16) {
                         Text("无法打开 EPUB").font(.headline)
@@ -285,18 +379,30 @@ struct EPUBReaderView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if model.showsControls, model.navigator != nil { bottomBar }
         }
-        .background(Color(uiColor: .systemBackground))
+        .overlay(alignment: .top) {
+            if model.showsControls {
+                topBar
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if model.showsControls, model.navigator != nil {
+                bottomBar
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: model.showsControls)
+        .preferredColorScheme(preferredChromeScheme)
         .navigationBarHidden(true)
         .readingTabBarHidden()
         .task {
             model.onLocationChanged = { locator, chapter in
-                if !isScrubbing, let progress = locator.locations.totalProgression { sliderProgress = progress }
+                if let progress = locator.locations.totalProgression { sliderProgress = progress }
                 saveTask?.cancel()
                 saveTask = Task {
                     do { try await Task.sleep(nanoseconds: 350_000_000) } catch { return }
-                    await library.updateProgress(for: model.book, chapter: chapter, epubLocation: locator.jsonString)
+                    await library.updateProgress(for: model.book, chapter: chapter, epubLocation: try? locator.jsonString())
                 }
             }
             activity.beginReading(model.book)
@@ -308,6 +414,8 @@ struct EPUBReaderView: View {
             else { activity.beginReading(model.book) }
         }
         .onDisappear {
+            textPositionTask?.cancel()
+            textPositionTask = nil
             guard !showsTOC else { return }
             model.onLocationChanged = nil
             if !switchingToText {
@@ -323,62 +431,166 @@ struct EPUBReaderView: View {
         } message: { Text(model.errorMessage ?? "") }
     }
 
+    private func switchToTextMode(autoStartSpeech: Bool) {
+        guard !switchingToText, textPositionTask == nil else { return }
+        textPositionTask = Task {
+            let position = await model.textReaderPosition()
+            guard !Task.isCancelled else { return }
+            switchingToText = true
+            model.onLocationChanged = nil
+            saveTask?.cancel()
+            onReadText(position.index, position.progression, autoStartSpeech)
+        }
+    }
+
     private var topBar: some View {
-        HStack(spacing: 16) {
-            Button { saveProgress(); dismiss() } label: { Image(systemName: "chevron.left") }
-                .accessibilityLabel("返回书架")
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.book.name).font(.subheadline.weight(.semibold)).lineLimit(1)
-                Text(model.currentChapter?.title ?? model.location?.title ?? "EPUB")
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        HStack(spacing: 10) {
+            ReaderChromeCircleButton(
+                icon: "chevron.backward",
+                label: "返回书架",
+                isNight: isDarkChrome,
+                isEInk: false
+            ) {
+                saveProgress()
+                dismiss()
             }
-            Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.book.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(model.currentChapter?.title ?? model.location?.title ?? "EPUB")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             Menu {
                 Button("添加书签", systemImage: "bookmark") {
                     guard let locator = model.location, let chapter = model.currentChapter else { return }
                     Task {
                         await activity.addBookmark(book: model.book, chapter: chapter, position: 0,
-                                                   content: locator.text.highlight ?? chapter.title, epubLocation: locator.jsonString)
+                                                   content: locator.text.highlight ?? chapter.title, epubLocation: try? locator.jsonString())
                     }
                 }
                 Button("我的书签", systemImage: "bookmark.fill") { showsBookmarks = true }
-                Button(EPUBReadingMode.text.title, systemImage: "speaker.wave.2") {
-                    switchingToText = true
-                    model.onLocationChanged = nil
-                    saveTask?.cancel()
-                    onReadText(model.currentChapter?.index ?? model.initialIndex)
+                Button(EPUBReadingMode.text.title, systemImage: "doc.plaintext") {
+                    switchToTextMode(autoStartSpeech: false)
                 }
-            } label: { Image(systemName: "ellipsis.circle").font(.title3) }
+                Button("从当前位置听书", systemImage: "headphones") {
+                    switchToTextMode(autoStartSpeech: true)
+                }
+            } label: {
+                ReaderChromeCircleIcon(
+                    systemName: "ellipsis",
+                    isNight: isDarkChrome,
+                    isEInk: false,
+                    iconSize: 15
+                )
+            }
+            .buttonStyle(ReaderTactileButtonStyle())
             .accessibilityLabel("EPUB 更多")
-        }.padding(.horizontal, 18).padding(.vertical, 12)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        .padding(.bottom, 8)
+        .background {
+            ReaderFrostedChromeBackground(isNight: isDarkChrome, isEInk: false)
+                .ignoresSafeArea(edges: .top)
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(ReaderChromePalette.hairline).frame(height: 0.5)
+        }
     }
 
     private var bottomBar: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Slider(value: $sliderProgress, in: 0...1) { editing in
-                    isScrubbing = editing
-                    if !editing {
-                        let target = sliderProgress
+        VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Text(model.currentChapter?.title ?? "阅读进度")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text("\(Int(((previewProgress ?? sliderProgress) * 100).rounded()))%")
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.primary.opacity(isDarkChrome ? 0.10 : 0.06), in: Capsule())
+                }
+                .padding(.horizontal, 2)
+
+                HStack(spacing: 8) {
+                    ReaderChromeCircleButton(
+                        icon: "chevron.left",
+                        label: "上一页",
+                        isNight: isDarkChrome,
+                        isEInk: false,
+                        diameter: 34,
+                        iconSize: 13
+                    ) {
+                        Task { _ = await model.navigator?.goBackward() }
+                    }
+                    ReaderSeekSlider(value: sliderProgress, range: 0...1, preview: $previewProgress, label: "阅读进度") { target in
+                        sliderProgress = target
                         Task { await model.go(toProgress: target) }
                     }
-                }.accessibilityLabel("阅读进度")
-                Text("\(Int(sliderProgress * 100))%")
-                    .font(.caption.monospacedDigit()).frame(width: 42)
+                    .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34)
+                    ReaderChromeCircleButton(
+                        icon: "chevron.right",
+                        label: "下一页",
+                        isNight: isDarkChrome,
+                        isEInk: false,
+                        diameter: 34,
+                        iconSize: 13
+                    ) {
+                        Task { _ = await model.navigator?.goForward() }
+                    }
+                }
             }
-            .frame(minHeight: 44)
-            HStack {
-                Button { Task { _ = await model.navigator?.goBackward() } } label: { Image(systemName: "chevron.left") }
-                    .accessibilityLabel("上一页")
-                Spacer()
-                Button("目录", systemImage: "list.bullet") { showsTOC = true }
-                Spacer()
-                Button("排版", systemImage: "textformat.size") { showsSettings = true }
-                Spacer()
-                Button { Task { _ = await model.navigator?.goForward() } } label: { Image(systemName: "chevron.right") }
-                    .accessibilityLabel("下一页")
-            }.font(.subheadline)
-        }.padding(.horizontal, 20).padding(.vertical, 12)
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
+
+            ReaderStyleDivider(inset: 16)
+
+            HStack(spacing: 0) {
+                epubToolbarButton("list.bullet", "目录") { showsTOC = true }
+                epubToolbarButton("headphones", "听书") { switchToTextMode(autoStartSpeech: true) }
+                epubToolbarButton("textformat.size", "排版") { showsSettings = true }
+                epubToolbarButton("bookmark", "书签") { showsBookmarks = true }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+            .padding(.bottom, 10)
+        }
+        .frame(maxWidth: 560)
+        .background {
+            ReaderFrostedChromeBackground(isNight: isDarkChrome, isEInk: false, cornerRadius: 26)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func epubToolbarButton(_ icon: String, _ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundStyle(Color.primary.opacity(0.9))
+                    .frame(height: 28)
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 54)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ReaderTactileButtonStyle())
+        .accessibilityLabel(title)
     }
 
     private var tocSheet: some View {
@@ -429,27 +641,76 @@ struct EPUBReaderView: View {
 
     private var settingsSheet: some View {
         ReadingNavigationStack {
-            Form {
-                Section("阅读方式") {
-                    Toggle("滚动阅读", isOn: $scroll)
-                    Toggle("使用原书排版", isOn: $publisherStyles)
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 14) {
+                    ReaderStyleCard(title: "字号", detail: "\(Int((fontScale * 100).rounded()))%") {
+                        ReaderStyleValueSlider(title: "缩放比例", value: $fontScale, range: 0.7...2.0, step: 0.1) {
+                            "\(Int(($0 * 100).rounded()))%"
+                        }
+                    }
+
+                    ReaderStyleCard(title: "背景主题") {
+                        HStack {
+                            Spacer(minLength: 0)
+                            ReaderStyleSegmentedPill(
+                                options: [
+                                    .init(value: "reader", title: "跟随阅读"),
+                                    .init(value: "system", title: "系统"),
+                                    .init(value: "light", title: "白色"),
+                                    .init(value: "sepia", title: "纸色"),
+                                    .init(value: "dark", title: "夜间")
+                                ],
+                                selectedValue: theme
+                            ) { theme = $0 }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 12)
+                    }
+
+                    ReaderStyleCard(title: "阅读方式") {
+                        HStack(spacing: 12) {
+                            ReaderStyleIconBadge(systemName: "arrow.up.and.down")
+                            Text("滚动阅读").font(.system(size: 14, weight: .medium))
+                            Spacer(minLength: 8)
+                            Toggle("滚动阅读", isOn: $scroll).labelsHidden()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+
+                        ReaderStyleDivider()
+
+                        HStack(spacing: 12) {
+                            ReaderStyleIconBadge(systemName: "doc.richtext")
+                            Text("使用原书排版").font(.system(size: 14, weight: .medium))
+                            Spacer(minLength: 8)
+                            Toggle("使用原书排版", isOn: $publisherStyles).labelsHidden()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                    }
                 }
-                Section("字号") {
-                    Slider(value: $fontScale, in: 0.7...2.0, step: 0.1)
-                    Text("\(Int(fontScale * 100))%")
-                }
-                Section("背景") {
-                    Picker("主题", selection: $theme) {
-                        Text("跟随系统").tag("system")
-                        Text("白色").tag("light")
-                        Text("纸色").tag("sepia")
-                        Text("夜间").tag("dark")
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 28)
+            }
+            .background(ReaderChromePalette.sheetBackground(isEInk: false).ignoresSafeArea())
+            .navigationTitle("EPUB 排版")
+            .navigationBarTitleDisplayMode(.inline)
+            .readerStyleNavigationBar(isEInk: false)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        showsSettings = false
+                    } label: {
+                        Text("完成").font(.system(size: 15, weight: .semibold))
                     }
                 }
             }
-            .navigationTitle("EPUB 排版").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showsSettings = false } } }
         }
+        .readingPresentationDetents([.medium, .large])
+        .readingPresentationDragIndicator()
+        .readerSheetAllowsInlineScrolling()
     }
 
     private var bookmarksSheet: some View {
@@ -477,7 +738,7 @@ struct EPUBReaderView: View {
     private func saveProgress() {
         saveTask?.cancel()
         guard let locator = model.location, let chapter = model.currentChapter else { return }
-        Task { await library.updateProgress(for: model.book, chapter: chapter, epubLocation: locator.jsonString) }
+        Task { await library.updateProgress(for: model.book, chapter: chapter, epubLocation: try? locator.jsonString()) }
     }
 }
 

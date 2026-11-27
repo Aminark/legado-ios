@@ -487,13 +487,150 @@ public struct RuleEngine: Sendable {
         }
         guard let pattern = Self.jsPipelineRegex,
               let match = pattern.firstMatch(in: masked as String, range: NSRange(location: 0, length: masked.length)),
-              let full = Range(match.range, in: rule),
-              let script = Range(match.range(at: match.range(at: 2).location == NSNotFound ? 1 : 2), in: rule) else { return nil }
+              let full = Range(match.range, in: rule) else { return nil }
+        let isInlineAtJS = match.range(at: 2).location != NSNotFound
+        guard let scriptRange = Range(match.range(at: isInlineAtJS ? 2 : 1), in: rule) else { return nil }
+        var scriptText = String(rule[scriptRange])
+        var suffixText = String(rule[full.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if isInlineAtJS, suffixText.isEmpty,
+           let split = splitTrailingReplacementFromJavaScript(scriptText) {
+            scriptText = split.script
+            suffixText = split.replacementSuffix
+        }
         return .init(
             prefix: String(rule[..<full.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines),
-            script: String(rule[script]),
-            suffix: String(rule[full.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            script: scriptText,
+            suffix: suffixText
         )
+    }
+
+    /// Splits a Legado trailing `##regex##replacement` suffix off an `@js:` body
+    /// without touching `##` sequences inside JS string literals, template
+    /// literals, regex literals, or comments.
+    private func splitTrailingReplacementFromJavaScript(_ source: String) -> (script: String, replacementSuffix: String)? {
+        guard source.contains("##") else { return nil }
+
+        enum LexState {
+            case code
+            case singleQuote
+            case doubleQuote
+            case template
+            case regexLiteral(inCharClass: Bool)
+            case lineComment
+            case blockComment
+        }
+
+        var state: LexState = .code
+        var templateBraceDepths: [Int] = []
+        var escaped = false
+        var lastSignificant: Character? = nil
+        var index = source.startIndex
+
+        func allowsRegexStart(after previous: Character?) -> Bool {
+            guard let previous else { return true }
+            return "(=,[!&|?:;{}\n+-*%^~<>".contains(previous)
+        }
+
+        while index < source.endIndex {
+            let ch = source[index]
+            let nextIndex = source.index(after: index)
+            let nextChar: Character? = nextIndex < source.endIndex ? source[nextIndex] : nil
+
+            switch state {
+            case .code:
+                if ch.isLetter || ch == "_" || ch == "$" {
+                    let word = source[index...].prefix { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "$" }
+                    // A slash can begin an expression after these keywords, as in
+                    // `return /##/.test(value)`, but follows a value after an identifier.
+                    let expectsExpression = ["return", "throw", "case", "delete", "typeof", "void",
+                                             "new", "in", "instanceof", "yield", "await", "else", "do"].contains(word)
+                    let isProperty = lastSignificant == "."
+                    lastSignificant = expectsExpression && !isProperty ? nil : word.last
+                    index = word.endIndex
+                    continue
+                }
+                if ch == "#", nextChar == "#", templateBraceDepths.isEmpty {
+                    let body = String(source[..<index])
+                    let suffix = String(source[index...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                    return (body, suffix)
+                }
+                if ch == "'" {
+                    state = .singleQuote
+                } else if ch == "\"" {
+                    state = .doubleQuote
+                } else if ch == "`" {
+                    state = .template
+                } else if ch == "/", nextChar == "/" {
+                    state = .lineComment
+                    index = source.index(after: nextIndex)
+                    continue
+                } else if ch == "/", nextChar == "*" {
+                    state = .blockComment
+                    index = source.index(after: nextIndex)
+                    continue
+                } else if ch == "/", allowsRegexStart(after: lastSignificant) {
+                    state = .regexLiteral(inCharClass: false)
+                } else if ch == "{", !templateBraceDepths.isEmpty {
+                    templateBraceDepths[templateBraceDepths.count - 1] += 1
+                    lastSignificant = ch
+                } else if ch == "}", !templateBraceDepths.isEmpty {
+                    let depth = templateBraceDepths[templateBraceDepths.count - 1] - 1
+                    if depth == 0 {
+                        templateBraceDepths.removeLast()
+                        state = .template
+                    } else {
+                        templateBraceDepths[templateBraceDepths.count - 1] = depth
+                    }
+                    lastSignificant = ch
+                } else if !ch.isWhitespace || ch == "\n" {
+                    lastSignificant = ch
+                }
+
+            case .singleQuote:
+                if escaped { escaped = false }
+                else if ch == "\\" { escaped = true }
+                else if ch == "'" { state = .code; lastSignificant = "'" }
+
+            case .doubleQuote:
+                if escaped { escaped = false }
+                else if ch == "\\" { escaped = true }
+                else if ch == "\"" { state = .code; lastSignificant = "\"" }
+
+            case .template:
+                if escaped { escaped = false }
+                else if ch == "\\" { escaped = true }
+                else if ch == "`" { state = .code; lastSignificant = "`" }
+                else if ch == "$", nextChar == "{" {
+                    templateBraceDepths.append(1)
+                    state = .code
+                    lastSignificant = "{"
+                    index = source.index(after: nextIndex)
+                    continue
+                }
+
+            case .regexLiteral(let inCharClass):
+                if escaped { escaped = false }
+                else if ch == "\\" { escaped = true }
+                else if ch == "[", !inCharClass { state = .regexLiteral(inCharClass: true) }
+                else if ch == "]", inCharClass { state = .regexLiteral(inCharClass: false) }
+                else if ch == "/", !inCharClass { state = .code; lastSignificant = "/" }
+                else if ch == "\n" { state = .code; lastSignificant = "\n" }
+
+            case .lineComment:
+                if ch == "\n" { state = .code; lastSignificant = "\n" }
+
+            case .blockComment:
+                if ch == "*", nextChar == "/" {
+                    state = .code
+                    index = source.index(after: nextIndex)
+                    continue
+                }
+            }
+
+            index = nextIndex
+        }
+        return nil
     }
 
     private func extractPutRules(_ source: String) throws -> (rule: String, puts: [String: String]) {

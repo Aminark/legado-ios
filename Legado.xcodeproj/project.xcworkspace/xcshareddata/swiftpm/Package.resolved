@@ -1,13 +1,13 @@
 {
-  "originHash" : "678846a6905066bb177ce0582044239c8ad45c45f9c81b4be5034fb41a1332b2",
+  "originHash" : "7ef0cdac1a0455c695bd2b9b0539fb55f9dd52fbef4157cf025ae6aa97467288",
   "pins" : [
     {
       "identity" : "cryptoswift",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/krzyzanowskim/CryptoSwift.git",
       "state" : {
-        "revision" : "db51c407d3be4a051484a141bf0bff36c43d3b1e",
-        "version" : "1.8.0"
+        "revision" : "f2a627b84c1ff96f21ac2fcb623ab36142dd5512",
+        "version" : "1.10.0"
       }
     },
     {
@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/readium/swift-toolkit.git",
       "state" : {
-        "revision" : "f7d10d2bf5876408feae14d634416f69d1473fd8",
-        "version" : "3.8.0"
+        "revision" : "9a8c094b72245fd27043c9d298005e5c78b32a01",
+        "version" : "3.11.1"
       }
     },
     {

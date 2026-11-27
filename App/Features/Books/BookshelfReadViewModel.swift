@@ -26,17 +26,21 @@ final class BookshelfReadViewModel: ObservableObject {
         defer { isLoading = false }
         if book.origin == "local" {
             do {
-                let report = try await Task.detached { [localService] in
+                let parsing = Task.detached { [localService] in
                     try localService.loadChapters(book: book)
-                }.value
+                }
+                let report = try await withTaskCancellationHandler { try await parsing.value } onCancel: { parsing.cancel() }
+                guard !Task.isCancelled else { return }
                 chapters = report.chapters
                 resolvedBook = book
             } catch {
+                guard !Task.isCancelled else { return }
                 errorMessage = error.localizedDescription
             }
             return
         }
         let stored = await updateCoordinator.storedChapters(bookURL: book.bookUrl)
+        guard !Task.isCancelled else { return }
         if let restored = Self.restoredBook(book, chapters: stored) {
             chapters = stored
             resolvedBook = restored
@@ -47,6 +51,7 @@ final class BookshelfReadViewModel: ObservableObject {
             return
         }
         let report = await updateCoordinator.refresh(book: book, source: source, persistDirectory: commitUpdate == nil)
+        guard !Task.isCancelled else { return }
         if report.refreshed, Self.matchesReadingProgress(report.book, chapters: report.chapters) {
             if let commitUpdate, !(await commitUpdate(report)) {
                 errorMessage = "更新后的书籍保存失败，已保留原书籍和阅读位置。"

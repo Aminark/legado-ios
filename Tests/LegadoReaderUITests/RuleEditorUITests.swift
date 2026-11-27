@@ -31,7 +31,30 @@ final class RuleEditorUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["船家的动作正好呼应了第一章。"].exists)
     }
 
-    private func openSearchFixtureBook(pageAnimation: String) throws -> XCUIApplication {
+    func testCachedOnlineBookResumesFromBookshelf() throws {
+        let app = try openSearchFixtureBook(pageAnimation: "0", addToShelf: true)
+        let body = app.textViews["reader.text"]
+        XCTAssertTrue(body.waitForExistence(timeout: 15))
+        body.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["下一章"].tap()
+        let secondChapter = NSPredicate { _, _ in
+            body.exists && (body.value as? String)?.contains("船家在渡口拾到了那枚铜钱。") == true
+        }
+        wait(for: [expectation(for: secondChapter, evaluatedWith: nil)], timeout: 15)
+        body.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["返回"].tap()
+        XCTAssertTrue(app.navigationBars["书籍详情"].waitForExistence(timeout: 10))
+
+        app.terminate()
+        app.launchArguments = ["-defaultHomePage", "bookshelf", "-pageAnim", "0"]
+        app.launch()
+        let resume = app.buttons["bookshelf.continue"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 15))
+        resume.tap()
+        wait(for: [expectation(for: secondChapter, evaluatedWith: nil)], timeout: 10)
+    }
+
+    private func openSearchFixtureBook(pageAnimation: String, addToShelf: Bool = false) throws -> XCUIApplication {
         guard let fixture = ProcessInfo.processInfo.environment["LEGADO_SEARCH_FLOW_FIXTURE_URL"] else {
             throw XCTSkip("Use LegadoSearchFlowUITests with scripts/fixtures/search-flow-server.py")
         }
@@ -82,6 +105,10 @@ final class RuleEditorUITests: XCTestCase {
         XCTAssertTrue(second.waitForExistence(timeout: 20))
         second.tap()
         XCTAssertTrue(app.buttons["开始阅读"].waitForExistence(timeout: 15))
+        if addToShelf {
+            app.buttons["加入书架"].tap()
+            XCTAssertTrue(app.buttons["已在书架"].waitForExistence(timeout: 10))
+        }
         app.buttons["开始阅读"].tap()
         return app
     }

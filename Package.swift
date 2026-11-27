@@ -45,10 +45,10 @@ let package = Package(
                 "Sources/SourceManagementView.swift", "Sources/SourceDebugView.swift", "Sources/SourceLoginView.swift", "Sources/SourceEditorView.swift",
                 "Rules/ReplaceRuleManagementView.swift", "Rules/ReplaceRuleEditorView.swift", "Rules/RuleSubscriptionView.swift", "Rules/TxtTocRuleManagementView.swift", "Rules/Editor",
                 "Books/BookDetailView.swift", "Books/LocalBookDetailView.swift", "Books/SourceSwitchView.swift",
-                "Reader/ReaderAppearance.swift", "Reader/ReaderSpeechController.swift", "Reader/ReaderSupport.swift",
+                "Reader/ReaderAppearance.swift", "Reader/ReaderSpeechController.swift", "Reader/OfflineSpeechSynthesizer.swift", "Reader/EdgeSpeechSynthesizer.swift", "Reader/ReaderSupport.swift",
                 "Reader/ReaderInlineMedia.swift", "Reader/ReaderVolumeInput.swift",
                 "Sources/SourceCredentialsForm.swift", "Sources/SourceInteractionSession.swift",
-                "Reader/ReaderComicView.swift", "Reader/EPUBReaderView.swift", "Reader/EPUBIllustrationsView.swift", "Reader/ReaderTextView.swift", "Reader/ReaderScrollView.swift", "Reader/ReaderView.swift"
+                "Reader/ReaderComicView.swift", "Reader/EPUBReaderView.swift", "Reader/EPUBIllustrationsView.swift", "Reader/ReaderTextView.swift", "Reader/ReaderPageTurn.swift", "Reader/ReaderScrollView.swift", "Reader/ReaderView.swift", "Reader/ReaderPresentationStages.swift"
             ],
             sources: [
                 "Activity/ReadingActivityModel.swift", "RSS/RSSLibraryModel.swift",

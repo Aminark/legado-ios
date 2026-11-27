@@ -34,12 +34,173 @@ final class SourceImportFile: @unchecked Sendable {
     }
 }
 
+enum SourceSortKey: String, CaseIterable, Sendable {
+    case manual
+    case weight
+    case name
+    case url
+    case update
+    case respond
+    case enabled
+
+    init(storedValue: String) {
+        self = SourceSortKey(rawValue: storedValue) ?? .manual
+    }
+}
+
+/// Precomputed read-only projection of the source catalog so large lists
+/// (thousands of book sources) filter, sort, group, and render without
+/// scanning or diffing full `BookSource` rule payloads inside SwiftUI `body`.
+struct SourceCatalogIndex: Sendable {
+    struct Entry: Identifiable, Hashable, Sendable {
+        let id: String
+        let name: String
+        let url: String
+        let subtitle: String
+        let enabled: Bool
+        let enabledExplore: Bool
+        let groups: [String]
+        let weight: Int
+        let lastUpdateTime: Int64
+        let respondTime: Int64
+        let customOrder: Int
+        fileprivate let foldedName: String
+        fileprivate let foldedURL: String
+        fileprivate let foldedGroups: [String]
+
+        init(source: BookSource) {
+            let parsedGroups = source.groups
+            id = source.id
+            name = source.bookSourceName
+            url = source.bookSourceUrl
+            subtitle = parsedGroups.isEmpty
+                ? (URL(string: source.bookSourceUrl)?.host ?? source.bookSourceUrl)
+                : parsedGroups.joined(separator: " · ")
+            enabled = source.enabled
+            enabledExplore = source.enabledExplore
+            groups = parsedGroups
+            weight = source.weight
+            lastUpdateTime = source.lastUpdateTime
+            respondTime = source.respondTime
+            customOrder = source.customOrder
+            foldedName = Self.fold(source.bookSourceName)
+            foldedURL = Self.fold(source.bookSourceUrl)
+            foldedGroups = parsedGroups.map(Self.fold)
+        }
+
+        fileprivate static func fold(_ text: String) -> String {
+            text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        }
+
+        fileprivate func matches(foldedQuery: String) -> Bool {
+            foldedName.contains(foldedQuery)
+                || foldedURL.contains(foldedQuery)
+                || foldedGroups.contains(where: { $0.contains(foldedQuery) })
+        }
+    }
+
+    let entries: [Entry]
+    let enabledCount: Int
+    let groups: [String]
+    let groupCounts: [String: Int]
+    let ungroupedCount: Int
+    let entriesByGroup: [String: [Entry]]
+    let ungroupedEntries: [Entry]
+    let sourcesByID: [String: BookSource]
+
+    init(sources: [BookSource] = []) {
+        var projected: [Entry] = []
+        projected.reserveCapacity(sources.count)
+        var byID: [String: BookSource] = [:]
+        byID.reserveCapacity(sources.count)
+        var grouped: [String: [Entry]] = [:]
+        var ungrouped: [Entry] = []
+        var counts: [String: Int] = [:]
+        var active = 0
+
+        for source in sources {
+            let entry = Entry(source: source)
+            projected.append(entry)
+            byID[source.id] = source
+            if source.enabled { active += 1 }
+            if entry.groups.isEmpty {
+                ungrouped.append(entry)
+            } else {
+                for group in entry.groups {
+                    counts[group, default: 0] += 1
+                    grouped[group, default: []].append(entry)
+                }
+            }
+        }
+
+        self.entries = projected
+        self.enabledCount = active
+        self.groupCounts = counts
+        self.groups = counts.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        self.ungroupedCount = ungrouped.count
+        self.entriesByGroup = grouped
+        self.ungroupedEntries = ungrouped
+        self.sourcesByID = byID
+    }
+
+    func entries(inGroup group: String?) -> [Entry] {
+        guard let group else { return entries }
+        return group.isEmpty ? ungroupedEntries : (entriesByGroup[group] ?? [])
+    }
+
+    func query(
+        group: String?,
+        searchText: String,
+        sort: SourceSortKey,
+        descending: Bool
+    ) -> [Entry] {
+        let bucket = entries(inGroup: group)
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let matched: [Entry]
+        if trimmed.isEmpty {
+            matched = bucket
+        } else {
+            let folded = Entry.fold(trimmed)
+            matched = bucket.filter { $0.matches(foldedQuery: folded) }
+        }
+        guard sort != .manual else { return matched }
+        return matched.sorted { lhs, rhs in
+            descending ? Self.isOrdered(rhs, before: lhs, by: sort) : Self.isOrdered(lhs, before: rhs, by: sort)
+        }
+    }
+
+    private static func isOrdered(_ lhs: Entry, before rhs: Entry, by sort: SourceSortKey) -> Bool {
+        switch sort {
+        case .weight:
+            lhs.weight == rhs.weight
+                ? lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+                : lhs.weight < rhs.weight
+        case .name:
+            lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        case .url:
+            lhs.url.localizedStandardCompare(rhs.url) == .orderedAscending
+        case .update:
+            lhs.lastUpdateTime == rhs.lastUpdateTime ? lhs.name < rhs.name : lhs.lastUpdateTime > rhs.lastUpdateTime
+        case .respond:
+            lhs.respondTime == rhs.respondTime ? lhs.name < rhs.name : lhs.respondTime < rhs.respondTime
+        case .enabled:
+            lhs.enabled == rhs.enabled ? lhs.name < rhs.name : lhs.enabled && !rhs.enabled
+        case .manual:
+            lhs.customOrder < rhs.customOrder
+        }
+    }
+}
+
 @MainActor
 final class SourceLibraryModel: ObservableObject {
-    @Published private(set) var sources: [BookSource] = []
+    @Published private(set) var sources: [BookSource] = [] {
+        didSet { rebuildCatalogIndex() }
+    }
     @Published private(set) var isWorking = false
     @Published var notice: Notice?
     @Published var pendingImport: PendingImport?
+    private(set) var catalogIndex = SourceCatalogIndex()
+    private(set) var catalogRevision = 0
 
     struct PendingImport: Identifiable, Sendable {
         struct Item: Identifiable, Sendable {
@@ -84,8 +245,19 @@ final class SourceLibraryModel: ObservableObject {
     private var saveGeneration = 0
     private var persistedSources: [BookSource] = []
 
-    var groups: [String] {
-        Array(Set(sources.flatMap(\.groups))).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    var groups: [String] { catalogIndex.groups }
+    var groupCounts: [String: Int] { catalogIndex.groupCounts }
+    var enabledCount: Int { catalogIndex.enabledCount }
+
+    func source(id: String) -> BookSource? { catalogIndex.sourcesByID[id] }
+
+    func entries(inGroup group: String) -> [SourceCatalogIndex.Entry] {
+        catalogIndex.entries(inGroup: group)
+    }
+
+    private func rebuildCatalogIndex() {
+        catalogIndex = SourceCatalogIndex(sources: sources)
+        catalogRevision &+= 1
     }
 
     init(repository: any BookSourceRepository, importTransport: any HTTPTransport = URLSessionHTTPTransport.shared) {

@@ -10,6 +10,7 @@ struct ReadingStatisticsView: View {
 
     @EnvironmentObject private var activity: ReadingActivityModel
     @ScaledMetric(relativeTo: .largeTitle) private var durationFontSize = 42
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.sizeCategory) private var sizeCategory
 
     var body: some View {
@@ -18,7 +19,7 @@ struct ReadingStatisticsView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     header
-                    todayCard(stats)
+                    todayCard(stats, width: min(640, geometry.size.width - 40))
                     overviewGrid(stats)
                     weeklyCard(stats, chartHeight: max(96, min(148, geometry.size.height - 650)))
                     historyLink
@@ -48,7 +49,7 @@ struct ReadingStatisticsView: View {
         .padding(.bottom, 8)
     }
 
-    private func todayCard(_ stats: ReadingStatistics) -> some View {
+    private func todayCard(_ stats: ReadingStatistics, width: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text("今日阅读")
@@ -57,7 +58,7 @@ struct ReadingStatisticsView: View {
                 Spacer()
                 Text(Date.now.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day()))
                     .font(.caption)
-                    .foregroundStyle(ReadingTheme.onAccent.opacity(0.75))
+                    .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
             }
             Text(duration(stats.todayReadTime, compact: false))
                 .font(.system(size: durationFontSize, weight: .semibold))
@@ -65,32 +66,48 @@ struct ReadingStatisticsView: View {
                 .readingNumericTransition()
                 .minimumScaleFactor(0.6)
                 .lineLimit(1)
+                .shadow(color: .black.opacity(0.7), radius: 2, y: 1)
             Text(stats.todayReadTime == 0 ? "今天还没有阅读记录" : "已记录今天的阅读时长")
                 .font(.caption)
-                .foregroundStyle(ReadingTheme.onAccent.opacity(0.7))
+                .foregroundStyle(ReadingTheme.onAccent.opacity(0.95))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(22)
-        .background(alignment: .bottomTrailing) {
-            Image("StatisticsBookArtwork")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 156, height: 106)
-                .opacity(0.48)
-                .padding(.trailing, 10)
-                .accessibilityHidden(true)
-        }
-        .background {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(LinearGradient(
-                    colors: [ReadingTheme.emphasisSurface, Color(white: 0.19), ReadingTheme.emphasisSurface],
-                    startPoint: .bottomLeading,
-                    endPoint: .topTrailing
-                ))
-        }
+        .frame(minHeight: max(0, width / 3.2), alignment: .topLeading)
+        .background { todayCardBackground }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("statistics.todayCard")
+    }
+
+    private var todayCardBackground: some View {
+        GeometryReader { geometry in
+            Image(decorative: "StatisticsBookArtwork")
+                .resizable()
+                .scaledToFill()
+                .frame(width: geometry.size.width, height: geometry.size.height, alignment: .bottomTrailing)
+        }
+        .overlay {
+            LinearGradient(
+                stops: [
+                    .init(color: .black.opacity(0.22), location: 0),
+                    .init(color: .black.opacity(0.31), location: 0.42),
+                    .init(color: .clear, location: 0.65)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        }
+        .overlay {
+            if colorScheme == .dark {
+                LinearGradient(
+                    colors: [.black.opacity(0.64), .black.opacity(0.32)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+        }
+        .accessibilityHidden(true)
     }
 
     private func overviewGrid(_ stats: ReadingStatistics) -> some View {

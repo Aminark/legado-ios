@@ -227,6 +227,34 @@ final class DarkModeUITests: XCTestCase {
         attach(app, name: "Readable photo error on black canvas")
     }
 
+    func testReaderToolbarContrastWhenAppAndBookUseDifferentAppearances() throws {
+        continueAfterFailure = false
+        for (appTheme, bookTheme) in [("1", "night"), ("2", "preset1")] {
+            let app = launch(["-uiDemoReader", "-uiDemoReaderMenu", "-defaultHomePage", "bookshelf",
+                              "-themeMode", appTheme, "-readerTheme", bookTheme, "-linkReadingAppearance", "NO",
+                              "-readerUseBackgroundImage", "NO"])
+            XCTAssertTrue(app.buttons["目录"].waitForExistence(timeout: 15))
+            for title in ["目录", "朗读", "外观", "设置", "下一章"] {
+                let values = try luminances(app.buttons[title], in: app)
+                let low = values[values.count * 2 / 100]
+                let high = values[values.count * 98 / 100]
+                XCTAssertGreaterThanOrEqual((high + 0.05) / (low + 0.05), 4.5, "\(bookTheme) · \(title)")
+                let background = values[values.count / 2]
+                if bookTheme == "night" {
+                    XCTAssertLessThan(background, 0.15, title)
+                } else {
+                    XCTAssertGreaterThan(background, 0.6, title)
+                }
+            }
+            attach(app, name: "Reader toolbar \(bookTheme) with app theme \(appTheme)")
+            app.buttons["返回"].tap()
+            XCTAssertTrue(app.tabBars.buttons["书架"].waitForExistence(timeout: 5))
+            let shelf = try luminances(app, in: app)
+            XCTAssertEqual(shelf[shelf.count / 2] < 0.15, appTheme == "2", "Bookshelf should restore the app appearance")
+            app.terminate()
+        }
+    }
+
     func testNightReaderMenusAndSettings() throws {
         continueAfterFailure = false
         let app = launch(["-uiDemoReader", "-uiDemoReaderMenu", "-readerTheme", "night", "-themeMode", "2", "-readerUseBackgroundImage", "NO"])

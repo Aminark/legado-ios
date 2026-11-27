@@ -176,7 +176,7 @@ final class ReaderViewModel: ObservableObject {
 
     func bookmarks(at position: Int, in bookmarks: [Bookmark], pageRange: NSRange? = nil) -> [Bookmark] {
         bookmarks.filter { bookmark in
-            guard bookmark.bookName == book.name, bookmark.bookAuthor == book.author,
+            guard bookmark.epubLocation == nil, bookmark.bookName == book.name, bookmark.bookAuthor == book.author,
                   bookmark.resolvedChapterIndex(in: chapters) == currentIndex else { return false }
             if bookmark.chapterPosition == max(position, 0) { return true }
             if let pageRange, pageRange.length > 0 {
@@ -387,15 +387,28 @@ final class ReaderViewModel: ObservableObject {
         pendingSourceContent = report.verifiedContent
     }
 
-    static func cachedOpening(book: Book, chapters: [BookChapter], source: BookSource, rules: [ReplaceRule],
+    static func cachedOpening(book: Book, chapters: [BookChapter], source: BookSource?, rules: [ReplaceRule],
                               reusing prepared: ReaderViewModel? = nil, speculative: Bool = false) async -> ReaderViewModel {
-        if let prepared, prepared.canResumePrepared(book: book, chapters: chapters, source: source, rules: rules) {
+        if let source, let prepared, prepared.canResumePrepared(book: book, chapters: chapters, source: source, rules: rules) {
             return prepared
         }
         let index = min(max(book.durChapterIndex, 0), max(chapters.count - 1, 0))
-        let reader = ReaderViewModel(book: book, chapters: chapters, initialIndex: index, source: source)
-        await reader.prepareCachedOpening(rules: rules, speculative: speculative)
+        let reader: ReaderViewModel
+        if let source {
+            reader = ReaderViewModel(book: book, chapters: chapters, initialIndex: index, source: source)
+            await reader.prepareCachedOpening(rules: rules, speculative: speculative)
+        } else {
+            reader = ReaderViewModel(book: book, chapters: chapters, initialIndex: index)
+        }
+        // The footer needs chapter numbers on its first frame, even with the contents list closed.
+        if !Task.isCancelled, !speculative || reader.hasLoadedCurrentChapter {
+            reader.directory = await openingDirectory(chapters)
+        }
         return reader
+    }
+
+    private nonisolated static func openingDirectory(_ chapters: [BookChapter]) async -> ReaderChapterDirectory {
+        ReaderChapterDirectory(chapters)
     }
 
     func canResumePrepared(book: Book, chapters: [BookChapter], source: BookSource, rules: [ReplaceRule]) -> Bool {
@@ -820,7 +833,21 @@ final class ReaderViewModel: ObservableObject {
         paragraphs.last(where: { $0.id <= position })?.id ?? paragraphs.first?.id
     }
 
-    private func navigationIndex(direction: Int) -> Int? {
+    /// Peeking across a boundary can be cancelled. Reuse prepared online text
+    /// or read a local chapter without starting a source request or running dynamic rules.
+    func pageTurnPreview(at index: Int) async -> ReaderScrollChapter? {
+        guard chapters.indices.contains(index), canReuseProcessedContent else { return nil }
+        let chapter = chapters[index]
+        if let prepared = preparedContent(for: chapter) {
+            return .init(id: index, title: prepared.body.title, content: prepared.body.content)
+        }
+        guard source == nil else { return nil }
+        let preview = await loadAdjacentChapter(chapter, rules: readingRules)
+        guard !Task.isCancelled, preview.error == nil, !preview.content.isEmpty else { return nil }
+        return .init(id: index, title: preview.title, content: preview.content)
+    }
+
+    func navigationIndex(direction: Int) -> Int? {
         readableIndex(from: currentIndex, direction: direction)
     }
 

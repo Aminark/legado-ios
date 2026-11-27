@@ -39,10 +39,15 @@ final class EPUBReaderIntegrationTests: XCTestCase {
         let locator = try XCTUnwrap(model.location)
         XCTAssertEqual(EPUBReaderModel.path(locator.href.string), "Text/chapter.xhtml")
         var saved = report.book
-        saved.readConfig?.epubLocation = locator.jsonString
+        var readConfig = saved.readConfig ?? BookReadConfig()
+        readConfig.epubLocation = try locator.jsonString()
+        saved.readConfig = readConfig
         saved.durChapterIndex = try XCTUnwrap(model.currentChapter).index
         await model.go(toProgress: 0)
         try await waitForLocation("cover.xhtml", in: model)
+        await model.go(toProgress: 1)
+        try await waitForLocation("Text/chapter.xhtml", in: model)
+        try await waitForJavaScript("!!document.querySelector('#note')", in: navigator)
         let restored = EPUBReaderModel(book: saved, chapters: report.chapters, initialIndex: saved.durChapterIndex)
         await restored.open(preferences: .init(fontSize: 1.4, publisherStyles: true))
         let reopened = try XCTUnwrap(restored.navigator)
@@ -81,6 +86,9 @@ final class EPUBReaderIntegrationTests: XCTestCase {
             })()
             """, in: navigator)
         XCTAssertEqual(model.currentChapter?.startFragmentId, "note")
+        let textPosition = await model.textReaderPosition()
+        XCTAssertEqual(textPosition.index, model.currentChapter?.index)
+        XCTAssertEqual(textPosition.progression ?? -1, 0, accuracy: 0.001)
         for _ in 0..<50 {
             if (model.location?.locations.progression ?? 0) > 0 { break }
             try await Task.sleep(nanoseconds: 100_000_000)

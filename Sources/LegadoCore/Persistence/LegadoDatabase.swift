@@ -641,6 +641,37 @@ public actor LegadoDatabase {
     }
 
     public func loadHttpTTS() throws -> [HttpTTS] { try load("SELECT payload FROM httpTTS ORDER BY name", as: HttpTTS.self) }
+
+    public func loadHttpTTS(retiring presets: [HttpTTS]) throws -> [HttpTTS] {
+        func matchesUnmodifiedPreset(_ engine: HttpTTS) -> Bool {
+            guard var preset = presets.first(where: { $0.id == engine.id }) else { return false }
+            preset.lastUpdateTime = engine.lastUpdateTime
+            if preset.loginUi != engine.loginUi,
+               let original = preset.loginUi, let stored = engine.loginUi,
+               let originalForm = try? JSONValue.decode(data: Data(original.utf8)),
+               originalForm == (try? JSONValue.decode(data: Data(stored.utf8))) {
+                preset.loginUi = engine.loginUi
+            }
+            return preset == engine
+        }
+
+        var active: [HttpTTS] = []
+        try transaction {
+            let statement = try prepare("DELETE FROM httpTTS WHERE id = ?")
+            defer { sqlite3_finalize(statement) }
+            for engine in try loadHttpTTS() {
+                if engine.isRetiredNextEngine || matchesUnmodifiedPreset(engine) {
+                    sqlite3_reset(statement)
+                    sqlite3_bind_int64(statement, 1, engine.id)
+                    try stepDone(statement)
+                } else {
+                    active.append(engine)
+                }
+            }
+        }
+        return active
+    }
+
     public func replaceHttpTTS(_ values: [HttpTTS]) throws {
         try replaceAll(
             deleteSQL: "DELETE FROM httpTTS",

@@ -340,6 +340,81 @@ final class ReaderScrollGestureTests: XCTestCase {
         app.buttons["书签列表"].tap()
         XCTAssertTrue(app.navigationBars["书签"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["第一章 · 雨夜"].firstMatch.exists)
+        app.buttons["关闭"].tap()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        bookmark.tap()
+        waitForBookmarkValue("添加当前位置", on: bookmark)
+        app.buttons["更多"].tap()
+        app.buttons["书签列表"].tap()
+        XCTAssertTrue(app.staticTexts["本书还没有书签"].waitForExistence(timeout: 5))
+    }
+
+    func testRemovingMultipleBookmarksOnOnePageCanBeCancelled() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiDemoReaderMenu", "-defaultHomePage", "bookshelf",
+                               "-pageAnim", "0", "-textSize", "12", "-lineSpacingExtra", "0", "-paragraphSpacing", "0"]
+        app.launch()
+        let bookmark = app.buttons["书签"]
+        XCTAssertTrue(bookmark.waitForExistence(timeout: 10))
+        XCTAssertEqual(bookmark.value as? String, "已添加")
+        bookmark.tap()
+        let remove = app.buttons["移除这些书签"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        app.buttons["取消"].tap()
+        XCTAssertEqual(bookmark.value as? String, "已添加")
+        bookmark.tap()
+        remove.tap()
+        waitForBookmarkValue("添加当前位置", on: bookmark)
+    }
+
+    func testBookmarkOpensAtSamePageAndHeightAsBookshelf() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-defaultHomePage", "bookshelf", "-pageAnim", "0",
+                               "-tipFooterRight", "4", "-textSize", "20"]
+        app.launch()
+        app.buttons["更多"].firstMatch.tap()
+        app.buttons["本地书"].tap()
+        openImportFixtureFolder(in: app)
+        let file = app.collectionViews["File View"].cells.matching(NSPredicate(format: "label BEGINSWITH %@", "TXT-Paging")).firstMatch
+        file.tap()
+        app.buttons.matching(NSPredicate(format: "label IN %@", ["Open", "打开", "Import", "导入"])).firstMatch.tap()
+        app.navigationBars["导入本地书"].buttons["导入"].tap()
+        let book = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "TXT-Paging")).firstMatch
+        XCTAssertTrue(book.waitForExistence(timeout: 10))
+        book.tap()
+        let body = app.textViews["reader.text"]
+        XCTAssertTrue(body.waitForExistence(timeout: 10))
+        body.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)).tap()
+        let secondPage = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "2/[0-9]+")).firstMatch
+        XCTAssertTrue(secondPage.waitForExistence(timeout: 5))
+        let shelfTop = body.frame.minY
+        let center = CGVector(dx: 0.5, dy: 0.5)
+        body.coordinate(withNormalizedOffset: center).tap()
+        let bookmark = app.buttons["书签"]
+        bookmark.tap()
+        app.buttons["返回"].tap()
+        app.tabBars.buttons["我的"].tap()
+        app.buttons["profile.bookmark"].tap()
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "通向岸边的小路")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        row.tap()
+        XCTAssertTrue(secondPage.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.navigationBars.firstMatch.exists)
+        XCTAssertEqual(body.frame.minY, shelfTop, accuracy: 1)
+        body.coordinate(withNormalizedOffset: center).tap()
+        XCTAssertEqual(bookmark.value as? String, "已添加")
+        bookmark.tap()
+        waitForBookmarkValue("添加当前位置", on: bookmark)
+        app.buttons["返回"].tap()
+        XCTAssertTrue(app.navigationBars["书签"].waitForExistence(timeout: 5))
+        XCTAssertFalse(row.exists)
+    }
+
+    private func waitForBookmarkValue(_ value: String, on button: XCUIElement) {
+        expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: button)
+        waitForExpectations(timeout: 5)
     }
 
     private func launchAppearance(readingMode: String = "0", usesLegacyUI: Bool = false) -> XCUIApplication {
@@ -407,6 +482,64 @@ final class ReaderScrollGestureTests: XCTestCase {
 
     func testLargeFontPagedReadingKeepsWholeLinesWhenTurningPages() throws {
         try exercisePagedReading(mode: "0", fontSize: "40")
+    }
+
+    func testAnimatedPageDragsCanCancelAndTurnInBothDirections() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        for mode in ["0", "1", "2"] {
+            app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiScrollRegression", "-pageAnim", mode,
+                                   "-themeMode", "1", "-tipFooterRight", "4", "-textSize", "28"]
+            app.launch()
+            let body = app.textViews["reader.text"]
+            XCTAssertTrue(body.waitForExistence(timeout: 10))
+            let page = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+/[0-9]+")).firstMatch
+            func waitForPage(_ number: Int) {
+                let predicate = NSPredicate(format: "label BEGINSWITH %@", "\(number)/")
+                expectation(for: predicate, evaluatedWith: page)
+                waitForExpectations(timeout: 5)
+            }
+            waitForPage(1)
+            let start = body.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.78))
+            let short = body.coordinate(withNormalizedOffset: CGVector(dx: 0.72, dy: 0.76))
+            let across = body.coordinate(withNormalizedOffset: CGVector(dx: 0.30, dy: 0.65))
+            start.press(forDuration: 0.12, thenDragTo: short, withVelocity: .slow, thenHoldForDuration: 0.3)
+            waitForPage(1)
+            start.press(forDuration: 0.12, thenDragTo: across, withVelocity: .slow, thenHoldForDuration: 0.6)
+            waitForPage(2)
+            body.swipeRight()
+            waitForPage(1)
+            app.terminate()
+        }
+    }
+
+    func testCurlDragOpensAdjacentChaptersAtTheirFirstAndLastPages() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiScrollRegression", "-pageAnim", "2",
+                               "-themeMode", "1", "-titleMode", "0", "-tipFooterRight", "4", "-textSize", "28"]
+        app.launch()
+        let body = app.textViews["reader.text"]
+        XCTAssertTrue(body.waitForExistence(timeout: 15))
+        let footer = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+/[0-9]+")).firstMatch
+        func waitForPage(_ number: Int) {
+            expectation(for: NSPredicate(format: "label BEGINSWITH %@", "\(number)/"), evaluatedWith: footer)
+            waitForExpectations(timeout: 5)
+        }
+        waitForPage(1)
+        let initialChapter = try XCTUnwrap(body.value as? String)
+        let last = try XCTUnwrap(footer.label.split(separator: "/").last.flatMap { Int($0) })
+        XCTAssertGreaterThan(last, 1)
+        for number in 2...last {
+            body.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+            waitForPage(number)
+        }
+        body.swipeLeft()
+        waitForPage(1)
+        XCTAssertNotEqual(body.value as? String, initialChapter)
+        body.swipeRight()
+        waitForPage(last)
+        XCTAssertEqual(body.value as? String, initialChapter)
     }
 
     func testCoverTapAcrossChapterBoundaryShowsHeadingOnFirstPage() throws {
@@ -534,6 +667,30 @@ final class ReaderScrollGestureTests: XCTestCase {
         XCTAssertTrue(slider.isHittable)
         XCTAssertFalse(app.buttons["reader.returnToPosition"].exists)
         attachScreenshot(app)
+    }
+
+    func testDraggingChapterSliderLoadsTheReleasedChapterInBothReadingModes() {
+        continueAfterFailure = false
+        for mode in ["0", "3"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-uiDemo", "-uiDemoReader", "-uiDemoReaderMenu", "-pageAnim", mode, "-themeMode", "1"]
+            app.launch()
+            let slider = app.sliders["reader.chapterSlider"]
+            XCTAssertTrue(slider.waitForExistence(timeout: 15))
+            let reader = mode == "3" ? app.collectionViews["reader.continuous"] : app.textViews["reader.text"]
+            func drag(from start: CGFloat, to end: CGFloat, chapter: Int, title: String) {
+                let thumb = slider.coordinate(withNormalizedOffset: CGVector(dx: start, dy: 0.5))
+                let target = slider.coordinate(withNormalizedOffset: CGVector(dx: end, dy: 0.5))
+                thumb.press(forDuration: 0.1, thenDragTo: target, withVelocity: .slow, thenHoldForDuration: 0)
+                let expected = mode == "3" ? "chapter=\(chapter - 1) " : title
+                let loaded = expectation(for: NSPredicate(format: "value CONTAINS %@", expected), evaluatedWith: reader)
+                wait(for: [loaded], timeout: 10)
+            }
+            drag(from: 0.05, to: 0.5, chapter: 3, title: "第三章 · 潮声")
+            drag(from: 0.5, to: 0.05, chapter: 1, title: "第一章 · 雨夜")
+            drag(from: 0.75, to: 0.98, chapter: 5, title: "第五章 · 天明")
+            app.terminate()
+        }
     }
 
     func testPagedReadingChapterNavigationDirectorySearchAndSettings() throws {

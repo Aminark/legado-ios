@@ -34,6 +34,7 @@ struct OtherSettingsView: View {
             }
             Section("书库") {
                 NavigationLink("本机书库备份") { LocalBackupView() }
+                NavigationLink("WebDAV 云备份") { WebDAVBackupView() }
                 NavigationLink("导入阅读备份") { AndroidLibraryImportView() }
                 NavigationLink("整书离线") { OfflineBooksView() }
             }

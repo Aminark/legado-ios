@@ -142,6 +142,26 @@ public struct LocalBookService: Sendable {
         url.isFileURL && ["txt", "epub"].contains(url.pathExtension.lowercased())
     }
 
+    /// Resolves a persisted local book URL against the current sandbox container.
+    /// After sideload resigning or backup restore, iOS may assign a new container
+    /// UUID; falling back to `Application Support/Legado/LocalBooks/<filename>`
+    /// transparently recovers the file without breaking saved bookmarks or progress.
+    public static func resolveLocalFileURL(for bookURL: String, supportDirectory: URL? = nil) -> URL? {
+        guard let parsed = URL(string: bookURL), parsed.isFileURL else { return nil }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: parsed.path) {
+            return parsed
+        }
+        let filename = parsed.lastPathComponent
+        guard !filename.isEmpty, filename != "/" else { return nil }
+        let base = supportDirectory
+            ?? fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+                .appendingPathComponent("Legado", isDirectory: true)
+        guard let base else { return nil }
+        let recovered = base.appendingPathComponent("LocalBooks", isDirectory: true).appendingPathComponent(filename)
+        return fm.fileExists(atPath: recovered.path) ? recovered : nil
+    }
+
     public func loadCover(at url: URL) throws -> Data? {
         guard url.isFileURL, url.pathExtension.lowercased() == "epub" else { return nil }
         try validateFile(url)
@@ -175,7 +195,7 @@ public struct LocalBookService: Sendable {
     }
 
     public func loadIllustrations(book: Book, chapter: BookChapter) throws -> [EPUBIllustration] {
-        guard let url = URL(string: book.bookUrl), url.isFileURL, url.pathExtension.lowercased() == "epub" else { return [] }
+        guard let url = Self.resolveLocalFileURL(for: book.bookUrl), url.pathExtension.lowercased() == "epub" else { return [] }
         try validateFile(url)
         return try EPUBBook(url: url).illustrations(chapter: chapter)
     }
@@ -253,14 +273,13 @@ public struct LocalBookService: Sendable {
     }
 
     public func loadChapters(book: Book) throws -> ChapterListReport {
-        if let url = URL(string: book.bookUrl), url.isFileURL, url.pathExtension.lowercased() == "epub" {
+        if let url = Self.resolveLocalFileURL(for: book.bookUrl), url.pathExtension.lowercased() == "epub" {
             try validateFile(url)
             return try .init(chapters: EPUBBook(url: url).chapters(book: book))
         }
         let decoded = try read(book)
         let selectionVolumeState = TxtVolumeState()
-        let probeText = textProbe(decoded.data, encoding: decoded.encoding)
-        let selectedRule = rule(storedIn: book.tocUrl) ?? TxtTocRuleSelector.select(content: probeText, rules: effectiveTocRules()) {
+        let selectedRule = rule(storedIn: book.tocUrl) ?? TxtTocRuleSelector.select(content: textProbe(decoded.data, encoding: decoded.encoding), rules: effectiveTocRules()) {
             rule, title, index, previous, length in
             transformedTitle(title, script: rule.replacement, index: index, previousTitle: previous, previousLength: length, book: book, volumeState: selectionVolumeState)
         }
@@ -284,7 +303,8 @@ public struct LocalBookService: Sendable {
         book: Book, rule: TxtTocRule?, splitLongChapter: Bool,
         previousChapters: [BookChapter]
     ) throws -> LocalBookImportReport {
-        guard let url = URL(string: book.bookUrl), url.isFileURL,
+        guard let url = Self.resolveLocalFileURL(for: book.bookUrl) ?? URL(string: book.bookUrl),
+              url.isFileURL,
               url.pathExtension.lowercased() == "txt" else { throw LocalBookError.unsupportedFormat }
         try Task.checkCancellation()
         if let rule, !rule.rule.isEmpty { _ = try NSRegularExpression(pattern: rule.rule, options: .anchorsMatchLines) }
@@ -378,12 +398,11 @@ public struct LocalBookService: Sendable {
     }
 
     public func loadContent(book: Book, chapter: BookChapter) throws -> ChapterContentReport {
-        if let url = URL(string: book.bookUrl), url.isFileURL, url.pathExtension.lowercased() == "epub" {
+        if let url = Self.resolveLocalFileURL(for: book.bookUrl), url.pathExtension.lowercased() == "epub" {
             try validateFile(url)
             return try EPUBBook(url: url).content(chapter: chapter)
         }
-        guard let url = URL(string: book.bookUrl), url.isFileURL,
-              FileManager.default.fileExists(atPath: url.path) else { throw LocalBookError.missingFile }
+        guard let url = Self.resolveLocalFileURL(for: book.bookUrl) else { throw LocalBookError.missingFile }
         try validateFile(url)
         let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let start = max(Int(chapter.start ?? 0), 0)
@@ -415,8 +434,7 @@ public struct LocalBookService: Sendable {
     }
 
     private func read(_ book: Book) throws -> (charset: String, encoding: String.Encoding, bomLength: Int, data: Data) {
-        guard let url = URL(string: book.bookUrl), url.isFileURL,
-              FileManager.default.fileExists(atPath: url.path) else { throw LocalBookError.missingFile }
+        guard let url = Self.resolveLocalFileURL(for: book.bookUrl) else { throw LocalBookError.missingFile }
         try validateFile(url)
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         guard !data.isEmpty else { throw LocalBookError.emptyFile }
@@ -896,7 +914,7 @@ public struct LocalBookService: Sendable {
         script: String?,
         index: Int,
         previousTitle: String? = nil,
-        previousLength: Int = -1,
+        previousLength: @autoclosure () -> Int = -1,
         book: Book,
         volumeState: TxtVolumeState = .init(),
         onVolume: ((String) -> Void)? = nil
@@ -914,7 +932,7 @@ public struct LocalBookService: Sendable {
             .flatMap { String(data: $0, encoding: .utf8) }
             .map { String($0.dropFirst().dropLast()) } ?? "\"\""
         let wrapped = """
-        var index = \(index + 1); var prevTitle = \(previous); var prevLength = \(previousLength);
+        var index = \(index + 1); var prevTitle = \(previous); var prevLength = \(previousLength());
         var lastVolumeTitle = \(volumeLiteral);
         \(script)
         """

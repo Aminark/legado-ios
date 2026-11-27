@@ -207,7 +207,9 @@ public struct HTMLRuleEvaluator: Sendable {
     }
 
     private func cssSelector(_ legacy: String) -> String {
-        if legacy.hasPrefix("class.") { return "." + legacy.dropFirst(6) }
+        if legacy.hasPrefix("class.") {
+            return compoundClassSelector(legacy.dropFirst(6))
+        }
         if legacy.hasPrefix("tag.") { return String(legacy.dropFirst(4)) }
         if legacy.hasPrefix("id.") { return "#" + legacy.dropFirst(3) }
         if legacy.hasPrefix("text.") {
@@ -215,6 +217,17 @@ public struct HTMLRuleEvaluator: Sendable {
             return ":containsOwn(\(value))"
         }
         return legacy
+    }
+
+    /// Legado's `class.a b` mirrors Jsoup's `getElementsByClass`, matching a single
+    /// element carrying every listed class name rather than a CSS descendant chain.
+    private func compoundClassSelector(_ raw: Substring) -> String {
+        let tokens = raw
+            .split(whereSeparator: \.isWhitespace)
+            .map { $0.hasPrefix(".") ? String($0.dropFirst()) : String($0) }
+            .filter { !$0.isEmpty }
+        guard !tokens.isEmpty else { return "." + raw }
+        return tokens.map { "." + $0 }.joined()
     }
 
     private func parseIndexedSelector(_ source: String) -> IndexedSelector {

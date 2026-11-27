@@ -3,6 +3,38 @@ import Testing
 @testable import LegadoCore
 
 struct LegadoDatabaseTests {
+    @Test func retiresNextEvenWhenItsSettingsOrImportedIdentifierChanged() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try LegadoDatabase(url: directory.appendingPathComponent("reader.sqlite"))
+        let editedNext = HttpTTS(id: 1_768_175_007_437, name: "之前选用的语音", url: "https://old.example/tts")
+        let importedNext = HttpTTS(id: 42, name: "🌈Ｎｅｘｔ 引擎 - 长按切换音色", url: "https://old.example/speech")
+        let custom = HttpTTS(id: 99, name: "Next 引擎（自建）", url: "https://my.example/tts")
+
+        try await database.replaceHttpTTS([editedNext, importedNext, custom])
+        #expect(try await database.loadHttpTTS(retiring: []) == [custom])
+        #expect(try await database.loadHttpTTS() == [custom])
+    }
+
+    @Test func retiresUnmodifiedSpeechPresetsAndKeepsCustomEngines() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try LegadoDatabase(url: directory.appendingPathComponent("reader.sqlite"))
+        var preset = HttpTTS(id: -29, name: "原版", url: "https://old.example/speak")
+        preset.loginUi = #"[{"name":"Token","type":"text"}]"#
+        var storedPreset = preset
+        storedPreset.loginUi = #"[{"type":"text","name":"Token"}]"#
+        storedPreset.lastUpdateTime = 100
+        let secondPreset = HttpTTS(id: -100, name: "旧配置", url: "https://old.example/tts")
+        var edited = secondPreset
+        edited.url = "https://my.example/tts"
+        let custom = HttpTTS(id: 99, name: "自定义", url: "https://my.example/speak")
+
+        try await database.replaceHttpTTS([storedPreset, edited, custom])
+        #expect(Set(try await database.loadHttpTTS(retiring: [preset, secondPreset])) == Set([edited, custom]))
+        #expect(Set(try await database.loadHttpTTS()) == Set([edited, custom]))
+    }
+
     @Test func openedDirectoryReflectsLocalAndExternalCommits() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
