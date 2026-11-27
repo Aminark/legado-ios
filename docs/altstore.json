@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.1.17",
-          "buildVersion": "31",
-          "date": "2026-11-27T10:38:08Z",
-          "localizedDescription": "小浣熊阅读 0.1.17（构建 31），支持 iOS / iPadOS 15.0 及以上。\n\n- 在「我的 → 其他设置 → 本机书库备份」导出书库，可一并保存本地 TXT 和 EPUB。点开备份文件即可预览并合并恢复，导出时会提示有哪些本地书文件缺失。\n- 支持导入安卓阅读备份、跨书搜索正文和下载整书以供离线阅读。\n- 支持交互式书源登录和表单脚本。发现页可按书源分类浏览，支持段评的书源可在正文中点开讨论。\n- 改进自定义字体导入，选错文件时会提示并保留当前字体。调整字号和页边距后保持当前行完整，减少滚动阅读和加载封面、插图时的重复处理。\n\n下载附件中的未签名 IPA，使用自己的签名工具安装。可用同页的 SHA256SUMS 校验文件。本次已在模拟器验证字体导入与文件选择，真机安装尚未验证。在线阅读需自行导入书源，应用不附带书源或在线书库。\n",
-          "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.17/legado-ios-v0.1.17-build31-unsigned.ipa",
-          "size": 16762514,
+          "version": "0.1.18",
+          "buildVersion": "33",
+          "date": "2026-11-27T18:12:09Z",
+          "localizedDescription": "小浣熊阅读 0.1.18（构建 33），支持 iOS / iPadOS 15.0 及以上。\n\n- 新增 WebDAV 云备份，支持自动备份、查看历史版本和预览后合并恢复。\n- 新增微软 Edge 在线朗读和可下载的 MeloTTS 离线中文语音，保留系统朗读和自定义 HTTP TTS。\n- 更新文字和 EPUB 阅读界面，新增自动阅读调速，改善翻页、深色模式和 EPUB 排版设置。\n- 改进书源管理、网页登录和规则解析兼容性，优化书源列表与阅读统计。\n\n下载附件中的未签名 IPA，使用自己的签名工具安装。可用同页的 SHA256SUMS 校验文件。真机安装尚未验证。在线阅读需自行导入书源，应用不附带书源或在线书库。\n",
+          "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.18/legado-ios-v0.1.18-build33-unsigned.ipa",
+          "size": 29874799,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.1.17",
-      "versionDate": "2026-11-27T10:38:08Z",
-      "versionDescription": "小浣熊阅读 0.1.17（构建 31），支持 iOS / iPadOS 15.0 及以上。\n\n- 在「我的 → 其他设置 → 本机书库备份」导出书库，可一并保存本地 TXT 和 EPUB。点开备份文件即可预览并合并恢复，导出时会提示有哪些本地书文件缺失。\n- 支持导入安卓阅读备份、跨书搜索正文和下载整书以供离线阅读。\n- 支持交互式书源登录和表单脚本。发现页可按书源分类浏览，支持段评的书源可在正文中点开讨论。\n- 改进自定义字体导入，选错文件时会提示并保留当前字体。调整字号和页边距后保持当前行完整，减少滚动阅读和加载封面、插图时的重复处理。\n\n下载附件中的未签名 IPA，使用自己的签名工具安装。可用同页的 SHA256SUMS 校验文件。本次已在模拟器验证字体导入与文件选择，真机安装尚未验证。在线阅读需自行导入书源，应用不附带书源或在线书库。\n",
-      "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.17/legado-ios-v0.1.17-build31-unsigned.ipa",
-      "size": 16762514,
+      "version": "0.1.18",
+      "versionDate": "2026-11-27T18:12:09Z",
+      "versionDescription": "小浣熊阅读 0.1.18（构建 33），支持 iOS / iPadOS 15.0 及以上。\n\n- 新增 WebDAV 云备份，支持自动备份、查看历史版本和预览后合并恢复。\n- 新增微软 Edge 在线朗读和可下载的 MeloTTS 离线中文语音，保留系统朗读和自定义 HTTP TTS。\n- 更新文字和 EPUB 阅读界面，新增自动阅读调速，改善翻页、深色模式和 EPUB 排版设置。\n- 改进书源管理、网页登录和规则解析兼容性，优化书源列表与阅读统计。\n\n下载附件中的未签名 IPA，使用自己的签名工具安装。可用同页的 SHA256SUMS 校验文件。真机安装尚未验证。在线阅读需自行导入书源，应用不附带书源或在线书库。\n",
+      "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.18/legado-ios-v0.1.18-build33-unsigned.ipa",
+      "size": 29874799,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
