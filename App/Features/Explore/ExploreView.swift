@@ -358,6 +358,14 @@ private struct ExploreSourceView: View {
         }
         .background(ReadingTheme.canvas)
         .navigationTitle(model.source.bookSourceName)
+        .toolbar {
+            if model.source.offersLogin {
+                NavigationLink { SourceLoginView(source: model.source) } label: { Label("书源登录", systemImage: "person.crop.circle") }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .sourceLoginUpdated)) { event in
+            if event.object as? String == model.source.id { Task { await model.reload() } }
+        }
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.load() }
         .refreshable { await model.reload() }

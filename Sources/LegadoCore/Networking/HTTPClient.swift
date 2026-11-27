@@ -457,6 +457,18 @@ public final class LegadoCookieStore: @unchecked Sendable {
         return cookieMap(persistent.cookie(for: persistenceKey(url)) ?? "")[key] ?? ""
     }
 
+    /// Scripts can provide a request Cookie header (multiple pairs) or one
+    /// Set-Cookie value with response attributes such as Path and Max-Age.
+    func setScriptCookies(_ header: String, for url: String) {
+        let parts = header.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
+        let attributes: Set<String> = ["domain", "path", "expires", "max-age", "samesite", "secure", "httponly", "priority", "partitioned"]
+        if parts.dropFirst().contains(where: { attributes.contains($0.prefix(while: { $0 != "=" }).lowercased()) }) {
+            setCookie(header, for: url)
+        } else {
+            for pair in parts where pair.contains("=") { setCookie(pair, for: url) }
+        }
+    }
+
     public func setCookie(_ cookie: String, for value: String) {
         guard let url = normalizedURL(value), !cookie.isEmpty else { return }
         var cookies = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": cookie], for: url)

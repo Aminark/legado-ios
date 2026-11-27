@@ -94,7 +94,7 @@ public struct BookSource: Codable, Hashable, Identifiable, Sendable {
         concurrentRate = try values.decodeIfPresent(String.self, forKey: .concurrentRate)
         header = try values.decodeIfPresent(String.self, forKey: .header)
         loginUrl = try values.decodeIfPresent(String.self, forKey: .loginUrl)
-        loginUi = try values.decodeIfPresent(String.self, forKey: .loginUi)
+        loginUi = try values.decodeIfPresent(JSONValue.self, forKey: .loginUi)?.stringValue
         loginCheckJs = try values.decodeIfPresent(String.self, forKey: .loginCheckJs)
         coverDecodeJs = try values.decodeIfPresent(String.self, forKey: .coverDecodeJs)
         bookSourceComment = try values.decodeIfPresent(String.self, forKey: .bookSourceComment)
@@ -254,5 +254,18 @@ private extension KeyedDecodingContainer {
         guard contains(key), try !decodeNil(forKey: key) else { return nil }
         if let value = try? decode(Int64.self, forKey: key) { return value }
         return Int64(try decode(String.self, forKey: key))
+    }
+}
+
+
+extension BookSource {
+    var offersLogin: Bool { [loginUi, loginUrl].contains { $0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false } }
+
+    var loginScript: String? {
+        guard let raw = loginUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        if raw.hasPrefix("@js:") { return String(raw.dropFirst(4)) }
+        if raw.hasPrefix("<js>"), raw.hasSuffix("</js>") { return String(raw.dropFirst(4).dropLast(5)) }
+        let tokens = ["function ", "function(", "=>", "java.", "source.", "var ", "const ", "let "]
+        return tokens.contains(where: raw.contains) && !raw.hasPrefix("http") ? raw : nil
     }
 }

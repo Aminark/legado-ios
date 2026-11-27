@@ -8,7 +8,19 @@ struct SourceLoginView: View {
     @State private var status = "打开登录页后，Cookie 会自动同步给搜索与阅读请求。"
     @State private var isChecking = false
 
-    var body: some View {
+    @ViewBuilder var body: some View {
+        if source.loginUi?.isEmpty == false || source.loginScript != nil {
+            SourceCredentialsForm(source: source) { _ in
+                NotificationCenter.default.post(name: .sourceLoginUpdated, object: source.id)
+            }
+        } else {
+            webLogin.onDisappear {
+                NotificationCenter.default.post(name: .sourceLoginUpdated, object: source.id)
+            }
+        }
+    }
+
+    private var webLogin: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "lock.shield.fill").foregroundStyle(ReadingTheme.accent)
@@ -73,7 +85,7 @@ private struct SourceLoginWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
+        configuration.websiteDataStore = .nonPersistent()
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.backgroundColor = UIColor(ReadingTheme.canvas)
@@ -152,8 +164,8 @@ private struct SourceLoginWebView: UIViewRepresentable {
 
         private func syncCookies(from webView: WKWebView) {
             webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
-                cookies.forEach(HTTPCookieStorage.shared.setCookie)
                 guard let url = URL(string: self.parent.sourceURL) else { return }
+                SourceBrowserCookies.store(cookies, for: url)
                 let matching = HTTPCookieStorage.shared.cookies(for: url) ?? []
                 let header = HTTPCookie.requestHeaderFields(with: matching)["Cookie"] ?? ""
                 Task {

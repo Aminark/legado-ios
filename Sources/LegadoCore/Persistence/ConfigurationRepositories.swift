@@ -482,6 +482,18 @@ public final class PersistentRuntimeCache: @unchecked Sendable {
         sqlite3_step(statement)
     }
 
+    func remove(_ key: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { return }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "DELETE FROM caches WHERE `key` = ?", -1, &statement, nil) == SQLITE_OK,
+              let statement else { return }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, key, -1, Self.transient)
+        sqlite3_step(statement)
+    }
+
     public func cookie(for key: String) -> String? {
         lock.lock()
         defer { lock.unlock() }

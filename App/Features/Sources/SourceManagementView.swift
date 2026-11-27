@@ -592,7 +592,7 @@ private struct SourceDetailView: View {
                 Text("使用你输入的关键词，逐步验证搜索、详情、目录和正文规则。")
                     .font(.footnote).foregroundStyle(.secondary)
             }
-            if current.loginUrl?.isEmpty == false {
+            if current.offersLogin {
                 Section("账户") {
                     NavigationLink {
                         SourceLoginView(source: current)

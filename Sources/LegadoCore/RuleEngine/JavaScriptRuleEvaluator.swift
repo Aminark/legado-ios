@@ -266,7 +266,21 @@ private final class JavaScriptRedirectBlocker: NSObject, URLSessionTaskDelegate,
     }
 }
 
+/// Installed only while a user is interacting with a source.
+public protocol SourceScriptInteraction: Sendable {
+    func browse(_ address: String, title: String, waitsForDismissal: Bool) -> [String: String]
+    func showMessage(_ message: String)
+    func refreshDiscovery()
+}
+
+private final class ScriptMemoryValues: @unchecked Sendable {
+    static let shared = ScriptMemoryValues()
+    let values = NSCache<NSString, NSString>()
+    private init() { values.totalCostLimit = 4 * 1024 * 1024 }
+}
+
 public struct JavaScriptRuleEvaluator: Sendable {
+    public var interaction: (any SourceScriptInteraction)?
     public var maximumScriptLength: Int
     public var maximumResultLength: Int
     private let networkLoader: any JavaScriptNetworkLoading
@@ -461,6 +475,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         context.setObject(executionContext.page ?? 0, forKeyedSubscript: "page" as NSString)
         installJava(in: context, variables: box, result: result, executionContext: executionContext)
         installCookie(in: context)
+        if let source = executionContext.source { installCache(in: context, sourceID: source.id) }
         installJavaImporterCompatibility(in: context)
         installSource(in: context, source: executionContext.source, variables: box)
         installBook(in: context, book: executionContext.book)
@@ -477,7 +492,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
                 var text = value;
                 if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
                 text = text.trim();
-                if (!text || '[{"-0123456789tfn'.indexOf(text.charAt(0)) < 0) return value;
+                if (text.length > 0 && '[{"-0123456789tfn'.indexOf(text.charAt(0)) < 0) return value;
                 return nativeParse(text);
               };
             })();
@@ -586,7 +601,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
             LegadoCookieStore.shared.cookie(for: $0, key: $1)
         }
         let setCookie: @convention(block) (String, String?) -> Void = { url, value in
-            LegadoCookieStore.shared.setCookie(value ?? "", for: url)
+            LegadoCookieStore.shared.setScriptCookies(value ?? "", for: url)
         }
         let removeCookie: @convention(block) (String) -> Void = {
             LegadoCookieStore.shared.removeCookies(for: $0)
@@ -625,6 +640,36 @@ public struct JavaScriptRuleEvaluator: Sendable {
             """)
     }
 
+    private func installCache(in context: JSContext, sourceID: String) {
+        let prefix = "jsCache_\(sourceID.utf8.count)_\(sourceID)_"
+        let cache = JSValue(newObjectIn: context)
+        let get: @convention(block) (String) -> Any = { key in
+            PersistentRuntimeCache.shared.get(prefix + key) as Any? ?? NSNull()
+        }
+        let put: @convention(block) (String, String, Int32) -> Void = { key, value, seconds in
+            let now = Int64(Date().timeIntervalSince1970 * 1_000)
+            let deadline = seconds == 0 ? 0 : now + Int64(seconds) * 1_000
+            PersistentRuntimeCache.shared.put(prefix + key, value: value, deadline: deadline)
+        }
+        let delete: @convention(block) (String) -> Void = { key in
+            PersistentRuntimeCache.shared.remove(prefix + key)
+        }
+        let memory = ScriptMemoryValues.shared.values
+        let getMemory: @convention(block) (String) -> String? = { memory.object(forKey: (prefix + $0) as NSString) as String? }
+        let putMemory: @convention(block) (String, String) -> Void = { key, value in
+            memory.setObject(value as NSString, forKey: (prefix + key) as NSString, cost: value.utf8.count)
+        }
+        let dropMemory: @convention(block) (String) -> Void = { memory.removeObject(forKey: (prefix + $0) as NSString) }
+        cache?.setObject(getMemory, forKeyedSubscript: "getFromMemory" as NSString)
+        cache?.setObject(putMemory, forKeyedSubscript: "putMemory" as NSString)
+        cache?.setObject(dropMemory, forKeyedSubscript: "deleteMemory" as NSString)
+        cache?.setObject(get, forKeyedSubscript: "get" as NSString)
+        cache?.setObject(put, forKeyedSubscript: "put" as NSString)
+        cache?.setObject(delete, forKeyedSubscript: "delete" as NSString)
+        context.setObject(cache, forKeyedSubscript: "cache" as NSString)
+        context.evaluateScript("cache.getInt = cache.getLong = function(k) { return parseInt(cache.get(k), 10) || 0; };")
+    }
+
     private func installJavaImporterCompatibility(in context: JSContext) {
         let utf8Bytes: @convention(block) (String) -> [Int] = { value in
             Data(value.utf8).map { Int(Int8(bitPattern: $0)) }
@@ -633,12 +678,13 @@ public struct JavaScriptRuleEvaluator: Sendable {
             String(decoding: Self.byteData(from: value), as: UTF8.self)
         }
         let maximumBytes = maximumResultLength
-        let aesCBC: @convention(block) (Int, Any?, Any?, Any?) -> [Int]? = { operation, keyValue, ivValue, dataValue in
+        let aes: @convention(block) (Int, Any?, Any?, Any?) -> [Int]? = { operation, keyValue, ivValue, dataValue in
             let key = Self.byteData(from: keyValue)
+            let ecb = ivValue == nil || ivValue is NSNull
             let iv = Self.byteData(from: ivValue)
             let input = Self.byteData(from: dataValue)
             guard [1, 2].contains(operation), [16, 24, 32].contains(key.count),
-                  iv.count == kCCBlockSizeAES128, input.count <= maximumBytes else { return nil }
+                  (ecb || iv.count == kCCBlockSizeAES128), input.count <= maximumBytes else { return nil }
             var output = [UInt8](repeating: 0, count: input.count + kCCBlockSizeAES128)
             let capacity = output.count
             var written = 0
@@ -646,7 +692,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
                 iv.withUnsafeBytes { ivBytes in
                     input.withUnsafeBytes { inputBytes in
                         CCCrypt(operation == 1 ? CCOperation(kCCEncrypt) : CCOperation(kCCDecrypt),
-                                CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionPKCS7Padding),
+                                CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionPKCS7Padding | (ecb ? kCCOptionECBMode : 0)),
                                 keyBytes.baseAddress, key.count, ivBytes.baseAddress,
                                 inputBytes.baseAddress, input.count, &output, capacity, &written)
                     }
@@ -676,7 +722,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         let formURLEncode: @convention(block) (String) -> String = { Self.formURLEncode($0) }
         context.setObject(utf8Bytes, forKeyedSubscript: "__legadoUTF8Bytes" as NSString)
         context.setObject(utf8String, forKeyedSubscript: "__legadoUTF8String" as NSString)
-        context.setObject(aesCBC, forKeyedSubscript: "__legadoAESCBC" as NSString)
+        context.setObject(aes, forKeyedSubscript: "__legadoAES" as NSString)
         context.setObject(base64EncodeBytes, forKeyedSubscript: "__legadoBase64EncodeBytes" as NSString)
         context.setObject(base64DecodeBytes, forKeyedSubscript: "__legadoBase64DecodeBytes" as NSString)
         context.setObject(hexEncodeBytes, forKeyedSubscript: "__legadoHexEncodeBytes" as NSString)
@@ -792,7 +838,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
             LegadoCookieStore.shared.cookie(for: $0, key: $1)
         }
         let setCookie: @convention(block) (String, String) -> Void = {
-            LegadoCookieStore.shared.setCookie($1, for: $0)
+            LegadoCookieStore.shared.setScriptCookies($1, for: $0)
         }
         let ajax: @convention(block) (Any?, Any?) -> String = { value, timeoutValue in
             let rawURL = Self.firstURL(value)
@@ -922,6 +968,17 @@ public struct JavaScriptRuleEvaluator: Sendable {
         java?.setObject(ajaxAll, forKeyedSubscript: "ajaxAll" as NSString)
         java?.setObject(connect, forKeyedSubscript: "connect" as NSString)
         java?.setObject(directRequest, forKeyedSubscript: "__directRequest" as NSString)
+        if let interaction {
+            let browse: @convention(block) (String, String, Bool) -> [String: String] = { address, title, waits in
+                interaction.browse(address, title: title, waitsForDismissal: waits)
+            }
+            let message: @convention(block) (String) -> Void = { interaction.showMessage($0) }
+            let refresh: @convention(block) () -> Void = { interaction.refreshDiscovery() }
+            java?.setObject(browse, forKeyedSubscript: "__browse" as NSString)
+            java?.setObject(message, forKeyedSubscript: "toast" as NSString)
+            java?.setObject(message, forKeyedSubscript: "longToast" as NSString)
+            java?.setObject(refresh, forKeyedSubscript: "refreshExplore" as NSString)
+        }
         context.setObject(java, forKeyedSubscript: "java" as NSString)
         context.evaluateScript("""
             (function () {
@@ -940,6 +997,15 @@ public struct JavaScriptRuleEvaluator: Sendable {
                   url: function () { return { toString: function () { return raw.urlText; } }; }
                 };
               }
+              if (java.__browse) {
+                java.startBrowser = function (url, title) { java.__browse(String(url), String(title || ''), false); };
+                java.startBrowserAwait = function (url, title) {
+                  var page = java.__browse(String(url), String(title || ''), true);
+                  return responseOf({code: Number(page.status || 0), bodyText: page.body || '',
+                                     urlText: page.url || '', headers: JSON.parse(page.headers || '{}')});
+                };
+              }
+              java.deviceID = java.androidId;
               java.get = function (url, headers, timeout) {
                 var target = String(url);
                 var networkURL = /^(https?:|data:)/i.test(target) || target[0] === '/' ||
@@ -1215,6 +1281,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         object?.setObject(source?.enabled ?? false, forKeyedSubscript: "enabled" as NSString)
         object?.setObject(source?.enabledExplore ?? false, forKeyedSubscript: "enabledExplore" as NSString)
         object?.setObject(source?.header ?? "", forKeyedSubscript: "header" as NSString)
+        object?.setObject(source?.loginUi ?? "", forKeyedSubscript: "loginUi" as NSString)
         object?.setObject(source?.loginUrl ?? "", forKeyedSubscript: "loginUrl" as NSString)
         object?.setObject(source?.searchUrl ?? "", forKeyedSubscript: "searchUrl" as NSString)
         object?.setObject(source?.exploreUrl ?? "", forKeyedSubscript: "exploreUrl" as NSString)
@@ -1223,6 +1290,9 @@ public struct JavaScriptRuleEvaluator: Sendable {
         context.setObject(object, forKeyedSubscript: "source" as NSString)
         context.evaluateScript("""
             (function () {
+              source.getLoginInfo = function () { return source.get('loginInfo'); };
+              source.getVariable = function () { return source.get('sourceVariable'); };
+              source.setVariable = function (value) { return source.put('sourceVariable', value); };
               source.getKey = function () { return source.bookSourceUrl; };
               source.getTag = function () { return source.bookSourceName; };
               source.getLoginInfoMap = function () {
@@ -1243,6 +1313,10 @@ public struct JavaScriptRuleEvaluator: Sendable {
 
     private func installBook(in context: JSContext, book: Book?) {
         let object = JSValue(newObjectIn: context)
+        let config: [String: Any] = book?.readConfig.flatMap { try? JSONEncoder().encode($0) }
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        object?.setObject(config, forKeyedSubscript: "readConfig" as NSString)
+        object?.setObject(book?.order ?? 0, forKeyedSubscript: "order" as NSString)
         let getName: @convention(block) () -> String = { book?.name ?? "" }
         let getAuthor: @convention(block) () -> String = { book?.author ?? "" }
         let getBookURL: @convention(block) () -> String = { book?.bookUrl ?? "" }
@@ -1272,6 +1346,18 @@ public struct JavaScriptRuleEvaluator: Sendable {
         object?.setObject(book?.wordCount ?? "", forKeyedSubscript: "wordCount" as NSString)
         object?.setObject(book?.variable ?? "", forKeyedSubscript: "variable" as NSString)
         context.setObject(object, forKeyedSubscript: "book" as NSString)
+        context.evaluateScript("""
+            (function () {
+              function fields() { return book.variable ? JSON.parse(book.variable) : {}; }
+              book.getVariable = function (name) {
+                return arguments.length ? fields()[String(name)] : book.variable;
+              };
+              book.putVariable = function (name, value) {
+                var map = fields(); map[String(name)] = String(value); book.variable = JSON.stringify(map);
+              };
+              book.setUseReplaceRule = function (enabled) { book.readConfig.useReplaceRule = Boolean(enabled); };
+            })();
+            """)
     }
 
     private func installUpdatableBook(
@@ -1699,13 +1785,37 @@ public struct JavaScriptRuleEvaluator: Sendable {
                 },
                 doFinal: function (bytes) {
                   if (key === null) throw new Error('Cipher not initialized');
-                  var result = __legadoAESCBC(operation, key, iv, checkedBytes(bytes));
+                  var result = __legadoAES(operation, key, iv, checkedBytes(bytes));
                   if (!Array.isArray(result)) throw new Error('AES/CBC operation failed');
                   return result;
                 }
               };
             }
           });
+          java.createSymmetricCrypto = function (name, key, iv) {
+            var method = NativeString(name).toUpperCase();
+            var cbc = method === 'AES/CBC/PKCS5PADDING' || method === 'AES/CBC/PKCS7PADDING';
+            if (!cbc && !['AES', 'AES/ECB/PKCS5PADDING', 'AES/ECB/PKCS7PADDING'].includes(method)) {
+              throw new Error('Unsupported AES transformation: ' + name);
+            }
+            function bytes(value) {
+              return typeof value === 'string' ? __legadoUTF8Bytes(value) : checkedBytes(value);
+            }
+            var secret = bytes(key), vector = cbc ? bytes(iv) : null;
+            function transform(mode, input) {
+              var result = __legadoAES(mode, secret, vector, input);
+              if (!Array.isArray(result)) throw new Error('Invalid AES key, IV or input');
+              return result;
+            }
+            function encrypt(value) { return transform(1, bytes(value)); }
+            function decrypt(value) {
+              var input = typeof value === 'string' ? __legadoBase64DecodeBytes(value) : bytes(value);
+              return transform(2, input);
+            }
+            return {encrypt: encrypt, decrypt: decrypt,
+                    encryptBase64: function (v) { return __legadoBase64EncodeBytes(encrypt(v)); },
+                    decryptStr: function (v) { return __legadoUTF8String(decrypt(v)); }};
+          };
           var Mac = javaClass('Mac', {
             getInstance: function (algorithm) {
               if (NativeString(algorithm).toUpperCase() !== 'HMACSHA1') {
