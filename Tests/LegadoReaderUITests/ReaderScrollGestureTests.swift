@@ -4,6 +4,43 @@ import Vision
 
 @MainActor
 final class ReaderScrollGestureTests: XCTestCase {
+    func testLocalLibraryBackupCanExportAndRestoreFromFiles() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-uiDemo", "-uiDemoTab", "settings", "-uiDemoOtherSettings"]
+        app.launch()
+        let entry = app.buttons["本机书库备份"].firstMatch
+        XCTAssertTrue(entry.waitForExistence(timeout: 10))
+        entry.tap()
+        app.buttons["导出书库备份"].tap()
+        let save = app.buttons.matching(NSPredicate(format: "label IN %@", ["Save", "存储", "保存"])).firstMatch
+        XCTAssertTrue(save.waitForExistence(timeout: 10))
+        if !save.isEnabled {
+            let local = app.staticTexts.matching(NSPredicate(format: "label IN %@", ["我的iPhone", "我的 iPhone", "On My iPhone"])).firstMatch
+            XCTAssertTrue(local.waitForExistence(timeout: 5))
+            local.tap()
+            if !save.isEnabled {
+                let folder = app.staticTexts["书源导入测试"].firstMatch
+                XCTAssertTrue(folder.waitForExistence(timeout: 5))
+                folder.tap()
+            }
+        }
+        XCTAssertTrue(save.isEnabled)
+        save.tap()
+        XCTAssertTrue(app.staticTexts["备份已导出"].waitForExistence(timeout: 10))
+        app.buttons["选择备份文件"].tap()
+        openImportFixtureFolder(in: app)
+        let file = app.collectionViews["File View"].cells.matching(NSPredicate(format: "label BEGINSWITH %@", "Reader-Library")).firstMatch
+        XCTAssertTrue(file.waitForExistence(timeout: 8))
+        XCTAssertTrue(file.isEnabled)
+        file.tap()
+        let confirm = app.buttons["合并到当前书库"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "书籍 1 本")).firstMatch.exists)
+        confirm.tap()
+        XCTAssertTrue(app.staticTexts["书库已恢复"].waitForExistence(timeout: 10))
+    }
+
     func testLibrarySearchAndDownloadScreensOpenFromShelf() {
         let app = XCUIApplication()
         app.launchArguments = ["-uiDemo", "-defaultHomePage", "bookshelf"]

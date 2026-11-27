@@ -63,6 +63,65 @@ public actor LegadoDatabase {
         try Self.execute(handle, "VACUUM")
     }
 
+    public func librarySnapshot(legacyRulesURL: URL) throws -> LibrarySnapshot {
+        var value = LibrarySnapshot()
+        try transaction(readOnly: true) {
+            value.books = try loadBooks()
+            value.sources = try loadBookSources()
+            value.groups = try loadBookGroups()
+            value.bookmarks = try loadBookmarks()
+            value.records = try loadReadRecords()
+            value.searchKeywords = try loadSearchKeywords(order: .lastUseTime)
+            value.rssSources = try loadRssSources()
+            value.rssStars = try loadRssStars()
+            value.rssReadRecords = try loadRssReadRecords()
+            value.txtRules = try loadTxtTocRules()
+            value.tts = try loadHttpTTS()
+            value.subscriptions = try loadRuleSubs()
+            value.keyboardAssists = try loadKeyboardAssists()
+            value.replaceRules = try storedRules(legacyURL: legacyRulesURL)
+            for book in value.books { value.chapters[book.id] = try loadChapters(bookURL: book.id) }
+        }
+        return value
+    }
+
+    /// Check the original snapshot inside the write transaction so restoring cannot overwrite concurrent edits.
+    public func applyLibrarySnapshot(_ value: LibrarySnapshot, expected: LibrarySnapshot, legacyRulesURL: URL) throws {
+        _ = try value.validated()
+        defer { lastDirectory = nil }
+        try transaction {
+            guard try librarySnapshot(legacyRulesURL: legacyRulesURL) == expected else { throw LibraryBackupError.changed }
+            let retainedBooks = Set(value.books.map(\.id))
+            for old in expected.books where !retainedBooks.contains(old.id) {
+                try executeBound("DELETE FROM books WHERE book_url = ?", text: old.id)
+            }
+            try upsertBooks(value.books)
+            let retainedSources = Set(value.sources.map(\.id))
+            for old in expected.sources where !retainedSources.contains(old.id) {
+                try executeBound("DELETE FROM book_sources WHERE book_source_url = ?", text: old.id)
+            }
+            try upsertBookSources(value.sources)
+            if value.groups != expected.groups { try replaceBookGroups(value.groups) }
+            if value.bookmarks != expected.bookmarks { try replaceBookmarks(value.bookmarks) }
+            if value.records != expected.records { try replaceReadRecords(value.records) }
+            if value.searchKeywords != expected.searchKeywords { try replaceSearchKeywords(value.searchKeywords) }
+            if value.rssSources != expected.rssSources { try replaceRssSources(value.rssSources) }
+            if value.rssStars != expected.rssStars { try replaceRssStars(value.rssStars) }
+            if value.rssReadRecords != expected.rssReadRecords {
+                try clearRssReadRecords()
+                try appendRssReadRecords(value.rssReadRecords)
+            }
+            if value.txtRules != expected.txtRules { try replaceTxtTocRules(value.txtRules) }
+            if value.tts != expected.tts { try replaceHttpTTS(value.tts) }
+            if value.subscriptions != expected.subscriptions { try replaceRuleSubs(value.subscriptions) }
+            if value.keyboardAssists != expected.keyboardAssists { try replaceKeyboardAssists(value.keyboardAssists) }
+            for (bookURL, chapters) in value.chapters where chapters != expected.chapters[bookURL] {
+                try writeChapters(chapters, bookURL: bookURL)
+            }
+            try storeRules(value.replaceRules)
+        }
+    }
+
     public func loadBookSources() throws -> [BookSource] {
         try load("SELECT payload FROM book_sources ORDER BY position, book_source_url", as: BookSource.self)
     }
@@ -325,6 +384,22 @@ public actor LegadoDatabase {
     }
 
     public func deleteAllSearchKeywords() throws { try Self.execute(handle, "DELETE FROM search_keywords") }
+
+    private func replaceSearchKeywords(_ values: [SearchKeyword]) throws {
+        try transaction {
+            try deleteAllSearchKeywords()
+            let statement = try prepare("INSERT INTO search_keywords(word, usage, last_use_time) VALUES(?, ?, ?)")
+            defer { sqlite3_finalize(statement) }
+            for value in values {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                try bind(value.word, to: statement, at: 1)
+                sqlite3_bind_int64(statement, 2, Int64(value.usage))
+                sqlite3_bind_int64(statement, 3, value.lastUseTime)
+                try stepDone(statement)
+            }
+        }
+    }
 
     public func importLegacySearchKeywords(_ words: [String]) throws {
         guard try count("search_keywords") == 0, !words.isEmpty else { return }
@@ -1183,13 +1258,20 @@ public actor LegadoDatabase {
         }
     }
 
-    private func transaction(_ operation: () throws -> Void) throws {
-        try Self.execute(handle, "BEGIN IMMEDIATE")
+    private func transaction(readOnly: Bool = false, _ operation: () throws -> Void) throws {
+        // Savepoints compose with snapshot imports while retaining rollback for every repository write.
+        let outermost = sqlite3_get_autocommit(handle) != 0
+        let begin = readOnly ? "BEGIN DEFERRED" : "BEGIN IMMEDIATE"
+        try Self.execute(handle, outermost ? begin : "SAVEPOINT legado_write")
         do {
             try operation()
-            try Self.execute(handle, "COMMIT")
+            try Self.execute(handle, outermost ? "COMMIT" : "RELEASE SAVEPOINT legado_write")
         } catch {
-            try? Self.execute(handle, "ROLLBACK")
+            if outermost { try? Self.execute(handle, "ROLLBACK") }
+            else {
+                try? Self.execute(handle, "ROLLBACK TO SAVEPOINT legado_write")
+                try? Self.execute(handle, "RELEASE SAVEPOINT legado_write")
+            }
             throw error
         }
     }

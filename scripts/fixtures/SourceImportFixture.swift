@@ -1,4 +1,5 @@
 import UIKit
+import CryptoKit
 
 // Standalone simulator-only file provider; never bundled with Legado.
 @main
@@ -13,8 +14,28 @@ final class FixtureAppDelegate: UIResponder, UIApplicationDelegate {
         try data.write(to: url)
     }
 
+    private func writeBackup(to directory: URL) throws {
+        var snapshot: [String: Any] = [:]
+        for key in ["sources", "groups", "bookmarks", "records", "rssSources", "rssStars",
+                    "txtRules", "tts", "subscriptions", "keyboardAssists", "replaceRules"] {
+            snapshot[key] = []
+        }
+        snapshot["books"] = [["bookUrl": "https://backup.example.test/book", "origin": "fixture", "name": "书库备份测试"]]
+        snapshot["chapters"] = [:] as [String: Any]
+        snapshot["preferences"] = [:] as [String: Any]
+        let manifest: [String: Any] = ["version": 1, "createdAt": 0, "snapshot": snapshot, "attachments": []]
+        let json = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+        var data = Data("LGBK0001".utf8)
+        var length = UInt64(json.count).bigEndian
+        withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+        data.append(contentsOf: SHA256.hash(data: json))
+        data.append(json)
+        try writeFixture(data, to: directory.appendingPathComponent("Reader-Library.legadobackup"))
+    }
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        try? writeBackup(to: documents)
         let fixtures = [
             ("JSON-Source.json", "https://file-import.test/json", "文件导入 JSON 测试"),
             ("JSON-Uppercase.JSON", "https://file-import.test/uppercase", "文件导入大写扩展名测试"),

@@ -97,6 +97,8 @@
 		C1000000000000000000001E /* BookUpdateCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000000000000000000001E /* BookUpdateCoordinator.swift */; };
 		C1000000000000000000001F /* BookSourceSwitchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000000000000000000001F /* BookSourceSwitchService.swift */; };
 		C10000000000000000000020 /* LegadoDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000020 /* LegadoDatabase.swift */; };
+		E8FB28D1728A0D3405C11FAE /* LibrarySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 743A66F692422ADC6EBFE2E9 /* LibrarySnapshot.swift */; };
+		18831411B5BFB2363058FB95 /* LibraryBackupArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6678CF12858C0B7119623CBA /* LibraryBackupArchive.swift */; };
 		C10000000000000000000021 /* BookSourceHeaderResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000021 /* BookSourceHeaderResolver.swift */; };
 		C10000000000000000000022 /* DifferentialSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000022 /* DifferentialSnapshot.swift */; };
 		C10000000000000000000023 /* ConfigurationRepositories.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000023 /* ConfigurationRepositories.swift */; };
@@ -119,6 +121,7 @@
 		910000000000000000000003 /* DiagnosticLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000003 /* DiagnosticLog.swift */; };
 		910000000000000000000004 /* OtherSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000004 /* OtherSettingsView.swift */; };
 		A33CD8A8E6A3506C76480EC1 /* LibraryTransferViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3B2125A2F9CCF18E7463BEB /* LibraryTransferViews.swift */; };
+		AD2F1902159E3B91DF586775 /* LocalBackupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE84C9A84D096360A9A657E8 /* LocalBackupView.swift */; };
 		910000000000000000000005 /* DiagnosticLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000005 /* DiagnosticLogView.swift */; };
 		910000000000000000000006 /* AboutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000006 /* AboutView.swift */; };
 		910000000000000000000007 /* AppDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000007 /* AppDiagnostics.swift */; };
@@ -242,6 +245,8 @@
 		C2000000000000000000001E /* BookUpdateCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookUpdateCoordinator.swift; sourceTree = "<group>"; };
 		C2000000000000000000001F /* BookSourceSwitchService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookSourceSwitchService.swift; sourceTree = "<group>"; };
 		C20000000000000000000020 /* LegadoDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegadoDatabase.swift; sourceTree = "<group>"; };
+		743A66F692422ADC6EBFE2E9 /* LibrarySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibrarySnapshot.swift; sourceTree = "<group>"; };
+		6678CF12858C0B7119623CBA /* LibraryBackupArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryBackupArchive.swift; sourceTree = "<group>"; };
 		C20000000000000000000021 /* BookSourceHeaderResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookSourceHeaderResolver.swift; sourceTree = "<group>"; };
 		C20000000000000000000022 /* DifferentialSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DifferentialSnapshot.swift; sourceTree = "<group>"; };
 		C20000000000000000000023 /* ConfigurationRepositories.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationRepositories.swift; sourceTree = "<group>"; };
@@ -265,6 +270,7 @@
 		E20000000000000000000003 /* DiagnosticLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLog.swift; sourceTree = "<group>"; };
 		E20000000000000000000004 /* OtherSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OtherSettingsView.swift; sourceTree = "<group>"; };
 		B3B2125A2F9CCF18E7463BEB /* LibraryTransferViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryTransferViews.swift; sourceTree = "<group>"; };
+		EE84C9A84D096360A9A657E8 /* LocalBackupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalBackupView.swift; sourceTree = "<group>"; };
 		E20000000000000000000005 /* DiagnosticLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLogView.swift; sourceTree = "<group>"; };
 		E20000000000000000000006 /* AboutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutView.swift; sourceTree = "<group>"; };
 		E20000000000000000000007 /* AppDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDiagnostics.swift; sourceTree = "<group>"; };
@@ -509,6 +515,8 @@
 				C2000000000000000000001B /* ReadingActivityRepository.swift */,
 				C2000000000000000000001D /* BookChapterRepository.swift */,
 				C20000000000000000000020 /* LegadoDatabase.swift */,
+				743A66F692422ADC6EBFE2E9 /* LibrarySnapshot.swift */,
+				6678CF12858C0B7119623CBA /* LibraryBackupArchive.swift */,
 				C20000000000000000000023 /* ConfigurationRepositories.swift */,
 				C20000000000000000000025 /* RSSRepository.swift */,
 			);
@@ -644,6 +652,7 @@
 			children = (
 				E20000000000000000000004 /* OtherSettingsView.swift */,
 				B3B2125A2F9CCF18E7463BEB /* LibraryTransferViews.swift */,
+				EE84C9A84D096360A9A657E8 /* LocalBackupView.swift */,
 				E20000000000000000000005 /* DiagnosticLogView.swift */,
 				E20000000000000000000006 /* AboutView.swift */,
 				E20000000000000000000007 /* AppDiagnostics.swift */,
@@ -779,6 +788,7 @@
 				910000000000000000000005 /* DiagnosticLogView.swift in Sources */,
 				910000000000000000000004 /* OtherSettingsView.swift in Sources */,
 				A33CD8A8E6A3506C76480EC1 /* LibraryTransferViews.swift in Sources */,
+				AD2F1902159E3B91DF586775 /* LocalBackupView.swift in Sources */,
 				910000000000000000000003 /* DiagnosticLog.swift in Sources */,
 				910000000000000000000002 /* HostsHTTPTransport.swift in Sources */,
 				910000000000000000000001 /* ApplicationSettings.swift in Sources */,
@@ -874,6 +884,8 @@
 				C1000000000000000000001F /* BookSourceSwitchService.swift in Sources */,
 				C1000000000000000000002D /* AddBookURLService.swift in Sources */,
 				C10000000000000000000020 /* LegadoDatabase.swift in Sources */,
+				E8FB28D1728A0D3405C11FAE /* LibrarySnapshot.swift in Sources */,
+				18831411B5BFB2363058FB95 /* LibraryBackupArchive.swift in Sources */,
 				C10000000000000000000021 /* BookSourceHeaderResolver.swift in Sources */,
 				C10000000000000000000022 /* DifferentialSnapshot.swift in Sources */,
 				C10000000000000000000023 /* ConfigurationRepositories.swift in Sources */,

@@ -62,6 +62,11 @@ final class ReadingActivityModel: ObservableObject {
         service.displayedSummaries(readRecords, searchKey: searchKey, sortMode: sortMode)
     }
 
+    func waitForLibraryWrites() async {
+        await bookmarkSaveTask?.value
+        await recordSaveTask?.value
+    }
+
     func load() async {
         let bookmarkGeneration = bookmarkSaveGeneration
         let recordGeneration = recordSaveGeneration
